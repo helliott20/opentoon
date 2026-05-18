@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenToon Studio</title>
+<link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+<div id="menubar"></div>
+
+<div id="workspace">
+  <div id="toolbar"></div>
+
+  <div id="stage">
+    <div id="viewport">
+      <canvas id="canvas"></canvas>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div id="viewbar"></div>
+  </div>
+
+  <div id="sidebar">
+    <div id="colorpanel" class="panel"></div>
+    <div id="toolopts" class="panel"></div>
+    <div id="layerpanel" class="panel"></div>
+  </div>
+</div>
+
+<div id="timeline"></div>
+<div id="statusbar"></div>
+
+<div id="modal-root"></div>
+
+<script src="src/core.js"></script>
+<script src="src/palette.js"></script>
+<script src="src/gif.js"></script>
+<script src="src/vector.js"></script>
+<script src="src/canvas.js"></script>
+<script src="src/tools.js"></script>
+<script src="src/timeline.js"></script>
+<script src="src/playback.js"></script>
+<script src="src/io.js"></script>
+<script src="src/ui.js"></script>
+<script src="src/main.js"></script>
+</body>
+</html>

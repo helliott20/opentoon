@@ -1,0 +1,53 @@
+{
+  "name": "opentoon",
+  "version": "1.0.0",
+  "description": "An open-source 2D animation studio for Windows, inspired by Toon Boom Harmony.",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "electron . --dev",
+    "start": "electron .",
+    "dist": "electron-builder --win --publish never",
+    "publish": "electron-builder --win --publish always",
+    "test": "node tests/browsertest.cjs && node tests/vector.cjs && node tests/visual.cjs"
+  },
+  "keywords": ["animation", "2d", "toonboom", "opentoon"],
+  "author": "OpenToon",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "playwright-core": "^1.60.0"
+  },
+  "build": {
+    "appId": "com.opentoon.studio",
+    "productName": "OpenToon Studio",
+    "files": [
+      "index.html",
+      "src/**/*",
+      "styles/**/*",
+      "electron/**/*"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "helliott20",
+        "repo": "opentoon"
+      }
+    ]
+  }
+}

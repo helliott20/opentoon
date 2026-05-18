@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.otoon
+*.log
+tests/*.png
+.DS_Store
+Thumbs.db

@@ -1,0 +1,407 @@
+/* OpenToon Studio - stage renderer, viewport, compositing, input */
+(function (OT) {
+  'use strict';
+  const U = OT.util;
+
+  class Stage {
+    constructor(app) {
+      this.app = app;
+      this.canvas = document.getElementById('canvas');
+      this.overlay = document.getElementById('overlay');
+      this.viewport = document.getElementById('viewport');
+      this.ctx = this.canvas.getContext('2d');
+      this.octx = this.overlay.getContext('2d');
+      this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+      this.view = { zoom: 1, x: 0, y: 0 };
+      this.flipH = false;
+      this.flipV = false;
+      this.cursorPt = null;       // last project-space pointer pos
+      this._tmp = document.createElement('canvas');
+      this._flat = document.createElement('canvas');
+      this._panning = false;
+      this._spaceDown = false;
+
+      this._installResize();
+      this._installInput();
+      app.on('render', () => this.render());
+      app.on('overlayrender', () => this.renderOverlay());
+    }
+
+    /* ---------------- sizing ---------------- */
+    _installResize() {
+      const ro = new ResizeObserver(() => this.resize());
+      ro.observe(this.viewport);
+      window.addEventListener('resize', () => this.resize());
+    }
+    resize() {
+      const r = this.viewport.getBoundingClientRect();
+      this.cw = Math.max(1, Math.round(r.width));
+      this.ch = Math.max(1, Math.round(r.height));
+      for (const c of [this.canvas, this.overlay]) {
+        c.style.width = this.cw + 'px';
+        c.style.height = this.ch + 'px';
+        c.width = Math.round(this.cw * this.dpr);
+        c.height = Math.round(this.ch * this.dpr);
+      }
+      if (!this._fitOnce) { this.fitToCamera(); this._fitOnce = true; }
+      this.render();
+    }
+
+    fitToCamera() {
+      const p = this.app.project;
+      const z = Math.min(this.cw / p.width, this.ch / p.height) * 0.86;
+      this.view.zoom = U.clamp(z, 0.02, 32);
+      this.view.x = (this.cw - p.width * this.view.zoom) / 2;
+      this.view.y = (this.ch - p.height * this.view.zoom) / 2;
+      this.render();
+    }
+
+    /* ---------------- coord mapping ---------------- */
+    _rawView(sx, sy) {
+      const r = this.canvas.getBoundingClientRect();
+      let x = sx - r.left, y = sy - r.top;
+      if (this.flipH) x = this.cw - x;
+      if (this.flipV) y = this.ch - y;
+      return { x, y };
+    }
+    screenToProject(sx, sy) {
+      const v = this._rawView(sx, sy);
+      return {
+        x: (v.x - this.view.x) / this.view.zoom,
+        y: (v.y - this.view.y) / this.view.zoom
+      };
+    }
+    projectToScreen(px, py) {
+      let x = this.view.x + px * this.view.zoom;
+      let y = this.view.y + py * this.view.zoom;
+      if (this.flipH) x = this.cw - x;
+      if (this.flipV) y = this.ch - y;
+      return { x, y };
+    }
+    _applyView(ctx) {
+      const d = this.dpr, z = this.view.zoom;
+      const ax = this.flipH ? -d * z : d * z;
+      const ex = this.flipH ? d * (this.cw - this.view.x) : d * this.view.x;
+      const ay = this.flipV ? -d * z : d * z;
+      const ey = this.flipV ? d * (this.ch - this.view.y) : d * this.view.y;
+      ctx.setTransform(ax, 0, 0, ay, ex, ey);
+    }
+
+    zoomAt(sx, sy, factor) {
+      const v = this._rawView(sx, sy);
+      const before = {
+        x: (v.x - this.view.x) / this.view.zoom,
+        y: (v.y - this.view.y) / this.view.zoom
+      };
+      this.view.zoom = U.clamp(this.view.zoom * factor, 0.02, 32);
+      this.view.x = v.x - before.x * this.view.zoom;
+      this.view.y = v.y - before.y * this.view.zoom;
+      this.render();
+    }
+    panBy(dx, dy) {
+      this.view.x += this.flipH ? -dx : dx;
+      this.view.y += this.flipV ? -dy : dy;
+      this.render();
+    }
+
+    /* ---------------- compositing ---------------- */
+    // Draw bg + all visible layers at `frame` onto ctx already in project coords.
+    compositeStage(frame, ctx, opts) {
+      opts = opts || {};
+      const p = this.app.project;
+      if (opts.bg !== false) {
+        ctx.fillStyle = p.bg;
+        ctx.fillRect(0, 0, p.width, p.height);
+      }
+      const px = p.width / 2, py = p.height / 2;
+      for (const layer of p.layers) {
+        if (!layer.visible) continue;
+        if (layer.type === 'video') {
+          const v = layer.videoEl;
+          if (v && v.readyState >= 2 && v.videoWidth) {
+            const tr = layer.transformAt(frame);
+            ctx.save();
+            ctx.globalAlpha = layer.opacity;
+            if (tr.x || tr.y || tr.rot || tr.sx !== 1 || tr.sy !== 1) {
+              ctx.translate(tr.x + px, tr.y + py);
+              ctx.rotate(tr.rot * Math.PI / 180);
+              ctx.scale(tr.sx, tr.sy);
+              ctx.translate(-px, -py);
+            }
+            const sc = Math.min(p.width / v.videoWidth, p.height / v.videoHeight);
+            const vw = v.videoWidth * sc, vh = v.videoHeight * sc;
+            ctx.drawImage(v, (p.width - vw) / 2, (p.height - vh) / 2, vw, vh);
+            ctx.restore();
+          }
+          continue;
+        }
+        const cel = layer.celAt(frame);
+        if (!cel) continue;
+        const tr = layer.transformAt(frame);
+        ctx.save();
+        ctx.globalAlpha = layer.opacity;
+        if (tr.x || tr.y || tr.rot || tr.sx !== 1 || tr.sy !== 1) {
+          ctx.translate(tr.x + px, tr.y + py);
+          ctx.rotate(tr.rot * Math.PI / 180);
+          ctx.scale(tr.sx, tr.sy);
+          ctx.translate(-px, -py);
+        }
+        ctx.drawImage(cel.canvas, 0, 0, p.width, p.height);
+        ctx.restore();
+      }
+      ctx.globalAlpha = 1;
+    }
+    _layerXform(ctx, layer, frame) {
+      const p = this.app.project, px = p.width / 2, py = p.height / 2;
+      const tr = layer.transformAt(frame);
+      if (tr.x || tr.y || tr.rot || tr.sx !== 1 || tr.sy !== 1) {
+        ctx.translate(tr.x + px, tr.y + py);
+        ctx.rotate(tr.rot * Math.PI / 180);
+        ctx.scale(tr.sx, tr.sy);
+        ctx.translate(-px, -py);
+      }
+    }
+
+    _tinted(cel, color) {
+      const t = this._tmp;
+      t.width = cel.w; t.height = cel.h;
+      const x = t.getContext('2d');
+      x.setTransform(1, 0, 0, 1, 0, 0);
+      x.clearRect(0, 0, cel.w, cel.h);
+      x.globalCompositeOperation = 'source-over';
+      x.drawImage(cel.canvas, 0, 0);
+      x.globalCompositeOperation = 'source-in';
+      x.fillStyle = color;
+      x.fillRect(0, 0, cel.w, cel.h);
+      x.globalCompositeOperation = 'source-over';
+      return t;
+    }
+
+    _drawOnion(ctx) {
+      const app = this.app, o = app.onion;
+      if (!o.on || app.playback.playing) return;
+      const layer = app.activeLayer();
+      if (!layer) return;
+      const f = app.frame;
+      const drawSet = (count, dir, color) => {
+        for (let i = 1; i <= count; i++) {
+          const fr = f + dir * i;
+          if (fr < 0 || fr >= app.project.frameCount) break;
+          const cel = layer.celAt(fr);
+          if (!cel) continue;
+          const a = U.lerp(o.maxAlpha, o.minAlpha, (i - 1) / Math.max(1, count - 1));
+          ctx.globalAlpha = a;
+          ctx.save();
+          this._layerXform(ctx, layer, fr);
+          ctx.drawImage(this._tinted(cel, color), 0, 0,
+            this.app.project.width, this.app.project.height);
+          ctx.restore();
+        }
+      };
+      drawSet(o.prev, -1, o.prevColor);
+      drawSet(o.next, 1, o.nextColor);
+      ctx.globalAlpha = 1;
+    }
+
+    /* ---------------- render ---------------- */
+    render() {
+      const ctx = this.ctx, p = this.app.project;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      this._applyView(ctx);
+      ctx.imageSmoothingEnabled = this.view.zoom < 3;
+
+      // paper drop shadow
+      ctx.save();
+      ctx.shadowColor = '#000a';
+      ctx.shadowBlur = 14 / this.view.zoom;
+      ctx.fillStyle = p.bg;
+      ctx.fillRect(0, 0, p.width, p.height);
+      ctx.restore();
+
+      this._drawOnion(ctx);
+      this.compositeStage(this.app.frame, ctx, { bg: false });
+
+      // active tool may draw on the cel directly; nothing else here
+      this.renderOverlay();
+    }
+
+    renderOverlay() {
+      const ctx = this.octx, p = this.app.project;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, this.overlay.width, this.overlay.height);
+      this._applyView(ctx);
+
+      // paper border
+      ctx.lineWidth = 1 / this.view.zoom;
+      ctx.strokeStyle = '#0008';
+      ctx.strokeRect(0, 0, p.width, p.height);
+
+      if (this.app.grid && this.app.grid.on) this._drawGrid(ctx);
+      if (this.app.symmetry && this.app.symmetry.on) this._drawSymmetry(ctx);
+      if (this.app.showCamera !== false) this._drawCameraGuide(ctx);
+
+      // active tool preview
+      if (this.app.tools) this.app.tools.drawOverlay(ctx);
+
+      // brush cursor
+      this._drawCursor(ctx);
+    }
+
+    cameraCorners(frame) {
+      const p = this.app.project, c = p.cameraAt(frame);
+      const cx = p.width / 2 + c.x, cy = p.height / 2 + c.y;
+      const hw = p.width / (2 * c.zoom), hh = p.height / (2 * c.zoom);
+      const rad = c.rot * Math.PI / 180, cs = Math.cos(rad), sn = Math.sin(rad);
+      const pts = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]];
+      return pts.map(([x, y]) => ({ x: cx + x * cs - y * sn, y: cy + x * sn + y * cs }));
+    }
+    _drawCameraGuide(ctx) {
+      const co = this.cameraCorners(this.app.frame);
+      ctx.save();
+      ctx.lineWidth = 1.6 / this.view.zoom;
+      ctx.setLineDash([7 / this.view.zoom, 5 / this.view.zoom]);
+      ctx.strokeStyle = '#f0a93d';
+      ctx.beginPath();
+      ctx.moveTo(co[0].x, co[0].y);
+      for (let i = 1; i < 4; i++) ctx.lineTo(co[i].x, co[i].y);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // corner ticks
+      ctx.fillStyle = '#f0a93d';
+      const r = 3 / this.view.zoom;
+      for (const pt of co) { ctx.beginPath(); ctx.arc(pt.x, pt.y, r, 0, 7); ctx.fill(); }
+      ctx.restore();
+    }
+
+    _drawGrid(ctx) {
+      const p = this.app.project, g = this.app.grid;
+      ctx.save();
+      ctx.lineWidth = 1 / this.view.zoom;
+      ctx.strokeStyle = 'rgba(0,0,0,0.16)';
+      ctx.beginPath();
+      for (let x = g.size; x < p.width; x += g.size) { ctx.moveTo(x, 0); ctx.lineTo(x, p.height); }
+      for (let y = g.size; y < p.height; y += g.size) { ctx.moveTo(0, y); ctx.lineTo(p.width, y); }
+      ctx.stroke();
+      if (g.guides) {
+        ctx.strokeStyle = 'rgba(74,159,212,0.55)';
+        ctx.beginPath();
+        for (let i = 1; i < 3; i++) {
+          ctx.moveTo(p.width * i / 3, 0); ctx.lineTo(p.width * i / 3, p.height);
+          ctx.moveTo(0, p.height * i / 3); ctx.lineTo(p.width, p.height * i / 3);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    _drawSymmetry(ctx) {
+      const p = this.app.project, s = this.app.symmetry, z = this.view.zoom;
+      ctx.save();
+      ctx.lineWidth = 1.5 / z;
+      ctx.strokeStyle = 'rgba(232,162,58,0.85)';
+      ctx.setLineDash([8 / z, 6 / z]);
+      ctx.beginPath();
+      if (s.axis === 'v') { ctx.moveTo(p.width / 2, 0); ctx.lineTo(p.width / 2, p.height); }
+      else { ctx.moveTo(0, p.height / 2); ctx.lineTo(p.width, p.height / 2); }
+      ctx.stroke();
+      ctx.restore();
+    }
+    _drawCursor(ctx) {
+      const t = this.app.tools && this.app.tools.active;
+      if (!t || !this.cursorPt || !t.cursorRadius) return;
+      const rad = t.cursorRadius(this.app);
+      if (!rad) return;
+      ctx.save();
+      ctx.lineWidth = 1 / this.view.zoom;
+      ctx.strokeStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(this.cursorPt.x, this.cursorPt.y, rad, 0, 7);
+      ctx.stroke();
+      ctx.strokeStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(this.cursorPt.x, this.cursorPt.y, rad + 1 / this.view.zoom, 0, 7);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    /* ---------------- color sampling ---------------- */
+    sampleColor(px, py) {
+      const p = this.app.project;
+      px = Math.floor(px); py = Math.floor(py);
+      if (px < 0 || py < 0 || px >= p.width || py >= p.height) return null;
+      this._flat.width = p.width; this._flat.height = p.height;
+      const fx = this._flat.getContext('2d', { willReadFrequently: true });
+      fx.setTransform(1, 0, 0, 1, 0, 0);
+      this.compositeStage(this.app.frame, fx);
+      const d = fx.getImageData(px, py, 1, 1).data;
+      return U.rgbToHex(d[0], d[1], d[2]);
+    }
+
+    /* ---------------- input ---------------- */
+    _installInput() {
+      const c = this.canvas;
+      const evt = e => {
+        const pt = this.screenToProject(e.clientX, e.clientY);
+        pt.pressure = (e.pointerType === 'pen') ? (e.pressure || 0.5) : 1;
+        pt.shift = e.shiftKey; pt.alt = e.altKey; pt.ctrl = e.ctrlKey;
+        pt.button = e.button; pt.sx = e.clientX; pt.sy = e.clientY;
+        return pt;
+      };
+
+      c.addEventListener('pointerdown', e => {
+        c.setPointerCapture(e.pointerId);
+        const pt = evt(e);
+        this.cursorPt = pt;
+        // middle / right button = pan
+        if (e.button === 1 || e.button === 2) {
+          this._panning = { sx: e.clientX, sy: e.clientY, vx: this.view.x, vy: this.view.y };
+          return;
+        }
+        this.app.tools.pointerDown(pt, e);
+      });
+
+      c.addEventListener('pointermove', e => {
+        if (this._panning) {
+          const dx = e.clientX - this._panning.sx, dy = e.clientY - this._panning.sy;
+          this.view.x = this._panning.vx + (this.flipH ? -dx : dx);
+          this.view.y = this._panning.vy + (this.flipV ? -dy : dy);
+          this.render();
+          return;
+        }
+        const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+        let pt;
+        for (const ce of events) {
+          pt = this.screenToProject(ce.clientX, ce.clientY);
+          pt.pressure = (ce.pointerType === 'pen') ? (ce.pressure || 0.5) : 1;
+          pt.shift = e.shiftKey; pt.alt = e.altKey; pt.ctrl = e.ctrlKey;
+          this.app.tools.pointerMove(pt, e);
+        }
+        this.cursorPt = pt || this.screenToProject(e.clientX, e.clientY);
+        if (!this.app.tools.dragging) this.renderOverlay();
+        this.app.ui.setCoord(this.cursorPt);
+      });
+
+      const end = e => {
+        if (this._panning) { this._panning = false; return; }
+        const pt = evt(e);
+        this.app.tools.pointerUp(pt, e);
+      };
+      c.addEventListener('pointerup', end);
+      c.addEventListener('pointercancel', end);
+      c.addEventListener('pointerleave', () => { this.cursorPt = null; this.renderOverlay(); });
+      c.addEventListener('contextmenu', e => e.preventDefault());
+
+      c.addEventListener('wheel', e => {
+        e.preventDefault();
+        if (e.ctrlKey || true) {
+          const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+          this.zoomAt(e.clientX, e.clientY, f);
+        }
+      }, { passive: false });
+
+    }
+  }
+
+  OT.Stage = Stage;
+})(window.OT);
