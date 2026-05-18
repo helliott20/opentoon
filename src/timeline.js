@@ -63,6 +63,11 @@
       const app = this.app;
       this.root.innerHTML = '';
 
+      // resize handle - drag the top edge to grow / shrink the timeline
+      const resizer = U.el('div', { class: 'tl-resizer', title: 'Drag to resize the timeline' });
+      this.root.appendChild(resizer);
+      this._installResizer(resizer);
+
       // toolbar
       const tb = U.el('div', { class: 'tl-toolbar' });
       this.root.appendChild(tb);
@@ -134,6 +139,28 @@
         this.namesInner.style.transform = 'translateY(' + (-this.gridWrap.scrollTop) + 'px)';
       });
       this._installGridInput();
+    }
+
+    _installResizer(handle) {
+      const tl = this.root;
+      let drag = null;
+      handle.addEventListener('pointerdown', e => {
+        try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+        drag = { y: e.clientY, h: tl.getBoundingClientRect().height };
+        e.preventDefault();
+      });
+      handle.addEventListener('pointermove', e => {
+        if (!drag) return;
+        // dragging up grows the timeline, down shrinks it
+        const max = Math.max(160, window.innerHeight - 260);
+        const h = U.clamp(drag.h + (drag.y - e.clientY), 120, max);
+        tl.style.height = h + 'px';
+        tl.style.flexBasis = h + 'px';
+        this.render();
+      });
+      const stop = () => { drag = null; };
+      handle.addEventListener('pointerup', stop);
+      handle.addEventListener('pointercancel', stop);
     }
 
     _runAt(layer, f) {

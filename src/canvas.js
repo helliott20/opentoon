@@ -341,6 +341,14 @@
     /* ---------------- input ---------------- */
     _installInput() {
       const c = this.canvas;
+
+      // Some tablet drivers (notably Wacom on Windows) emit pointer events --
+      // especially coalesced ones -- carrying bogus (0,0) or non-finite
+      // coordinates. Drawing through those makes strokes spike to the
+      // top-left corner, so every event is validated before it is trusted.
+      const usable = e => !!e && isFinite(e.clientX) && isFinite(e.clientY) &&
+        !(e.clientX === 0 && e.clientY === 0);
+
       const evt = e => {
         const pt = this.screenToProject(e.clientX, e.clientY);
         pt.pressure = (e.pointerType === 'pen') ? (e.pressure || 0.5) : 1;
@@ -350,7 +358,8 @@
       };
 
       c.addEventListener('pointerdown', e => {
-        c.setPointerCapture(e.pointerId);
+        if (!usable(e)) return;
+        try { c.setPointerCapture(e.pointerId); } catch (_) {}
         const pt = evt(e);
         this.cursorPt = pt;
         // middle / right button = pan
@@ -369,22 +378,32 @@
           this.render();
           return;
         }
-        const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+        // Prefer coalesced events for smooth high-frequency strokes, but keep
+        // only the ones with real coordinates; fall back to the event itself.
+        let batch = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
+        batch = batch.filter(usable);
+        if (!batch.length && usable(e)) batch = [e];
+        if (!batch.length) return;            // nothing trustworthy this frame
         let pt;
-        for (const ce of events) {
+        for (const ce of batch) {
           pt = this.screenToProject(ce.clientX, ce.clientY);
           pt.pressure = (ce.pointerType === 'pen') ? (ce.pressure || 0.5) : 1;
           pt.shift = e.shiftKey; pt.alt = e.altKey; pt.ctrl = e.ctrlKey;
           this.app.tools.pointerMove(pt, e);
         }
-        this.cursorPt = pt || this.screenToProject(e.clientX, e.clientY);
+        this.cursorPt = pt;
         if (!this.app.tools.dragging) this.renderOverlay();
         this.app.ui.setCoord(this.cursorPt);
       });
 
       const end = e => {
         if (this._panning) { this._panning = false; return; }
-        const pt = evt(e);
+        // A bogus (0,0) pointerup must not drag the final stroke point to the
+        // corner -- fall back to the last good position instead.
+        let pt;
+        if (usable(e)) pt = evt(e);
+        else if (this.cursorPt) pt = Object.assign({}, this.cursorPt, { button: e.button });
+        else pt = { x: 0, y: 0, pressure: 0, button: e.button };
         this.app.tools.pointerUp(pt, e);
       };
       c.addEventListener('pointerup', end);

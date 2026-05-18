@@ -46,7 +46,8 @@
       {
         "provider": "github",
         "owner": "helliott20",
-        "repo": "opentoon"
+        "repo": "opentoon",
+        "releaseType": "release"
       }
     ]
   }

@@ -95,7 +95,7 @@ input,select{font:inherit;}
   background:
     repeating-conic-gradient(#1a1c20 0% 25%,#202329 0% 50%) 50%/22px 22px;
 }
-#canvas,#overlay{position:absolute;top:0;left:0;}
+#canvas,#overlay{position:absolute;top:0;left:0;touch-action:none;}
 #overlay{pointer-events:none;}
 #viewbar{
   height:26px;flex:0 0 26px;background:var(--panel);
@@ -233,6 +233,19 @@ input[type=range]::-webkit-slider-thumb{
   background:var(--panel);border-top:1px solid var(--edge);
   display:flex;flex-direction:column;overflow:hidden;
 }
+.tl-resizer{
+  height:7px;flex:0 0 7px;
+  background:var(--panel2);
+  cursor:ns-resize;touch-action:none;
+  position:relative;
+}
+.tl-resizer::after{
+  content:"";position:absolute;left:50%;top:50%;
+  width:34px;height:2px;margin:-1px 0 0 -17px;
+  background:var(--edge);border-radius:1px;
+}
+.tl-resizer:hover{background:var(--accent);}
+.tl-resizer:hover::after{background:#fff;}
 .tl-toolbar{
   height:28px;flex:0 0 28px;background:var(--panel2);
   border-bottom:1px solid var(--edge);
