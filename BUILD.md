@@ -96,6 +96,23 @@ update in the background and offers to restart.
 
 That's it. Installed copies update themselves.
 
+## Installing it
+
+- **You:** run `dist\OpenToon Studio Setup <version>.exe` (created by `npm run dist`
+  / `npm run publish`).
+- **Your friend:** send them
+  https://github.com/helliott20/opentoon/releases/latest — they download and run
+  `OpenToon Studio Setup ….exe`. Windows SmartScreen warns about an unsigned app
+  the first time: **More info → Run anyway** (one-time).
+- After installing once, updates are automatic — see OTA section above.
+
+## Troubleshooting
+
+**`npm run publish` fails extracting `winCodeSign` ("required privilege not held"):**
+Windows blocks symlink creation for non-admins. Fix it once by turning on
+**Settings → System → For developers → Developer Mode**, then re-run. (The build
+cache is already primed on this machine, so it should not recur here.)
+
 ## Notes
 
 - The app itself has **zero runtime dependencies** — it's plain HTML/CSS/JS.
