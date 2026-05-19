@@ -180,6 +180,7 @@
         ]],
         ['Help', [
           { label: 'Keyboard Shortcuts…', fn: () => this.shortcutsDialog() },
+          { label: 'Scripting Console…', fn: () => this.scriptConsole() },
           { label: 'About OpenToon', fn: () => this.aboutDialog() }
         ]]
       ];
@@ -1072,6 +1073,58 @@
           label: 'Close', primary: true,
           fn: () => { window.removeEventListener('keydown', onCapture, true); }
         }
+      ]);
+    }
+    // A small JavaScript console for automating the app (`app` / `OT` in scope).
+    scriptConsole() {
+      const a = this.app;
+      let last = '';
+      try { last = localStorage.getItem('opentoon.script') || ''; } catch (e) { /* ignore */ }
+      const input = el('textarea', { spellcheck: 'false' });
+      input.value = last ||
+        '// `app` and `OT` are in scope. Use return to show a value.\n' +
+        '// e.g. add a layer:  app.addLayer(\'vector\')\n' +
+        'return app.project.layers.length + \' layers, \' + app.project.frameCount + \' frames\';';
+      Object.assign(input.style, {
+        width: '470px', height: '170px', background: 'var(--panel3)', color: 'var(--text)',
+        border: '1px solid var(--edge)', borderRadius: '4px', padding: '8px',
+        fontFamily: '"JetBrains Mono",ui-monospace,Consolas,monospace', fontSize: '12px',
+        resize: 'vertical', lineHeight: '1.5'
+      });
+      const output = el('pre', {});
+      Object.assign(output.style, {
+        minHeight: '52px', maxHeight: '150px', overflow: 'auto', margin: '0',
+        background: 'var(--bg)', border: '1px solid var(--edge)', borderRadius: '4px',
+        padding: '8px', fontFamily: '"JetBrains Mono",ui-monospace,Consolas,monospace',
+        fontSize: '12px', whiteSpace: 'pre-wrap', color: 'var(--text-dim)'
+      });
+      output.textContent = 'Output appears here.';
+      const run = () => {
+        let res, ok = true;
+        try {
+          res = (new Function('app', 'OT', input.value))(a, OT);
+          if (res === undefined) res = 'OK (no return value)';
+          else if (res && typeof res === 'object') {
+            try { res = JSON.stringify(res, null, 2); } catch (e) { res = String(res); }
+          }
+        } catch (e) { res = e.name + ': ' + e.message; ok = false; }
+        output.textContent = String(res);
+        output.style.color = ok ? 'var(--ok)' : 'var(--hot)';
+        try { localStorage.setItem('opentoon.script', input.value); } catch (e) { /* ignore */ }
+        a.emitAll();
+      };
+      input.addEventListener('keydown', e => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+      });
+      const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } }, [
+        el('div', { class: 'chk-row', text: 'Run JavaScript against the app — Ctrl+Enter also runs.' }),
+        input,
+        el('div', { class: 'chk-row', text: 'Output' }),
+        output
+      ]);
+      this.modal('Scripting Console', body, [
+        { label: 'Run', primary: true, fn: () => { run(); return false; } },
+        { label: 'Close' }
       ]);
     }
     aboutDialog() {
