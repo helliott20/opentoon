@@ -92,6 +92,8 @@
           { label: 'Zoom Out', sc: '-', fn: () => a.stage.zoomAt(innerWidth / 2, innerHeight / 2, 0.8) },
           { label: 'Reset Zoom 100%', fn: () => this._zoom100() },
           { sep: 1 },
+          { label: (a.cleanView ? '✓ ' : '') + 'Clean Canvas (hide panels)', sc: 'Tab', fn: () => a.toggleCleanView() },
+          { sep: 1 },
           { label: (a.showCamera ? '✓ ' : '') + 'Camera Guide', fn: () => a.toggleCamera() },
           { label: (a.onion.on ? '✓ ' : '') + 'Onion Skin', fn: () => a.toggleOnion() },
           { label: 'Onion Skin Settings…', fn: () => this.onionDialog() },

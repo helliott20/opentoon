@@ -375,6 +375,12 @@ input[type=range]::-webkit-slider-thumb{
 
 .hidden{display:none!important;}
 
+/* ---------- Clean Canvas (distraction-free) ---------- */
+body.clean-view #sidebar,
+body.clean-view #timeline,
+body.clean-view #statusbar,
+body.clean-view #viewbar{display:none;}
+
 /* ---------- Brand ---------- */
 .brand-wordmark{
   font-family:"Space Grotesk","Segoe UI",system-ui,sans-serif;

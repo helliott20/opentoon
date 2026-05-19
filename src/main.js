@@ -51,6 +51,7 @@
         minAlpha: 0.12, maxAlpha: 0.42
       };
       this.showCamera = true;
+      this.cleanView = false;
       this.grid = { on: false, size: 64, guides: false };
       this.symmetry = { on: false, axis: 'v' };
 
@@ -568,6 +569,15 @@
       this.emit('render');
       this.ui.status('Symmetry drawing ' + (this.symmetry.on ? 'on' : 'off'));
     }
+    // distraction-free drawing -- hide the side panels, timeline and bars
+    toggleCleanView() {
+      this.cleanView = !this.cleanView;
+      document.body.classList.toggle('clean-view', this.cleanView);
+      if (this.stage) this.stage.resize();
+      this.ui.status(this.cleanView
+        ? 'Clean canvas - press Tab to restore the panels'
+        : 'Panels restored');
+    }
 
     /* ---------------- audio ---------------- */
     _audioContext() {
@@ -953,6 +963,7 @@
         }
 
         if (TOOLKEYS[k] && !ev.repeat) { this.tools.select(TOOLKEYS[k]); return; }
+        if (k === 'tab' && !ev.repeat) { ev.preventDefault(); this.toggleCleanView(); return; }
         if (k === 'enter' && !ev.repeat) { ev.preventDefault(); this.playback.toggle(); return; }
         if (k === ' ') { ev.preventDefault(); if (!ev.repeat) this.playback.toggle(); return; }
         if (k === ',') { this.playback.step(-1); return; }
