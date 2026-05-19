@@ -1,6 +1,6 @@
 /* OpenToon Studio - Electron main process (desktop app + OTA updates) */
 'use strict';
-const { app, BrowserWindow, Menu, shell, dialog } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -54,6 +54,11 @@ function watchForDev() {
 }
 
 /* ---- OTA auto-update (electron-updater + GitHub Releases) ---- */
+function sendUpdateStatus(state, data) {
+  if (win && !win.isDestroyed())
+    win.webContents.send('opentoon:update-status', Object.assign({ state }, data || {}));
+}
+
 function setupUpdates() {
   if (isDev) return;
   let autoUpdater;
@@ -65,7 +70,15 @@ function setupUpdates() {
   }
   updater = autoUpdater;
   autoUpdater.autoDownload = true;
+  // forward the update lifecycle to the renderer so the About dialog can show it
+  autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking'));
+  autoUpdater.on('update-available', info =>
+    sendUpdateStatus('available', { version: info && info.version }));
+  autoUpdater.on('update-not-available', () => sendUpdateStatus('uptodate'));
+  autoUpdater.on('download-progress', p =>
+    sendUpdateStatus('downloading', { percent: Math.round((p && p.percent) || 0) }));
   autoUpdater.on('update-downloaded', info => {
+    sendUpdateStatus('downloaded', { version: info && info.version });
     dialog.showMessageBox(win, {
       type: 'info',
       title: 'Update ready',
@@ -75,14 +88,32 @@ function setupUpdates() {
       defaultId: 0
     }).then(r => { if (r.response === 0) autoUpdater.quitAndInstall(); });
   });
-  autoUpdater.on('error', err => console.log('Update check failed:', err && err.message));
+  autoUpdater.on('error', err => {
+    sendUpdateStatus('error', { message: err && err.message });
+    console.log('Update check failed:', err && err.message);
+  });
   try { autoUpdater.checkForUpdatesAndNotify(); } catch (e) { /* offline */ }
   // re-check every 30 minutes while running
   setInterval(() => { try { autoUpdater.checkForUpdates(); } catch (e) {} }, 30 * 60 * 1000);
 }
 
+/* ---- IPC bridge for the renderer (version + manual update check) ---- */
+function setupIpc() {
+  ipcMain.handle('opentoon:get-version', () => app.getVersion());
+  ipcMain.handle('opentoon:check-updates', () => {
+    if (isDev) return { state: 'disabled', reason: 'dev' };
+    if (!updater) return { state: 'disabled', reason: 'unavailable' };
+    try { updater.checkForUpdates(); return { state: 'checking' }; }
+    catch (e) { return { state: 'error', message: e && e.message }; }
+  });
+  ipcMain.on('opentoon:quit-install', () => {
+    if (updater) { try { updater.quitAndInstall(); } catch (e) { /* ignore */ } }
+  });
+}
+
 app.whenReady().then(() => {
   createWindow();
+  setupIpc();
   watchForDev();
   setupUpdates();
   app.on('activate', () => {

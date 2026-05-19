@@ -293,7 +293,13 @@ input[type=range]::-webkit-slider-thumb{
   display:flex;align-items:center;gap:14px;padding:0 10px;
   color:var(--text-dim);font-size:11px;
 }
-#statusbar .st-msg{flex:1;}
+/* the message takes the slack but must be allowed to shrink + ellipsize,
+   otherwise a long message pushes the Pos / Zoom / size readouts off-screen */
+#statusbar .st-msg{
+  flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+#statusbar > div:not(.st-msg){flex:0 0 auto;white-space:nowrap;}
 #statusbar b{color:var(--text);}
 
 /* ---------- Modal ---------- */

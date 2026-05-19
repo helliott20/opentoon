@@ -3,6 +3,22 @@
   'use strict';
   const U = OT.util;
 
+  // ---- vector-stroke transforms used when the canvas is resized ----
+  function scaleStrokes(strokes, sx, sy) {
+    for (const s of strokes) {
+      if (s.pts) s.pts = s.pts.map(p => ({ x: p.x * sx, y: p.y * sy, p: p.p }));
+      if (s.contour) s.contour = s.contour.map(p => ({ x: p.x * sx, y: p.y * sy }));
+      if (s.width != null) s.width *= (sx + sy) / 2;
+      if (s.grow != null) s.grow *= (sx + sy) / 2;
+    }
+  }
+  function shiftStrokes(strokes, dx, dy) {
+    for (const s of strokes) {
+      if (s.pts) s.pts = s.pts.map(p => ({ x: p.x + dx, y: p.y + dy, p: p.p }));
+      if (s.contour) s.contour = s.contour.map(p => ({ x: p.x + dx, y: p.y + dy }));
+    }
+  }
+
   class App extends OT.Emitter {
     constructor() {
       super();
@@ -44,6 +60,7 @@
     /* ---------------- start ---------------- */
     start() {
       this.playback = new OT.Playback(this);
+      this._loadPrefs();
       this.tools = new OT.ToolManager(this);
       this.stage = new OT.Stage(this);
       this.ui = new OT.UI(this);
@@ -58,7 +75,10 @@
       this.timeline.render();
       requestAnimationFrame(() => { this.stage.resize(); this.stage.fitToCamera(); });
 
-      setInterval(() => { if (this.dirty) { if (OT.IO.autosave(this)) this.dirty = false; } }, 20000);
+      setInterval(() => {
+        if (this.dirty && OT.IO.autosave(this)) this.dirty = false;
+        this._savePrefs();
+      }, 20000);
       this._offerAutosave();
       this.ui.status('Welcome to OpenToon Studio - press B to start drawing');
     }
@@ -79,6 +99,31 @@
           }
         }
       ]);
+    }
+
+    /* ---------------- preferences (tool settings persist across sessions) ---- */
+    _loadPrefs() {
+      try {
+        const raw = localStorage.getItem('opentoon.prefs');
+        if (!raw) return;
+        const pr = JSON.parse(raw);
+        if (pr.settings) Object.assign(this.settings, pr.settings);
+        if (pr.onion) Object.assign(this.onion, pr.onion);
+        if (pr.grid) Object.assign(this.grid, pr.grid);
+        if (pr.symmetry) Object.assign(this.symmetry, pr.symmetry);
+        if (typeof pr.showCamera === 'boolean') this.showCamera = pr.showCamera;
+        if (pr.loopMode && this.playback) this.playback.loopMode = pr.loopMode;
+      } catch (e) { /* ignore corrupt prefs */ }
+    }
+    _savePrefs() {
+      try {
+        localStorage.setItem('opentoon.prefs', JSON.stringify({
+          settings: this.settings, onion: this.onion,
+          grid: this.grid, symmetry: this.symmetry,
+          showCamera: this.showCamera,
+          loopMode: this.playback ? this.playback.loopMode : null
+        }));
+      } catch (e) { /* ignore */ }
     }
 
     /* ---------------- state ---------------- */
@@ -767,6 +812,87 @@
       inp.click();
     }
 
+    /* ---------------- canvas resize ---------------- */
+    // Change the project resolution after artwork exists.
+    //   mode 'scale' rescales every drawing so the animation looks identical;
+    //   mode 'crop'  keeps art at its pixel size, centered, cropping / padding.
+    resizeCanvas(nw, nh, mode) {
+      const p = this.project;
+      const ow = p.width, oh = p.height;
+      nw = U.clamp(nw | 0, 16, 8000);
+      nh = U.clamp(nh | 0, 16, 8000);
+      if (nw === ow && nh === oh) return;
+      if (this.tools) this.tools.flush();
+      const sx = nw / ow, sy = nh / oh;
+      const dx = Math.round((nw - ow) / 2), dy = Math.round((nh - oh) / 2);
+
+      // Snapshot cels + transforms by reference so undo/redo can swap them.
+      const capture = () => p.layers.map(l => ({
+        layer: l,
+        cels: Object.assign({}, l.cels),
+        transform: JSON.parse(JSON.stringify(l.transform || { keyframes: [] }))
+      }));
+      const restore = (saved, w, h, cam) => {
+        for (const s of saved) {
+          s.layer.cels = Object.assign({}, s.cels);
+          s.layer.transform = JSON.parse(JSON.stringify(s.transform));
+        }
+        p.width = w; p.height = h;
+        p.camera = JSON.parse(JSON.stringify(cam));
+        this.emitAll();
+        this.stage.fitToCamera();
+        this.ui.refreshProjectInfo();
+      };
+
+      const before = capture();
+      const beforeCam = JSON.parse(JSON.stringify(p.camera));
+
+      for (const l of p.layers) {
+        const nc = {};
+        for (const num in l.cels) {
+          const src = l.cels[num];
+          const cell = new OT.Cel(src.num, nw, nh, src.kind);
+          if (src.kind === 'vector') {
+            cell.strokes = JSON.parse(JSON.stringify(src.strokes || []));
+            if (mode === 'scale') scaleStrokes(cell.strokes, sx, sy);
+            else shiftStrokes(cell.strokes, dx, dy);
+            cell.rebuild();
+          } else if (mode === 'scale') {
+            cell.ctx.drawImage(src.canvas, 0, 0, src.w, src.h, 0, 0, nw, nh);
+          } else {
+            cell.ctx.drawImage(src.canvas, dx, dy);
+          }
+          cell.dirty();
+          nc[num] = cell;
+        }
+        l.cels = nc;
+        if (mode === 'scale' && l.transform && l.transform.keyframes) {
+          for (const k of l.transform.keyframes) {
+            k.x = (k.x || 0) * sx; k.y = (k.y || 0) * sy;
+          }
+        }
+      }
+      if (mode === 'scale') {
+        for (const k of p.camera.keyframes) {
+          k.x = (k.x || 0) * sx; k.y = (k.y || 0) * sy;
+        }
+      }
+      p.width = nw; p.height = nh;
+
+      const after = capture();
+      const afterCam = JSON.parse(JSON.stringify(p.camera));
+      this.history.push({
+        label: 'Resize canvas',
+        undo: () => restore(before, ow, oh, beforeCam),
+        redo: () => restore(after, nw, nh, afterCam)
+      });
+      this.emitAll();
+      this.stage.fitToCamera();
+      this.ui.refreshProjectInfo();
+      this.ui.status('Canvas resized to ' + nw + ' × ' + nh +
+        ' (' + (mode === 'scale' ? 'artwork scaled' : 'cropped / extended') + ')');
+    }
+
     /* ---------------- input ---------------- */
     _installKeys() {
       const TOOLKEYS = {
@@ -823,6 +949,7 @@
     }
     _installGuards() {
       window.addEventListener('beforeunload', e => {
+        this._savePrefs();
         if (this.dirty) { e.preventDefault(); e.returnValue = ''; }
       });
       // Blur buttons after click so Space / Enter don't re-trigger the last button.
@@ -830,6 +957,10 @@
         const b = e.target.closest && e.target.closest('button');
         if (b) b.blur();
       });
+      // Suppress the native browser/OS context menu app-wide -- OpenToon has
+      // its own right-click menus and the native one would otherwise pop up
+      // alongside them.
+      window.addEventListener('contextmenu', e => e.preventDefault());
     }
   }
 

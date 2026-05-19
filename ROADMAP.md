@@ -32,6 +32,11 @@ Tracking parity with Toon Boom Harmony Advanced.
 - [x] Video import — extract frames to a reference layer (+ its audio)
 - [x] Grid, rule-of-thirds guides, symmetry / mirror drawing
 - [x] Desktop app (Electron) with over-the-air auto-updates
+- [x] Manual "Check for Updates" + version display in About
+- [x] Wacom pen eraser-flip — flip the stylus to erase
+- [x] Canvas resize after drawing (scale artwork or crop / extend)
+- [x] Drag the timeline ruler to set the project frame count
+- [x] Tool & view settings persist between sessions
 
 ## Next
 - [ ] Bone rigging & mesh deformers

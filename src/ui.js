@@ -489,15 +489,22 @@
       const root = document.getElementById('modal-root');
       root.style.pointerEvents = 'auto';
       root.appendChild(pop);
-      const close = () => this._closeContext();
-      setTimeout(() => document.addEventListener('pointerdown', close, { once: true }), 0);
       this._ctxPop = pop;
+      // Close on a click outside the menu. This must ignore pointer-downs
+      // *inside* the menu -- otherwise the menu is torn down on pointerdown
+      // and the row's own click handler never gets to run.
+      this._ctxClose = e => { if (!pop.contains(e.target)) this._closeContext(); };
+      setTimeout(() => document.addEventListener('pointerdown', this._ctxClose), 0);
       const r = pop.getBoundingClientRect();
       if (r.right > innerWidth) pop.style.left = (innerWidth - r.width - 4) + 'px';
       if (r.bottom > innerHeight) pop.style.top = (innerHeight - r.height - 4) + 'px';
     }
     _closeContext() {
       if (this._ctxPop) { this._ctxPop.remove(); this._ctxPop = null; }
+      if (this._ctxClose) {
+        document.removeEventListener('pointerdown', this._ctxClose);
+        this._ctxClose = null;
+      }
       document.getElementById('modal-root').style.pointerEvents = 'none';
     }
 
@@ -592,15 +599,23 @@
     projectSettings() {
       const p = this.app.project;
       const name = el('input', { type: 'text', value: p.name });
+      const w = el('input', { type: 'number', value: p.width, min: 16, max: 8000 });
+      const h = el('input', { type: 'number', value: p.height, min: 16, max: 8000 });
+      const rmode = el('select');
+      [['Scale artwork to fit', 'scale'], ['Crop / extend (centered)', 'crop']]
+        .forEach(o => rmode.appendChild(el('option', { value: o[1] }, [o[0]])));
       const fps = el('input', { type: 'number', value: p.fps, min: 1, max: 120 });
       const fc = el('input', { type: 'number', value: p.frameCount, min: 1, max: 4000 });
       const bg = el('input', { type: 'color', value: p.bg });
       const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px' } }, [
         this._field('Name', name),
+        this._field('Width', w),
+        this._field('Height', h),
+        this._field('On resize', rmode),
+        el('div', { class: 'chk-row', text: 'Changing width / height resizes the existing artwork.' }),
         this._field('Frame rate (fps)', fps),
         this._field('Frames', fc),
-        this._field('Background', bg),
-        el('div', { class: 'chk-row', text: 'Canvas size: ' + p.width + ' × ' + p.height + ' (set in New Project)' })
+        this._field('Background', bg)
       ]);
       this.modal('Project Settings', body, [
         { label: 'Cancel' },
@@ -610,8 +625,14 @@
             p.fps = U.clamp(parseInt(fps.value) || 24, 1, 120);
             p.frameCount = Math.max(1, parseInt(fc.value) || p.frameCount);
             p.bg = bg.value;
-            this.refreshProjectInfo();
-            this.app.emit('projectchange'); this.app.emit('render');
+            const nw = U.clamp(parseInt(w.value) || p.width, 16, 8000);
+            const nh = U.clamp(parseInt(h.value) || p.height, 16, 8000);
+            if (nw !== p.width || nh !== p.height) {
+              this.app.resizeCanvas(nw, nh, rmode.value);
+            } else {
+              this.refreshProjectInfo();
+              this.app.emit('projectchange'); this.app.emit('render');
+            }
           }
         }
       ]);
@@ -820,12 +841,61 @@
       this.modal('Keyboard Shortcuts', body);
     }
     aboutDialog() {
-      const body = el('div', { style: { maxWidth: '360px', lineHeight: '1.6' } }, [
+      const desktop = window.OpenToonDesktop;
+      const verLine = el('div', { class: 'chk-row', text: 'Checking version…' });
+      const status = el('div', {
+        class: 'chk-row', style: { minHeight: '17px', color: '#4a9fd4' }
+      });
+      const body = el('div', { style: { maxWidth: '380px', lineHeight: '1.6' } }, [
         el('div', { html: '<b style="color:#3d9be0;font-size:14px">OpenToon Studio</b>' }),
-        el('div', { text: 'An open-source 2D animation studio for Windows, inspired by Toon Boom Harmony. Runs entirely offline in your browser.' }),
-        el('div', { class: 'chk-row', text: 'Paperless animation · xsheet timeline · onion skinning · camera · GIF / WebM / PNG export. MIT licensed.' })
+        el('div', { text: 'An open-source 2D animation studio for Windows, inspired by Toon Boom Harmony.' }),
+        verLine,
+        el('div', { class: 'chk-row', text: 'Paperless animation · xsheet timeline · onion skinning · camera · GIF / WebM / PNG export. MIT licensed.' }),
+        status
       ]);
-      this.modal('About', body);
+      const buttons = [{ label: 'Close', primary: true }];
+      if (desktop && desktop.checkForUpdates) {
+        buttons.unshift({
+          label: 'Check for Updates',
+          fn: () => { this._checkUpdates(status); return false; }
+        });
+      }
+      this.modal('About', body, buttons);
+      if (desktop && desktop.getVersion) {
+        desktop.getVersion()
+          .then(v => { verLine.textContent = 'Version ' + v + ' — desktop app'; })
+          .catch(() => { verLine.textContent = 'Desktop app'; });
+      } else {
+        verLine.textContent = 'Web version — runs offline in your browser';
+      }
+    }
+    _checkUpdates(statusEl) {
+      const d = window.OpenToonDesktop;
+      if (!d || !d.checkForUpdates) return;
+      this._updStatusEl = statusEl;
+      statusEl.textContent = 'Checking for updates…';
+      if (!this._updateHooked && d.onUpdateStatus) {
+        this._updateHooked = true;
+        d.onUpdateStatus(s => {
+          const e = this._updStatusEl;
+          if (!e || !e.isConnected) return;
+          const msg = {
+            checking: 'Checking for updates…',
+            available: 'Update ' + (s.version || '') + ' found — downloading…',
+            downloading: 'Downloading update… ' + (s.percent || 0) + '%',
+            downloaded: 'Update ready — restart OpenToon to install it.',
+            uptodate: 'You have the latest version.',
+            disabled: 'Updates are disabled in development mode.',
+            error: 'Update check failed: ' + (s.message || 'offline')
+          };
+          e.textContent = msg[s.state] || '';
+        });
+      }
+      d.checkForUpdates().then(r => {
+        const e = this._updStatusEl;
+        if (e && e.isConnected && r && r.state === 'disabled')
+          e.textContent = 'Updates are disabled in this build.';
+      }).catch(() => {});
     }
   }
 

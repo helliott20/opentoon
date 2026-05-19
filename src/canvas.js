@@ -349,11 +349,17 @@
       const usable = e => !!e && isFinite(e.clientX) && isFinite(e.clientY) &&
         !(e.clientX === 0 && e.clientY === 0);
 
+      // A stylus flipped to its eraser end reports button 5 on down/up and
+      // the 32 bit set in `buttons` -- detect either so the eraser engages.
+      const isEraser = e => e.pointerType === 'pen' &&
+        ((e.buttons & 32) !== 0 || e.button === 5);
+
       const evt = e => {
         const pt = this.screenToProject(e.clientX, e.clientY);
         pt.pressure = (e.pointerType === 'pen') ? (e.pressure || 0.5) : 1;
         pt.shift = e.shiftKey; pt.alt = e.altKey; pt.ctrl = e.ctrlKey;
         pt.button = e.button; pt.sx = e.clientX; pt.sy = e.clientY;
+        pt.penEraser = isEraser(e);
         return pt;
       };
 

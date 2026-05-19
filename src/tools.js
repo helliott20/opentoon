@@ -1073,6 +1073,8 @@
 
   /* ============================== manager ============================== */
   const PAINTY = { brush: 1, pencil: 1, fill: 1 };
+  // tools that a flipped-over pen eraser should override
+  const PEN_ERASE = { brush: 1, pencil: 1 };
   const CEL_TOOLS = { brush: 1, pencil: 1, eraser: 1, fill: 1, rect: 1, ellipse: 1, line: 1, select: 1 };
   class ToolManager {
     constructor(app) {
@@ -1106,8 +1108,8 @@
       this.app.emit('overlayrender');
     }
     flush() { if (this.active.flush) this.active.flush(this.app); }
-    _map(pt) {
-      return CEL_TOOLS[this.active.name] ? toCel(this.app, pt) : pt;
+    _map(pt, tool) {
+      return CEL_TOOLS[tool.name] ? toCel(this.app, pt) : pt;
     }
     pointerDown(pt, e) {
       if (pt.alt && PAINTY[this.active.name]) {
@@ -1116,12 +1118,21 @@
         return;
       }
       this.dragging = true;
-      this.active.pointerDown(this._map(pt), e, this.app);
+      // a stylus flipped to its eraser end erases, whatever brush is selected
+      this._strokeTool = (pt.penEraser && PEN_ERASE[this.active.name])
+        ? this.tools.eraser : this.active;
+      if (this._strokeTool !== this.active) this.app.ui.status('Pen eraser');
+      this._strokeTool.pointerDown(this._map(pt, this._strokeTool), e, this.app);
     }
-    pointerMove(pt, e) { this.active.pointerMove(this._map(pt), e, this.app); }
+    pointerMove(pt, e) {
+      const t = this._strokeTool || this.active;
+      t.pointerMove(this._map(pt, t), e, this.app);
+    }
     pointerUp(pt, e) {
       this.dragging = false;
-      this.active.pointerUp(this._map(pt), e, this.app);
+      const t = this._strokeTool || this.active;
+      t.pointerUp(this._map(pt, t), e, this.app);
+      this._strokeTool = null;
     }
     drawOverlay(ctx) { if (this.active.drawOverlay) this.active.drawOverlay(ctx, this.app); }
   }

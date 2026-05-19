@@ -1,9 +1,16 @@
 /* OpenToon Studio - Electron preload (safe bridge to the renderer) */
 'use strict';
-const { contextBridge } = require('electron');
+const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('OpenToonDesktop', {
-  version: process.env.npm_package_version || '',
   platform: process.platform,
-  isDesktop: true
+  isDesktop: true,
+  // real app version (works in packaged builds, unlike npm_package_version)
+  getVersion: () => ipcRenderer.invoke('opentoon:get-version'),
+  // ask the main process to check GitHub Releases for an update
+  checkForUpdates: () => ipcRenderer.invoke('opentoon:check-updates'),
+  // subscribe to update lifecycle events (checking / available / ... )
+  onUpdateStatus: cb =>
+    ipcRenderer.on('opentoon:update-status', (_e, data) => cb(data)),
+  quitAndInstall: () => ipcRenderer.send('opentoon:quit-install')
 });

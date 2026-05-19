@@ -26,6 +26,7 @@
       this.app = app;
       this.root = document.getElementById('timeline');
       this.cellW = 15; this.rowH = 26; this.headerH = 24;
+      this.endPad = 18;   // grab zone past the last frame for the length handle
       this.showThumbs = false;
       this._build();
       ['framechange', 'projectchange', 'layerschange', 'celchange',
@@ -179,7 +180,7 @@
       const frameAt = x => U.clamp(Math.floor(x / this.cellW), 0, app.project.frameCount - 1);
 
       g.addEventListener('pointerdown', e => {
-        g.setPointerCapture(e.pointerId);
+        try { g.setPointerCapture(e.pointerId); } catch (_) {}
         const r = g.getBoundingClientRect();
         const x = e.clientX - r.left, y = e.clientY - r.top;
         const f = frameAt(x);
@@ -193,7 +194,15 @@
           this._context(e);
           return;
         }
-        if (y <= this.headerH) { this._mode = 'scrub'; app.setFrame(f); return; }
+        if (y <= this.headerH) {
+          // grab the handle just past the last frame to set the frame count
+          const endX = app.project.frameCount * this.cellW;
+          if (x >= endX - 6) {
+            this._fcDrag = { before: app._structSnapshot(), changed: false };
+            return;
+          }
+          this._mode = 'scrub'; app.setFrame(f); return;
+        }
         const layer = this.rowToLayer(Math.floor((y - this.headerH) / this.rowH));
         if (layer) app.selectLayer(layer);
         const run = layer ? this._runAt(layer, f) : null;
@@ -210,15 +219,39 @@
 
       g.addEventListener('pointermove', e => {
         const r = g.getBoundingClientRect();
-        const f = frameAt(e.clientX - r.left);
+        const x = e.clientX - r.left;
+        if (this._fcDrag) {
+          const nf = U.clamp(Math.round(x / this.cellW), 1, 4000);
+          if (nf !== app.project.frameCount) {
+            app.project.frameCount = nf;
+            if (app.frame >= nf) app.frame = nf - 1;
+            this._fcDrag.changed = true;
+            app.emit('render');
+            this.render();
+          }
+          return;
+        }
+        const f = frameAt(x);
         if (this._celDrag) this._applyCelDrag(f);
         else if (this._mode === 'scrub') app.setFrame(f);
+        else {
+          const endX = app.project.frameCount * this.cellW;
+          g.style.cursor = (e.clientY - r.top <= this.headerH && x >= endX - 6)
+            ? 'ew-resize' : '';
+        }
       });
 
       const end = () => {
         if (this._celDrag) {
           if (this._celDrag.moved) app._commitStruct('Edit exposure', this._celDrag.before);
           this._celDrag = null;
+        }
+        if (this._fcDrag) {
+          if (this._fcDrag.changed) {
+            app._commitStruct('Set frame count', this._fcDrag.before);
+            app.ui.status('Frame count: ' + app.project.frameCount);
+          }
+          this._fcDrag = null;
         }
         this._mode = null;
       };
@@ -314,7 +347,7 @@
       const app = this.app, p = app.project, L = p.layers;
       const cw = this.cellW, rh = this.rowH, hh = this.headerH;
       const audioH = app.audioPeaks ? 38 : 0;
-      const w = p.frameCount * cw, h = hh + L.length * rh + audioH;
+      const w = p.frameCount * cw + this.endPad, h = hh + L.length * rh + audioH;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       this.grid.width = w * dpr; this.grid.height = h * dpr;
       this.grid.style.width = w + 'px'; this.grid.style.height = h + 'px';
@@ -351,6 +384,18 @@
           c.fillText(String(f + 1), x + 2, hh / 2);
         }
       }
+      // frame-count handle -- drag this to grow / shrink the timeline length
+      const endX = p.frameCount * cw;
+      c.fillStyle = '#343942';
+      c.fillRect(endX, 0, this.endPad, hh);
+      c.strokeStyle = '#0008'; c.lineWidth = 1;
+      c.beginPath(); c.moveTo(endX + 0.5, 0); c.lineTo(endX + 0.5, hh); c.stroke();
+      c.strokeStyle = '#8b919c';
+      for (let i = 0; i < 3; i++) {
+        const gx = endX + 6 + i * 3 + 0.5;
+        c.beginPath(); c.moveTo(gx, 7); c.lineTo(gx, hh - 7); c.stroke();
+      }
+
       // playhead marker
       c.fillStyle = '#4a9fd4';
       c.beginPath();
