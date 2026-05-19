@@ -189,11 +189,26 @@
       mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
         .find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
     }
+    // Optionally mix the project's audio track into the recording. The
+    // capture runs in real time, so the buffer plays in sync with the frames.
+    let actx = null, asrc = null;
+    if (opts.audio && app.audioBuffer) {
+      try {
+        actx = new (window.AudioContext || window.webkitAudioContext)();
+        const dest = actx.createMediaStreamDestination();
+        asrc = actx.createBufferSource();
+        asrc.buffer = app.audioBuffer;
+        asrc.connect(dest);
+        const at = dest.stream.getAudioTracks()[0];
+        if (at) stream.addTrack(at);
+      } catch (e) { actx = asrc = null; }   // carry on with video only
+    }
     const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12e6 });
     const chunks = [];
     rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
     const done = new Promise(r => { rec.onstop = r; });
     rec.start();
+    if (asrc) { try { asrc.start(0, Math.max(0, from / fps)); } catch (e) { /* ignore */ } }
     const dur = 1000 / fps;
     for (let f = from; f <= to; f++) {
       await app.seekVideosTo(f);
@@ -208,6 +223,8 @@
     await wait(250);
     rec.stop();
     await done;
+    if (asrc) { try { asrc.stop(); } catch (e) { /* ignore */ } }
+    if (actx) { try { actx.close(); } catch (e) { /* ignore */ } }
     return new Blob(chunks, { type: fmt === 'mp4' ? 'video/mp4' : 'video/webm' });
   }
 

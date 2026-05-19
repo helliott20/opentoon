@@ -111,7 +111,8 @@
           { label: 'Clear Drawing', sc: 'Del', fn: () => a.clearDrawing() },
           { label: 'Select All', sc: 'Ctrl+A', fn: () => a.selectAll() },
           { sep: 1 },
-          { label: 'Project Settings…', fn: () => this.projectSettings() }
+          { label: 'Project Settings…', fn: () => this.projectSettings() },
+          { label: 'Pen Pressure…', fn: () => this.penDialog() }
         ]],
         ['View', [
           { label: 'Fit to Camera', sc: 'F', fn: () => a.stage.fitToCamera() },
@@ -641,10 +642,15 @@
 
     /* ============================ dialogs ============================ */
     newProjectDialog() {
-      const presets = {
-        'HD 1080p': [1920, 1080], 'HD 720p': [1280, 720],
-        'Square 1080': [1080, 1080], 'SD 4:3': [1024, 768],
-        'Vertical 9:16': [1080, 1920], 'Film 2K': [2048, 858]
+      // full project templates -- resolution, frame rate, length and background
+      const templates = {
+        'HD 1080p · 24 fps': { w: 1920, h: 1080, fps: 24, frames: 48, bg: '#ffffff' },
+        'HD 720p · 24 fps': { w: 1280, h: 720, fps: 24, frames: 48, bg: '#ffffff' },
+        'Square 1080 · Social': { w: 1080, h: 1080, fps: 24, frames: 36, bg: '#ffffff' },
+        'Vertical 9:16 · Social': { w: 1080, h: 1920, fps: 24, frames: 36, bg: '#ffffff' },
+        'Storyboard 16:9 · 12 fps': { w: 1280, h: 720, fps: 12, frames: 24, bg: '#ffffff' },
+        'Film 2K Scope · 24 fps': { w: 2048, h: 858, fps: 24, frames: 48, bg: '#000000' },
+        'Retro / Pixel · 12 fps': { w: 640, h: 360, fps: 12, frames: 24, bg: '#ffffff' }
       };
       const name = el('input', { type: 'text', value: 'Untitled' });
       const w = el('input', { type: 'number', value: 1920, min: 16, max: 8000 });
@@ -653,13 +659,15 @@
       const fc = el('input', { type: 'number', value: 48, min: 1, max: 4000 });
       const bg = el('input', { type: 'color', value: '#ffffff' });
       const preset = el('select');
-      Object.keys(presets).forEach(k => preset.appendChild(el('option', { value: k }, [k])));
+      Object.keys(templates).forEach(k => preset.appendChild(el('option', { value: k }, [k])));
       preset.addEventListener('change', () => {
-        const d = presets[preset.value]; w.value = d[0]; h.value = d[1];
+        const d = templates[preset.value];
+        if (!d) return;
+        w.value = d.w; h.value = d.h; fps.value = d.fps; fc.value = d.frames; bg.value = d.bg;
       });
       const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px' } }, [
         this._field('Name', name),
-        this._field('Preset', preset),
+        this._field('Template', preset),
         this._field('Width', w),
         this._field('Height', h),
         this._field('Frame rate (fps)', fps),
@@ -784,6 +792,44 @@
       ]);
     }
 
+    penDialog() {
+      const pen = this.app.pen;
+      const gamma = el('input', { type: 'range', min: 0.3, max: 3, step: 0.05, value: pen.gamma });
+      const gVal = el('span', { style: { color: 'var(--text)' } });
+      const minP = el('input', { type: 'range', min: 0, max: 1, step: 0.02, value: pen.min });
+      const maxP = el('input', { type: 'range', min: 0, max: 1, step: 0.02, value: pen.max });
+      const refresh = () => {
+        const g = parseFloat(gamma.value);
+        gVal.textContent = (g < 0.85 ? 'Light touch' : g > 1.2 ? 'Firm touch' : 'Linear') +
+          '  ·  ' + g.toFixed(2);
+      };
+      refresh();
+      gamma.addEventListener('input', refresh);
+      const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px' } }, [
+        el('div', { class: 'chk-row', text: 'Tune how pen pressure drives brush size and opacity.' }),
+        this._field('Pressure curve', gamma),
+        this._field('Feel', gVal),
+        this._field('Minimum pressure', minP),
+        this._field('Maximum pressure', maxP),
+        el('div', { class: 'chk-row', text: 'A lower curve makes a light touch register sooner.' })
+      ]);
+      this.modal('Pen Pressure', body, [
+        { label: 'Reset', fn: () => { gamma.value = 1; minP.value = 0; maxP.value = 1; refresh(); return false; } },
+        { label: 'Close' },
+        {
+          label: 'Apply', primary: true, fn: () => {
+            const g = parseFloat(gamma.value), mn = parseFloat(minP.value), mx = parseFloat(maxP.value);
+            pen.gamma = isNaN(g) ? 1 : U.clamp(g, 0.3, 3);
+            pen.min = isNaN(mn) ? 0 : U.clamp(mn, 0, 1);
+            pen.max = isNaN(mx) ? 1 : U.clamp(mx, 0, 1);
+            if (pen.max < pen.min) pen.max = pen.min;
+            this.app._savePrefs();
+            this.status('Pen pressure settings saved');
+          }
+        }
+      ]);
+    }
+
     cameraDialog() {
       const a = this.app, p = a.project;
       const cur = p.cameraAt(a.frame);
@@ -845,6 +891,12 @@
       const to = el('input', { type: 'number', value: p.frameCount, min: 1, max: p.frameCount });
       const rows = [this._field('Scale', scale)];
       if (kind !== 'frame') { rows.push(this._field('From frame', from)); rows.push(this._field('To frame', to)); }
+      let audioChk = null;
+      if ((kind === 'mp4' || kind === 'webm') && a.audioBuffer) {
+        audioChk = el('input', { type: 'checkbox' });
+        audioChk.checked = true;
+        rows.push(el('label', { class: 'chk-row' }, [audioChk, 'Include audio track']));
+      }
       const note = el('div', { class: 'chk-row' });
       if (kind === 'gif') note.textContent = 'Tip: 50% scale keeps GIF size reasonable.';
       if (kind === 'webm') note.textContent = 'WebM records in real time at ' + p.fps + ' fps.';
@@ -860,7 +912,8 @@
               outW: Math.max(2, Math.round(p.width * sc)),
               outH: Math.max(2, Math.round(p.height * sc)),
               from: kind === 'frame' ? a.frame : U.clamp((parseInt(from.value) || 1) - 1, 0, p.frameCount - 1),
-              to: kind === 'frame' ? a.frame : U.clamp((parseInt(to.value) || p.frameCount) - 1, 0, p.frameCount - 1)
+              to: kind === 'frame' ? a.frame : U.clamp((parseInt(to.value) || p.frameCount) - 1, 0, p.frameCount - 1),
+              audio: !!(audioChk && audioChk.checked)
             };
             this._runExport(kind, opts);
           }

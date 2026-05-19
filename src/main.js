@@ -56,6 +56,8 @@
       this.cleanView = false;
       this.grid = { on: false, size: 64, guides: false };
       this.symmetry = { on: false, axis: 'v' };
+      // pen-tablet pressure response: out = min + (max-min) * raw^gamma
+      this.pen = { gamma: 1, min: 0, max: 1 };
 
       this.history = new OT.History(60);
       this.history.on('change', () => { this.dirty = true; });
@@ -147,6 +149,7 @@
         if (pr.loopMode && this.playback) this.playback.loopMode = pr.loopMode;
         if (Array.isArray(pr.recentFiles)) this.recentFiles = pr.recentFiles.slice(0, 8);
         if (pr.sidebarWidth) this.sidebarWidth = pr.sidebarWidth;
+        if (pr.pen) Object.assign(this.pen, pr.pen);
       } catch (e) { /* ignore corrupt prefs */ }
     }
     _savePrefs() {
@@ -157,9 +160,17 @@
           showCamera: this.showCamera,
           loopMode: this.playback ? this.playback.loopMode : null,
           recentFiles: this.recentFiles,
-          sidebarWidth: this.sidebarWidth
+          sidebarWidth: this.sidebarWidth,
+          pen: this.pen
         }));
       } catch (e) { /* ignore */ }
+    }
+    // Map a raw 0..1 pen pressure through the user's sensitivity curve.
+    mapPressure(raw) {
+      const p = this.pen;
+      raw = U.clamp(raw, 0, 1);
+      if (p.gamma === 1 && p.min === 0 && p.max === 1) return raw;
+      return U.clamp(p.min + (p.max - p.min) * Math.pow(raw, p.gamma), 0, 1);
     }
 
     /* ---------------- recent files (desktop) ---------------- */

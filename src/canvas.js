@@ -411,7 +411,8 @@
 
       const evt = e => {
         const pt = this.screenToProject(e.clientX, e.clientY);
-        pt.pressure = (e.pointerType === 'pen') ? (e.pressure || 0.5) : 1;
+        pt.pressure = (e.pointerType === 'pen')
+          ? this.app.mapPressure(e.pressure || 0.5) : 1;
         pt.shift = e.shiftKey; pt.alt = e.altKey; pt.ctrl = e.ctrlKey;
         pt.button = e.button; pt.sx = e.clientX; pt.sy = e.clientY;
         pt.penEraser = isEraser(e);
@@ -449,7 +450,8 @@
         let pt;
         for (const ce of batch) {
           pt = this.screenToProject(ce.clientX, ce.clientY);
-          pt.pressure = (ce.pointerType === 'pen') ? (ce.pressure || 0.5) : 1;
+          pt.pressure = (ce.pointerType === 'pen')
+            ? this.app.mapPressure(ce.pressure || 0.5) : 1;
           pt.shift = e.shiftKey; pt.alt = e.altKey; pt.ctrl = e.ctrlKey;
           this.app.tools.pointerMove(pt, e);
         }
