@@ -40,6 +40,7 @@
       this._buildLayers();
       this._buildViewbar();
       this._buildStatus();
+      this._installSidebarResize();
 
       app.on('toolchange', () => { this._refreshTool(); this._buildToolOpts(); });
       app.on('layerschange', () => this._refreshLayers());
@@ -54,25 +55,49 @@
     }
 
     /* ============================ menu bar ============================ */
+    _fileMenu() {
+      const a = this.app;
+      const rows = [
+        { label: 'New Project…', sc: 'Ctrl+N', fn: () => this.newProjectDialog() },
+        { label: 'Open Project…', sc: 'Ctrl+O', fn: () => a.openProject() },
+        { label: 'Save Project', sc: 'Ctrl+S', fn: () => a.saveProject() },
+        { label: 'Save Project As…', sc: 'Ctrl+Shift+S', fn: () => a.saveProject(true) }
+      ];
+      // Recent files only make sense on desktop, where projects have real paths.
+      if (window.OpenToonDesktop) {
+        rows.push({ sep: 1 });
+        const recent = a.recentFiles || [];
+        if (recent.length) {
+          recent.slice(0, 6).forEach(p => {
+            const base = p.split(/[\\/]/).pop();
+            rows.push({
+              label: base.length > 34 ? base.slice(0, 33) + '…' : base,
+              title: p, fn: () => a.openRecent(p)
+            });
+          });
+          rows.push({ label: 'Clear Recent Files', fn: () => a.clearRecent() });
+        } else {
+          rows.push({ label: 'No Recent Files', enabled: false });
+        }
+      }
+      rows.push(
+        { sep: 1 },
+        { label: 'Import Image as Layer…', fn: () => a.importImage() },
+        { label: 'Import Video…', fn: () => a._pickFile('video/*', f => a.importVideo(f)) },
+        { label: 'Import Audio…', fn: () => a._pickFile('audio/*', f => a.importAudio(f)) },
+        { label: 'Remove Audio Track', fn: () => a.removeAudio() },
+        { sep: 1 },
+        { label: 'Export Animated GIF…', fn: () => this.exportDialog('gif') },
+        { label: 'Export Video (WebM)…', fn: () => this.exportDialog('webm') },
+        { label: 'Export PNG Sequence…', fn: () => this.exportDialog('sequence') },
+        { label: 'Export Current Frame…', fn: () => this.exportDialog('frame') }
+      );
+      return rows;
+    }
     _menuData() {
       const a = this.app;
       return [
-        ['File', [
-          { label: 'New Project…', sc: 'Ctrl+N', fn: () => this.newProjectDialog() },
-          { label: 'Open Project…', sc: 'Ctrl+O', fn: () => a.openProject() },
-          { label: 'Save Project', sc: 'Ctrl+S', fn: () => a.saveProject() },
-          { label: 'Save Project As…', sc: 'Ctrl+Shift+S', fn: () => a.saveProject(true) },
-          { sep: 1 },
-          { label: 'Import Image as Layer…', fn: () => a.importImage() },
-          { label: 'Import Video…', fn: () => a._pickFile('video/*', f => a.importVideo(f)) },
-          { label: 'Import Audio…', fn: () => a._pickFile('audio/*', f => a.importAudio(f)) },
-          { label: 'Remove Audio Track', fn: () => a.removeAudio() },
-          { sep: 1 },
-          { label: 'Export Animated GIF…', fn: () => this.exportDialog('gif') },
-          { label: 'Export Video (WebM)…', fn: () => this.exportDialog('webm') },
-          { label: 'Export PNG Sequence…', fn: () => this.exportDialog('sequence') },
-          { label: 'Export Current Frame…', fn: () => this.exportDialog('frame') }
-        ]],
+        ['File', this._fileMenu()],
         ['Edit', [
           { label: 'Undo', sc: 'Ctrl+Z', fn: () => a.undo(), enabled: a.history.canUndo() },
           { label: 'Redo', sc: 'Ctrl+Y', fn: () => a.redo(), enabled: a.history.canRedo() },
@@ -91,6 +116,10 @@
           { label: 'Zoom In', sc: '+', fn: () => a.stage.zoomAt(innerWidth / 2, innerHeight / 2, 1.25) },
           { label: 'Zoom Out', sc: '-', fn: () => a.stage.zoomAt(innerWidth / 2, innerHeight / 2, 0.8) },
           { label: 'Reset Zoom 100%', fn: () => this._zoom100() },
+          { sep: 1 },
+          { label: 'Rotate Canvas Left 15°', fn: () => a.rotateView(-15) },
+          { label: 'Rotate Canvas Right 15°', fn: () => a.rotateView(15) },
+          { label: 'Reset Rotation', fn: () => a.resetRotation() },
           { sep: 1 },
           { label: (a.cleanView ? '✓ ' : '') + 'Clean Canvas (hide panels)', sc: 'Tab', fn: () => a.toggleCleanView() },
           { sep: 1 },
@@ -173,7 +202,11 @@
         });
         bar.appendChild(item);
       });
-      document.addEventListener('click', () => this._closeMenus());
+      // hooked once -- _buildMenu re-runs whenever the recent-files list changes
+      if (!this._menuClickHooked) {
+        this._menuClickHooked = true;
+        document.addEventListener('click', () => this._closeMenus());
+      }
     }
     _closeMenus() {
       document.querySelectorAll('.menu-item.open').forEach(m => m.classList.remove('open'));
@@ -189,6 +222,7 @@
         const r = el('div', {
           class: 'menu-row' + (row.enabled === false ? ' disabled' : '')
         }, [el('span', {}, [row.label]), el('span', { class: 'sc' }, [row.sc || ''])]);
+        if (row.title) r.title = row.title;
         r.addEventListener('click', e => {
           e.stopPropagation(); this._closeMenus();
           try { row.fn(); } catch (err) { console.error(err); this.status('Error: ' + err.message); }
@@ -433,6 +467,11 @@
       vb.appendChild(mk('+', () => a.stage.zoomAt(innerWidth / 2, innerHeight / 2, 1.25), 'Zoom in'));
       vb.appendChild(mk('Fit', () => a.stage.fitToCamera(), 'Fit to camera (F)'));
       vb.appendChild(mk('100%', () => this._zoom100(), 'Reset zoom'));
+      vb.appendChild(mk('⟲', () => a.rotateView(-15), 'Rotate canvas left'));
+      this.rotLabel = mk('0°', () => a.resetRotation(), 'Reset canvas rotation');
+      this.rotLabel.style.minWidth = '38px';
+      vb.appendChild(this.rotLabel);
+      vb.appendChild(mk('⟳', () => a.rotateView(15), 'Rotate canvas right'));
       vb.appendChild(el('div', { class: 'sp' }));
       this.camBtn = mk('Camera', () => a.toggleCamera(), 'Toggle camera guide');
       this.onionVB = mk('Onion', () => a.toggleOnion(), 'Toggle onion skin');
@@ -453,6 +492,8 @@
     _refreshViewbar() {
       if (!this.zoomLabel || !this.app.stage) return;
       this.zoomLabel.textContent = Math.round(this.app.stage.view.zoom * 100) + '%';
+      if (this.rotLabel)
+        this.rotLabel.textContent = Math.round(this.app.stage.view.rot || 0) + '°';
       this.camBtn.classList.toggle('on', this.app.showCamera);
       this.onionVB.classList.toggle('on', this.app.onion.on);
       this.flipHBtn.classList.toggle('on', this.app.stage.flipH);
@@ -488,6 +529,36 @@
     }
     setCoord(pt) {
       if (this.coordEl && pt) this.coordEl.textContent = Math.round(pt.x) + ', ' + Math.round(pt.y);
+    }
+
+    /* ============================ sidebar resize ============================ */
+    // Drag the divider between the canvas and the panels to resize the sidebar.
+    _installSidebarResize() {
+      const res = document.getElementById('sidebar-resizer');
+      const sb = document.getElementById('sidebar');
+      if (!res || !sb) return;
+      const a = this.app;
+      const apply = w => {
+        w = U.clamp(Math.round(w), 210, 480);
+        sb.style.flex = '0 0 ' + w + 'px';
+        sb.style.width = w + 'px';
+        a.sidebarWidth = w;
+      };
+      if (a.sidebarWidth) apply(a.sidebarWidth);
+      let drag = null;
+      res.addEventListener('pointerdown', e => {
+        drag = { x: e.clientX, w: sb.getBoundingClientRect().width };
+        try { res.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
+      });
+      res.addEventListener('pointermove', e => {
+        if (!drag) return;
+        apply(drag.w + (drag.x - e.clientX));   // drag toward the canvas = wider
+        if (a.stage) a.stage.resize();
+      });
+      const stop = () => { if (drag) { drag = null; a._savePrefs(); } };
+      res.addEventListener('pointerup', stop);
+      res.addEventListener('pointercancel', stop);
     }
 
     /* ============================ modal / context ============================ */

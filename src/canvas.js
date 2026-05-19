@@ -12,7 +12,7 @@
       this.ctx = this.canvas.getContext('2d');
       this.octx = this.overlay.getContext('2d');
       this.dpr = Math.min(window.devicePixelRatio || 1, 2);
-      this.view = { zoom: 1, x: 0, y: 0 };
+      this.view = { zoom: 1, x: 0, y: 0, rot: 0 };
       this.flipH = false;
       this.flipV = false;
       this.cursorPt = null;       // last project-space pointer pos
@@ -56,12 +56,23 @@
       this.render();
     }
 
-    /* ---------------- coord mapping ---------------- */
+    /* ---------------- coord mapping ----------------
+       Project space maps to screen space in this order: scale + translate
+       (zoom / pan), then rotate about the viewport centre, then flip. The
+       inverse (screen -> project) un-does flip, then rotation, then pan. */
     _rawView(sx, sy) {
       const r = this.canvas.getBoundingClientRect();
       let x = sx - r.left, y = sy - r.top;
       if (this.flipH) x = this.cw - x;
       if (this.flipV) y = this.ch - y;
+      if (this.view.rot) {
+        const rad = -this.view.rot * Math.PI / 180;
+        const cx = this.cw / 2, cy = this.ch / 2;
+        const ox = x - cx, oy = y - cy;
+        const cs = Math.cos(rad), sn = Math.sin(rad);
+        x = cx + ox * cs - oy * sn;
+        y = cy + ox * sn + oy * cs;
+      }
       return { x, y };
     }
     screenToProject(sx, sy) {
@@ -74,17 +85,60 @@
     projectToScreen(px, py) {
       let x = this.view.x + px * this.view.zoom;
       let y = this.view.y + py * this.view.zoom;
+      if (this.view.rot) {
+        const rad = this.view.rot * Math.PI / 180;
+        const cx = this.cw / 2, cy = this.ch / 2;
+        const ox = x - cx, oy = y - cy;
+        const cs = Math.cos(rad), sn = Math.sin(rad);
+        x = cx + ox * cs - oy * sn;
+        y = cy + ox * sn + oy * cs;
+      }
       if (this.flipH) x = this.cw - x;
       if (this.flipV) y = this.ch - y;
       return { x, y };
     }
+    // Un-rotate a screen-space delta into view (pan) space.
+    _unrotateDelta(dx, dy) {
+      if (this.flipH) dx = -dx;
+      if (this.flipV) dy = -dy;
+      if (this.view.rot) {
+        const rad = -this.view.rot * Math.PI / 180;
+        const cs = Math.cos(rad), sn = Math.sin(rad);
+        return { dx: dx * cs - dy * sn, dy: dx * sn + dy * cs };
+      }
+      return { dx, dy };
+    }
     _applyView(ctx) {
       const d = this.dpr, z = this.view.zoom;
-      const ax = this.flipH ? -d * z : d * z;
-      const ex = this.flipH ? d * (this.cw - this.view.x) : d * this.view.x;
-      const ay = this.flipV ? -d * z : d * z;
-      const ey = this.flipV ? d * (this.ch - this.view.y) : d * this.view.y;
-      ctx.setTransform(ax, 0, 0, ay, ex, ey);
+      if (!this.view.rot) {
+        // fast path: pure flip + zoom + pan (the common, un-rotated case)
+        const ax = this.flipH ? -d * z : d * z;
+        const ex = this.flipH ? d * (this.cw - this.view.x) : d * this.view.x;
+        const ay = this.flipV ? -d * z : d * z;
+        const ey = this.flipV ? d * (this.ch - this.view.y) : d * this.view.y;
+        ctx.setTransform(ax, 0, 0, ay, ex, ey);
+        return;
+      }
+      ctx.setTransform(d, 0, 0, d, 0, 0);          // device px -> CSS px
+      if (this.flipH || this.flipV) {
+        ctx.translate(this.flipH ? this.cw : 0, this.flipV ? this.ch : 0);
+        ctx.scale(this.flipH ? -1 : 1, this.flipV ? -1 : 1);
+      }
+      ctx.translate(this.cw / 2, this.ch / 2);
+      ctx.rotate(this.view.rot * Math.PI / 180);
+      ctx.translate(-this.cw / 2, -this.ch / 2);
+      ctx.translate(this.view.x, this.view.y);
+      ctx.scale(z, z);
+    }
+    // Rotate the drawing view (degrees) -- handy on a pen display.
+    rotateBy(deg) {
+      this.view.rot = ((this.view.rot + deg) % 360 + 360) % 360;
+      this.render();
+    }
+    resetRotation() {
+      if (!this.view.rot) return;
+      this.view.rot = 0;
+      this.render();
     }
 
     zoomAt(sx, sy, factor) {
@@ -99,8 +153,9 @@
       this.render();
     }
     panBy(dx, dy) {
-      this.view.x += this.flipH ? -dx : dx;
-      this.view.y += this.flipV ? -dy : dy;
+      const d = this._unrotateDelta(dx, dy);
+      this.view.x += d.dx;
+      this.view.y += d.dy;
       this.render();
     }
 
@@ -378,9 +433,10 @@
 
       c.addEventListener('pointermove', e => {
         if (this._panning) {
-          const dx = e.clientX - this._panning.sx, dy = e.clientY - this._panning.sy;
-          this.view.x = this._panning.vx + (this.flipH ? -dx : dx);
-          this.view.y = this._panning.vy + (this.flipV ? -dy : dy);
+          const d = this._unrotateDelta(
+            e.clientX - this._panning.sx, e.clientY - this._panning.sy);
+          this.view.x = this._panning.vx + d.dx;
+          this.view.y = this._panning.vy + d.dy;
           this.render();
           return;
         }

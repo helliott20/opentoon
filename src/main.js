@@ -30,6 +30,8 @@
       this.dirty = false;
       this.celClipboard = null;
       this.projectPath = null;   // path of the open .otoon file (desktop)
+      this.recentFiles = [];     // recently opened / saved .otoon paths (desktop)
+      this.sidebarWidth = 0;     // user-dragged sidebar width (0 = CSS default)
       this.playIn = null;
       this.playOut = null;
       this.audioBuffer = null;   // decoded AudioBuffer (runtime)
@@ -122,6 +124,8 @@
         if (pr.symmetry) Object.assign(this.symmetry, pr.symmetry);
         if (typeof pr.showCamera === 'boolean') this.showCamera = pr.showCamera;
         if (pr.loopMode && this.playback) this.playback.loopMode = pr.loopMode;
+        if (Array.isArray(pr.recentFiles)) this.recentFiles = pr.recentFiles.slice(0, 8);
+        if (pr.sidebarWidth) this.sidebarWidth = pr.sidebarWidth;
       } catch (e) { /* ignore corrupt prefs */ }
     }
     _savePrefs() {
@@ -130,9 +134,39 @@
           settings: this.settings, onion: this.onion,
           grid: this.grid, symmetry: this.symmetry,
           showCamera: this.showCamera,
-          loopMode: this.playback ? this.playback.loopMode : null
+          loopMode: this.playback ? this.playback.loopMode : null,
+          recentFiles: this.recentFiles,
+          sidebarWidth: this.sidebarWidth
         }));
       } catch (e) { /* ignore */ }
+    }
+
+    /* ---------------- recent files (desktop) ---------------- */
+    _addRecent(path) {
+      if (!path) return;
+      this.recentFiles = this.recentFiles.filter(p => p !== path);
+      this.recentFiles.unshift(path);
+      if (this.recentFiles.length > 8) this.recentFiles.length = 8;
+      this._savePrefs();
+      this.ui._buildMenu();
+    }
+    openRecent(path) {
+      const fsd = window.OpenToonDesktop && window.OpenToonDesktop.fs;
+      if (!fsd) return;
+      OT.IO.readProjectFrom(path)
+        .then(d => { this.loadProjectData(d); this.projectPath = path; this._addRecent(path); })
+        .catch(e => {
+          this.ui.status('Could not open that project — ' + e.message);
+          this.recentFiles = this.recentFiles.filter(p => p !== path);
+          this._savePrefs();
+          this.ui._buildMenu();
+        });
+    }
+    clearRecent() {
+      this.recentFiles = [];
+      this._savePrefs();
+      this.ui._buildMenu();
+      this.ui.status('Recent files cleared');
     }
 
     /* ---------------- state ---------------- */
@@ -578,6 +612,15 @@
         ? 'Clean canvas - press Tab to restore the panels'
         : 'Panels restored');
     }
+    // rotate the drawing view -- like turning the paper while sketching
+    rotateView(deg) {
+      this.stage.rotateBy(deg);
+      this.ui.status('Canvas rotated to ' + Math.round(this.stage.view.rot) + '°');
+    }
+    resetRotation() {
+      this.stage.resetRotation();
+      this.ui.status('Canvas rotation reset');
+    }
 
     /* ---------------- audio ---------------- */
     _audioContext() {
@@ -817,7 +860,7 @@
       if (!fsd) { OT.IO.saveProject(this); this.ui.status('Project saved'); return; }
       const write = path => {
         OT.IO.writeProjectTo(this, path)
-          .then(p => { this.projectPath = p; this.ui.status('Saved ' + p); })
+          .then(p => { this.projectPath = p; this._addRecent(p); this.ui.status('Saved ' + p); })
           .catch(e => this.ui.status('Save failed: ' + e.message));
       };
       // silent save-in-place once the project has a file; dialog otherwise
@@ -832,7 +875,7 @@
         fsd.openDialog().then(path => {
           if (!path) return;
           OT.IO.readProjectFrom(path)
-            .then(d => { this.loadProjectData(d); this.projectPath = path; })
+            .then(d => { this.loadProjectData(d); this.projectPath = path; this._addRecent(path); })
             .catch(e => this.ui.status('Open failed: ' + e.message));
         });
         return;

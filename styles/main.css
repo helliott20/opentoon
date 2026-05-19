@@ -137,6 +137,18 @@ input,select{font:inherit;}
 #viewbar .sp{flex:1;}
 
 /* ---------- Sidebar ---------- */
+#sidebar-resizer{
+  width:6px;flex:0 0 6px;
+  background:var(--panel);border-left:1px solid var(--edge);
+  cursor:ew-resize;touch-action:none;position:relative;
+}
+#sidebar-resizer::after{
+  content:"";position:absolute;left:50%;top:50%;
+  width:2px;height:30px;margin:-15px 0 0 -1px;
+  background:var(--edge);border-radius:1px;
+}
+#sidebar-resizer:hover{background:var(--accent);}
+#sidebar-resizer:hover::after{background:#fff;}
 #sidebar{
   width:260px;flex:0 0 260px;
   background:var(--panel);border-left:1px solid var(--edge);
@@ -377,6 +389,7 @@ input[type=range]::-webkit-slider-thumb{
 
 /* ---------- Clean Canvas (distraction-free) ---------- */
 body.clean-view #sidebar,
+body.clean-view #sidebar-resizer,
 body.clean-view #timeline,
 body.clean-view #statusbar,
 body.clean-view #viewbar{display:none;}
