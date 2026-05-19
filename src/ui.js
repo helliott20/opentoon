@@ -65,6 +65,7 @@
       ];
       // Recent files only make sense on desktop, where projects have real paths.
       if (window.OpenToonDesktop) {
+        rows.push({ label: 'Revert to Saved', fn: () => a.revertProject(), enabled: !!a.projectPath });
         rows.push({ sep: 1 });
         const recent = a.recentFiles || [];
         if (recent.length) {
@@ -88,6 +89,7 @@
         { label: 'Remove Audio Track', fn: () => a.removeAudio() },
         { sep: 1 },
         { label: 'Export Animated GIF…', fn: () => this.exportDialog('gif') },
+        { label: 'Export Video (MP4)…', fn: () => this.exportDialog('mp4') },
         { label: 'Export Video (WebM)…', fn: () => this.exportDialog('webm') },
         { label: 'Export PNG Sequence…', fn: () => this.exportDialog('sequence') },
         { label: 'Export Current Frame…', fn: () => this.exportDialog('frame') }
@@ -834,7 +836,7 @@
 
     exportDialog(kind) {
       const a = this.app, p = a.project;
-      const titles = { gif: 'Export Animated GIF', webm: 'Export Video (WebM)', sequence: 'Export PNG Sequence', frame: 'Export Current Frame' };
+      const titles = { gif: 'Export Animated GIF', mp4: 'Export Video (MP4)', webm: 'Export Video (WebM)', sequence: 'Export PNG Sequence', frame: 'Export Current Frame' };
       const scale = el('select');
       [['100%', 1], ['75%', 0.75], ['50%', 0.5], ['25%', 0.25]].forEach(([l, v]) =>
         scale.appendChild(el('option', { value: v }, [l])));
@@ -846,6 +848,7 @@
       const note = el('div', { class: 'chk-row' });
       if (kind === 'gif') note.textContent = 'Tip: 50% scale keeps GIF size reasonable.';
       if (kind === 'webm') note.textContent = 'WebM records in real time at ' + p.fps + ' fps.';
+      if (kind === 'mp4') note.textContent = 'MP4 (H.264) records in real time at ' + p.fps + ' fps.';
       rows.push(note);
       const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px' } }, rows);
       this.modal(titles[kind], body, [
@@ -888,6 +891,7 @@
       try {
         let blob, ext;
         if (kind === 'gif') { blob = await OT.IO.Export.gif(a, opts, onProgress); ext = 'gif'; }
+        else if (kind === 'mp4') { blob = await OT.IO.Export.mp4(a, opts, onProgress); ext = 'mp4'; }
         else if (kind === 'webm') { blob = await OT.IO.Export.webm(a, opts, onProgress); ext = 'webm'; }
         else { blob = await OT.IO.Export.sequence(a, opts, onProgress); ext = 'zip'; }
         m.close();

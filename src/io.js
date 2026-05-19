@@ -171,6 +171,46 @@
   }
 
   /* ---------------- export ---------------- */
+  // Real-time canvas capture -> WebM or MP4 via MediaRecorder.
+  async function recordVideo(app, opts, onProgress, fmt) {
+    const { outW, outH, from, to } = opts;
+    const fps = app.project.fps;
+    const cv = document.createElement('canvas');
+    cv.width = outW; cv.height = outH;
+    const ctx = cv.getContext('2d');
+    const stream = cv.captureStream(0);
+    const track = stream.getVideoTracks()[0];
+    let mime;
+    if (fmt === 'mp4') {
+      mime = ['video/mp4;codecs=avc1.42E01E', 'video/mp4;codecs=avc1',
+        'video/mp4;codecs=h264', 'video/mp4'].find(m => MediaRecorder.isTypeSupported(m));
+      if (!mime) throw new Error('MP4 recording is not supported here — export as WebM instead.');
+    } else {
+      mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+        .find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+    }
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12e6 });
+    const chunks = [];
+    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    const done = new Promise(r => { rec.onstop = r; });
+    rec.start();
+    const dur = 1000 / fps;
+    for (let f = from; f <= to; f++) {
+      await app.seekVideosTo(f);
+      const fr = renderFrame(app, f, outW, outH);
+      ctx.clearRect(0, 0, outW, outH);
+      ctx.drawImage(fr, 0, 0);
+      if (track.requestFrame) track.requestFrame();
+      else if (cv.requestFrame) cv.requestFrame();
+      if (onProgress) onProgress((f - from + 1) / (to - from + 1), 'Recording frame ' + (f + 1));
+      await wait(dur);
+    }
+    await wait(250);
+    rec.stop();
+    await done;
+    return new Blob(chunks, { type: fmt === 'mp4' ? 'video/mp4' : 'video/webm' });
+  }
+
   const Export = {
     renderFrame,
     async sequence(app, opts, onProgress) {
@@ -202,38 +242,8 @@
       }
       return enc.finish();
     },
-    async webm(app, opts, onProgress) {
-      const { outW, outH, from, to } = opts;
-      const fps = app.project.fps;
-      const cv = document.createElement('canvas');
-      cv.width = outW; cv.height = outH;
-      const ctx = cv.getContext('2d');
-      const stream = cv.captureStream(0);
-      const track = stream.getVideoTracks()[0];
-      let mime = 'video/webm;codecs=vp9';
-      if (!MediaRecorder.isTypeSupported(mime)) mime = 'video/webm;codecs=vp8';
-      if (!MediaRecorder.isTypeSupported(mime)) mime = 'video/webm';
-      const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12e6 });
-      const chunks = [];
-      rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
-      const done = new Promise(r => { rec.onstop = r; });
-      rec.start();
-      const dur = 1000 / fps;
-      for (let f = from; f <= to; f++) {
-        await app.seekVideosTo(f);
-        const fr = renderFrame(app, f, outW, outH);
-        ctx.clearRect(0, 0, outW, outH);
-        ctx.drawImage(fr, 0, 0);
-        if (track.requestFrame) track.requestFrame();
-        else if (cv.requestFrame) cv.requestFrame();
-        if (onProgress) onProgress((f - from + 1) / (to - from + 1), 'Recording frame ' + (f + 1));
-        await wait(dur);
-      }
-      await wait(250);
-      rec.stop();
-      await done;
-      return new Blob(chunks, { type: 'video/webm' });
-    }
+    webm(app, opts, onProgress) { return recordVideo(app, opts, onProgress, 'webm'); },
+    mp4(app, opts, onProgress) { return recordVideo(app, opts, onProgress, 'mp4'); }
   };
 
   /* ---------------- save / open / autosave ---------------- */

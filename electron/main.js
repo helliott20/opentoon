@@ -8,9 +8,20 @@ const isDev = process.argv.includes('--dev') || !app.isPackaged;
 let win = null;
 let splash = null;
 let updater = null;
-let splashAt = 0;       // when the splash became visible (0 = not shown yet)
-let appReady = false;   // renderer has signalled it finished booting
+let splashAt = 0;          // when the splash became visible (0 = not shown yet)
+let appReady = false;      // renderer has signalled it finished booting
 let revealed = false;
+let pendingOpenFile = null; // .otoon path the app was launched to open
+
+// Pull a .otoon path out of a process argv list (file association / drag-onto-exe).
+function argvFile(argv) {
+  for (const arg of (argv || [])) {
+    if (typeof arg === 'string' && /\.otoon$/i.test(arg)) {
+      try { if (fs.existsSync(arg)) return arg; } catch (e) { /* ignore */ }
+    }
+  }
+  return null;
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -226,27 +237,59 @@ function setupIpc() {
     try { fs.unlinkSync(autosaveFile()); } catch (e) { /* already gone */ }
     return true;
   });
+
+  /* ---- file the app was launched to open (double-click a .otoon) ---- */
+  ipcMain.handle('opentoon:pending-file', () => {
+    const f = pendingOpenFile;
+    pendingOpenFile = null;
+    return f;
+  });
 }
 
-app.whenReady().then(() => {
-  createSplash();
-  createWindow();
-  // the renderer signals app:ready once the project is loaded
-  ipcMain.once('app:ready', () => { appReady = true; maybeReveal(); });
-  ipcMain.on('app:loading', (_e, data) => {
-    if (splash && !splash.isDestroyed())
-      splash.webContents.send('splash:status', data || {});
-  });
-  // hard fallback: reveal anyway if the renderer never signals (load error)
-  setTimeout(forceReveal, 12000);
-  setupIpc();
-  watchForDev();
-  setupUpdates();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
-});
+// Single-instance: a second launch (e.g. double-clicking another .otoon)
+// hands its file to the already-running window instead of opening twice.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  pendingOpenFile = argvFile(process.argv);
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+  app.on('second-instance', (_e, argv) => {
+    const f = argvFile(argv);
+    if (win && !win.isDestroyed()) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+      if (f) win.webContents.send('opentoon:open-file', f);
+    } else if (f) {
+      pendingOpenFile = f;
+    }
+  });
+  // macOS opens documents through this event rather than argv
+  app.on('open-file', (e, p) => {
+    e.preventDefault();
+    if (win && !win.isDestroyed() && appReady) win.webContents.send('opentoon:open-file', p);
+    else pendingOpenFile = p;
+  });
+
+  app.whenReady().then(() => {
+    createSplash();
+    createWindow();
+    // the renderer signals app:ready once the project is loaded
+    ipcMain.once('app:ready', () => { appReady = true; maybeReveal(); });
+    ipcMain.on('app:loading', (_e, data) => {
+      if (splash && !splash.isDestroyed())
+        splash.webContents.send('splash:status', data || {});
+    });
+    // hard fallback: reveal anyway if the renderer never signals (load error)
+    setTimeout(forceReveal, 12000);
+    setupIpc();
+    watchForDev();
+    setupUpdates();
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+}

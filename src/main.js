@@ -89,8 +89,29 @@
         if (this.dirty && OT.IO.autosave(this)) this.dirty = false;
         this._savePrefs();
       }, 20000);
-      this._offerAutosave();
+      this._initialOpen();
       this.ui.status('Welcome to OpenToon Studio - press B to start drawing');
+    }
+
+    // On launch: open a double-clicked .otoon if there is one, else offer
+    // to restore the autosave. Also listen for files opened while running.
+    _initialOpen() {
+      const d = window.OpenToonDesktop;
+      if (d && d.onOpenFile) d.onOpenFile(p => this._openPath(p));
+      if (d && d.fs && d.fs.pendingFile) {
+        d.fs.pendingFile()
+          .then(p => { if (p) this._openPath(p); else this._offerAutosave(); })
+          .catch(() => this._offerAutosave());
+      } else {
+        this._offerAutosave();
+      }
+    }
+    // Open a project from a known file path (file association / recent files).
+    _openPath(path) {
+      if (!path) return;
+      OT.IO.readProjectFrom(path)
+        .then(d => { this.loadProjectData(d); this.projectPath = path; this._addRecent(path); })
+        .catch(e => this.ui.status('Could not open that project — ' + e.message));
     }
 
     _offerAutosave() {
@@ -885,6 +906,26 @@
           .then(d => this.loadProjectData(d))
           .catch(e => this.ui.status('Open failed: ' + e.message));
       });
+    }
+    // Reload the last saved version, discarding unsaved changes (desktop).
+    revertProject() {
+      if (!this.projectPath) { this.ui.status('Project has not been saved to a file yet'); return; }
+      const path = this.projectPath;
+      const doRevert = () => {
+        OT.IO.readProjectFrom(path)
+          .then(d => {
+            this.loadProjectData(d);
+            this.projectPath = path;
+            this.ui.status('Reverted to the saved version');
+          })
+          .catch(e => this.ui.status('Revert failed: ' + e.message));
+      };
+      if (this.dirty) {
+        this.ui.modal('Revert to Saved',
+          U.el('div', { style: { maxWidth: '320px' } },
+            ['Discard all unsaved changes and reload the last saved version of this project?']),
+          [{ label: 'Cancel' }, { label: 'Revert', primary: true, danger: true, fn: doRevert }]);
+      } else doRevert();
     }
     importImage() {
       this._pickFile('image/*', file => {
