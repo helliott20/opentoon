@@ -1,0 +1,32 @@
+name: Release
+
+# Pushing a version tag (e.g. v1.0.3) builds the Windows installer and
+# publishes it to GitHub Releases, which the desktop app's OTA updater reads.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and publish to GitHub Releases
+        run: npm run publish
+        env:
+          # the runner's built-in token; no personal access token required
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
