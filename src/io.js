@@ -236,11 +236,15 @@
     }
   };
 
-  /* ---------------- autosave (localStorage) ---------------- */
+  /* ---------------- save / open / autosave ---------------- */
   const AUTO_KEY = 'opentoon.autosave';
+  // the desktop file bridge (null in a plain browser)
+  const desktopFS = () => (window.OpenToonDesktop && window.OpenToonDesktop.fs) || null;
+
   const IO = {
     serialize, deserialize, renderFrame, Export, loadImage,
 
+    // browser fallback: download the project as a file
     saveProject(app) {
       const data = serialize(app);
       const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
@@ -248,6 +252,28 @@
       U.download(name + '.otoon', blob);
       app.dirty = false;
     },
+    // desktop: write the project straight to a real file path
+    writeProjectTo(app, filePath) {
+      const fsd = desktopFS();
+      if (!fsd) return Promise.reject(new Error('no file system'));
+      return fsd.writeFile(filePath, JSON.stringify(serialize(app))).then(r => {
+        if (!r || !r.ok) throw new Error((r && r.error) || 'write failed');
+        app.dirty = false;
+        return filePath;
+      });
+    },
+    // desktop: read + parse a project from a real file path
+    readProjectFrom(filePath) {
+      const fsd = desktopFS();
+      if (!fsd) return Promise.reject(new Error('no file system'));
+      return fsd.readFile(filePath).then(r => {
+        if (!r || !r.ok) throw new Error((r && r.error) || 'read failed');
+        const data = JSON.parse(r.data);
+        if (data.format !== 'otoon') throw new Error('Not an OpenToon project');
+        return deserialize(data);
+      });
+    },
+    // browser fallback: parse a project from a picked File object
     openProjectFile(app, file) {
       return file.text().then(txt => {
         const data = JSON.parse(txt);
@@ -255,24 +281,38 @@
         return deserialize(data);
       });
     },
+    // crash-safe autosave: a real file on desktop, localStorage in the browser
     autosave(app) {
+      const json = JSON.stringify(serialize(app));
+      const fsd = desktopFS();
+      if (fsd) { fsd.autosaveWrite(json).catch(() => {}); return true; }
       try {
-        localStorage.setItem(AUTO_KEY, JSON.stringify(serialize(app)));
+        localStorage.setItem(AUTO_KEY, json);
         localStorage.setItem(AUTO_KEY + '.time', Date.now().toString());
         return true;
-      } catch (e) { return false; }
+      } catch (e) { return false; }    // localStorage quota exceeded
     },
-    hasAutosave() { return !!localStorage.getItem(AUTO_KEY); },
-    autosaveTime() {
-      const t = localStorage.getItem(AUTO_KEY + '.time');
-      return t ? new Date(Number(t)) : null;
-    },
-    loadAutosave() {
+    // resolve to { project, palette, time } or null
+    readAutosave() {
+      const fsd = desktopFS();
+      if (fsd) {
+        return fsd.autosaveRead().then(info => {
+          if (!info || !info.data) return null;
+          return deserialize(JSON.parse(info.data)).then(d => ({
+            project: d.project, palette: d.palette, time: new Date(info.time)
+          }));
+        }).catch(() => null);
+      }
       const raw = localStorage.getItem(AUTO_KEY);
-      if (!raw) return Promise.reject(new Error('no autosave'));
-      return deserialize(JSON.parse(raw));
+      if (!raw) return Promise.resolve(null);
+      const t = localStorage.getItem(AUTO_KEY + '.time');
+      return deserialize(JSON.parse(raw)).then(d => ({
+        project: d.project, palette: d.palette, time: t ? new Date(Number(t)) : null
+      })).catch(() => null);
     },
     clearAutosave() {
+      const fsd = desktopFS();
+      if (fsd) fsd.autosaveClear().catch(() => {});
       localStorage.removeItem(AUTO_KEY);
       localStorage.removeItem(AUTO_KEY + '.time');
     },

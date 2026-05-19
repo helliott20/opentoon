@@ -15,5 +15,15 @@ contextBridge.exposeInMainWorld('OpenToonDesktop', {
   quitAndInstall: () => ipcRenderer.send('opentoon:quit-install'),
   // tell the main process the app has finished booting (dismisses the splash)
   signalReady: () => ipcRenderer.send('app:ready'),
-  splashProgress: (pct, label) => ipcRenderer.send('app:loading', { pct: pct, label: label })
+  splashProgress: (pct, label) => ipcRenderer.send('app:loading', { pct: pct, label: label }),
+  // real file IO for the desktop app: native dialogs, save-in-place, autosave
+  fs: {
+    saveDialog: (defaultPath) => ipcRenderer.invoke('opentoon:save-dialog', defaultPath),
+    openDialog: () => ipcRenderer.invoke('opentoon:open-dialog'),
+    readFile: (file) => ipcRenderer.invoke('opentoon:read-file', file),
+    writeFile: (file, data) => ipcRenderer.invoke('opentoon:write-file', file, data),
+    autosaveWrite: (data) => ipcRenderer.invoke('opentoon:autosave-write', data),
+    autosaveRead: () => ipcRenderer.invoke('opentoon:autosave-read'),
+    autosaveClear: () => ipcRenderer.invoke('opentoon:autosave-clear')
+  }
 });

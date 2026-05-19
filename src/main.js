@@ -29,6 +29,7 @@
       this.color = '#222222';
       this.dirty = false;
       this.celClipboard = null;
+      this.projectPath = null;   // path of the open .otoon file (desktop)
       this.playIn = null;
       this.playOut = null;
       this.audioBuffer = null;   // decoded AudioBuffer (runtime)
@@ -90,21 +91,22 @@
     }
 
     _offerAutosave() {
-      if (!OT.IO.hasAutosave()) return;
-      const t = OT.IO.autosaveTime();
-      const body = U.el('div', { style: { maxWidth: '320px' } }, [
-        'An autosaved project was found' + (t ? ' from ' + t.toLocaleString() : '') +
-        '. Restore it?'
-      ]);
-      this.ui.modal('Restore Autosave', body, [
-        { label: 'Start Fresh', fn: () => { OT.IO.clearAutosave(); } },
-        {
-          label: 'Restore', primary: true, fn: () => {
-            OT.IO.loadAutosave().then(d => this.loadProjectData(d))
-              .catch(e => this.ui.status('Restore failed: ' + e.message));
+      OT.IO.readAutosave().then(info => {
+        if (!info) return;
+        const t = info.time;
+        const body = U.el('div', { style: { maxWidth: '320px' } }, [
+          'An autosaved project was found' + (t ? ' from ' + t.toLocaleString() : '') +
+          '. Restore it?'
+        ]);
+        this.ui.modal('Restore Autosave', body, [
+          { label: 'Start Fresh', fn: () => { OT.IO.clearAutosave(); } },
+          {
+            label: 'Restore', primary: true, fn: () => {
+              this.loadProjectData({ project: info.project, palette: info.palette });
+            }
           }
-        }
-      ]);
+        ]);
+      }).catch(() => {});
     }
 
     /* ---------------- preferences (tool settings persist across sessions) ---- */
@@ -771,6 +773,7 @@
       this._activeLayer = this.project.layers[this.project.layers.length - 1];
       this.history.clear();
       this.dirty = false;
+      this.projectPath = null;
       this.colorPanel._renderSwatches();
       this.emitAll();
       this.stage.fitToCamera();
@@ -788,6 +791,7 @@
       this._activeLayer = this.project.layers[this.project.layers.length - 1];
       this.history.clear();
       this.dirty = false;
+      this.projectPath = null;
       this.colorPanel._renderSwatches();
       this.emitAll();
       this.stage.fitToCamera();
@@ -798,7 +802,31 @@
         this._loadAudioData(this.project.audio.data);
       this.ui.status('Project loaded');
     }
+    saveProject(saveAs) {
+      const fsd = window.OpenToonDesktop && window.OpenToonDesktop.fs;
+      if (!fsd) { OT.IO.saveProject(this); this.ui.status('Project saved'); return; }
+      const write = path => {
+        OT.IO.writeProjectTo(this, path)
+          .then(p => { this.projectPath = p; this.ui.status('Saved ' + p); })
+          .catch(e => this.ui.status('Save failed: ' + e.message));
+      };
+      // silent save-in-place once the project has a file; dialog otherwise
+      if (this.projectPath && !saveAs) { write(this.projectPath); return; }
+      const def = this.projectPath ||
+        (this.project.name || 'untitled').replace(/[^\w\-]+/g, '_') + '.otoon';
+      fsd.saveDialog(def).then(p => { if (p) write(p); });
+    }
     openProject() {
+      const fsd = window.OpenToonDesktop && window.OpenToonDesktop.fs;
+      if (fsd) {
+        fsd.openDialog().then(path => {
+          if (!path) return;
+          OT.IO.readProjectFrom(path)
+            .then(d => { this.loadProjectData(d); this.projectPath = path; })
+            .catch(e => this.ui.status('Open failed: ' + e.message));
+        });
+        return;
+      }
       this._pickFile('.otoon,application/json', file => {
         OT.IO.openProjectFile(this, file)
           .then(d => this.loadProjectData(d))
@@ -914,7 +942,7 @@
         if (ctrl) {
           if (k === 'z') { ev.preventDefault(); ev.shiftKey ? this.redo() : this.undo(); return; }
           if (k === 'y') { ev.preventDefault(); this.redo(); return; }
-          if (k === 's') { ev.preventDefault(); OT.IO.saveProject(this); this.ui.status('Project saved'); return; }
+          if (k === 's') { ev.preventDefault(); this.saveProject(ev.shiftKey); return; }
           if (k === 'o') { ev.preventDefault(); this.openProject(); return; }
           if (k === 'n') { ev.preventDefault(); this.ui.newProjectDialog(); return; }
           if (k === 'a') { ev.preventDefault(); this.selectAll(); return; }

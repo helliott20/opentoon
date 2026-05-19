@@ -60,7 +60,8 @@
         ['File', [
           { label: 'New Project…', sc: 'Ctrl+N', fn: () => this.newProjectDialog() },
           { label: 'Open Project…', sc: 'Ctrl+O', fn: () => a.openProject() },
-          { label: 'Save Project', sc: 'Ctrl+S', fn: () => OT.IO.saveProject(a) },
+          { label: 'Save Project', sc: 'Ctrl+S', fn: () => a.saveProject() },
+          { label: 'Save Project As…', sc: 'Ctrl+Shift+S', fn: () => a.saveProject(true) },
           { sep: 1 },
           { label: 'Import Image as Layer…', fn: () => a.importImage() },
           { label: 'Import Video…', fn: () => a._pickFile('video/*', f => a.importVideo(f)) },

@@ -182,6 +182,50 @@ function setupIpc() {
   ipcMain.on('opentoon:quit-install', () => {
     if (updater) { try { updater.quitAndInstall(); } catch (e) { /* ignore */ } }
   });
+
+  /* ---- project file IO ---- */
+  ipcMain.handle('opentoon:save-dialog', async (_e, defaultPath) => {
+    const r = await dialog.showSaveDialog(win, {
+      title: 'Save Project',
+      defaultPath: defaultPath || 'untitled.otoon',
+      filters: [{ name: 'OpenToon Project', extensions: ['otoon'] }]
+    });
+    return r.canceled ? null : r.filePath;
+  });
+  ipcMain.handle('opentoon:open-dialog', async () => {
+    const r = await dialog.showOpenDialog(win, {
+      title: 'Open Project',
+      properties: ['openFile'],
+      filters: [{ name: 'OpenToon Project', extensions: ['otoon'] }]
+    });
+    return (r.canceled || !r.filePaths.length) ? null : r.filePaths[0];
+  });
+  ipcMain.handle('opentoon:read-file', (_e, file) => {
+    try { return { ok: true, data: fs.readFileSync(file, 'utf8') }; }
+    catch (e) { return { ok: false, error: e.message }; }
+  });
+  ipcMain.handle('opentoon:write-file', (_e, file, data) => {
+    try { fs.writeFileSync(file, data, 'utf8'); return { ok: true }; }
+    catch (e) { return { ok: false, error: e.message }; }
+  });
+
+  /* ---- crash-safe autosave to the userData folder (no quota limit) ---- */
+  const autosaveFile = () => path.join(app.getPath('userData'), 'autosave.otoon');
+  ipcMain.handle('opentoon:autosave-write', (_e, data) => {
+    try { fs.writeFileSync(autosaveFile(), data, 'utf8'); return true; }
+    catch (e) { return false; }
+  });
+  ipcMain.handle('opentoon:autosave-read', () => {
+    try {
+      const f = autosaveFile();
+      if (!fs.existsSync(f)) return null;
+      return { data: fs.readFileSync(f, 'utf8'), time: fs.statSync(f).mtimeMs };
+    } catch (e) { return null; }
+  });
+  ipcMain.handle('opentoon:autosave-clear', () => {
+    try { fs.unlinkSync(autosaveFile()); } catch (e) { /* already gone */ }
+    return true;
+  });
 }
 
 app.whenReady().then(() => {
