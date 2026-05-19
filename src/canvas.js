@@ -477,10 +477,8 @@
 
       c.addEventListener('wheel', e => {
         e.preventDefault();
-        if (e.ctrlKey || true) {
-          const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-          this.zoomAt(e.clientX, e.clientY, f);
-        }
+        const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+        this.zoomAt(e.clientX, e.clientY, f);
       }, { passive: false });
 
     }
