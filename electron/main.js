@@ -8,7 +8,8 @@ const isDev = process.argv.includes('--dev') || !app.isPackaged;
 let win = null;
 let splash = null;
 let updater = null;
-let splashShownAt = 0;
+let splashAt = 0;       // when the splash became visible (0 = not shown yet)
+let appReady = false;   // renderer has signalled it finished booting
 let revealed = false;
 
 function createWindow() {
@@ -21,6 +22,7 @@ function createWindow() {
     backgroundColor: '#14161a',
     title: 'OpenToon Studio',
     autoHideMenuBar: true,
+    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -43,6 +45,8 @@ function createWindow() {
 }
 
 /* ---- launch splash window ---- */
+const MIN_SPLASH_MS = 2200;   // keep the splash on screen at least this long
+
 function createSplash() {
   splash = new BrowserWindow({
     width: 540,
@@ -61,27 +65,48 @@ function createSplash() {
     }
   });
   splash.loadFile(path.join(__dirname, '..', 'splash', 'splash.html'));
-  splash.once('ready-to-show', () => {
-    if (splash && !splash.isDestroyed()) { splash.show(); splashShownAt = Date.now(); }
-  });
-  splash.webContents.on('did-finish-load', () => {
+
+  const showSplash = () => {
+    if (splash && !splash.isDestroyed() && !splash.isVisible()) {
+      splash.show();
+      splashAt = Date.now();
+      maybeReveal();
+    }
+  };
+  // did-finish-load is reliable for a local file; ready-to-show is a bonus
+  splash.webContents.once('did-finish-load', () => {
+    showSplash();
     if (splash && !splash.isDestroyed())
       splash.webContents.send('splash:version', app.getVersion());
   });
+  splash.once('ready-to-show', showSplash);
+  splash.webContents.on('did-fail-load', () => forceReveal());
   splash.on('closed', () => { splash = null; });
 }
 
-// Reveal the main window and dismiss the splash. Idempotent -- called by the
-// renderer's app:ready signal and by a fallback timer, whichever fires first.
-function revealMain() {
+// Reveal the main window once the app is ready AND the splash has had its
+// minimum time on screen -- so a fast boot can't flash straight past it.
+function maybeReveal() {
+  if (revealed || !appReady) return;
+  // splash exists but hasn't painted yet -> wait; showSplash() re-calls this
+  if (splash && !splash.isDestroyed() && !splash.isVisible()) return;
+  if (splashAt) {
+    const shown = Date.now() - splashAt;
+    if (shown < MIN_SPLASH_MS) {
+      setTimeout(maybeReveal, MIN_SPLASH_MS - shown + 20);
+      return;
+    }
+  }
+  forceReveal();
+}
+
+// Unconditional reveal -- the safety net so the app can never get stuck.
+function forceReveal() {
   if (revealed) return;
   revealed = true;
-  const wait = Math.max(0, 700 - (splashShownAt ? Date.now() - splashShownAt : 700));
-  setTimeout(() => {
-    if (win && !win.isDestroyed()) win.show();
-    if (splash && !splash.isDestroyed()) splash.close();
-    splash = null;
-  }, wait);
+  if (win && !win.isDestroyed()) win.show();
+  if (splash && !splash.isDestroyed()) splash.close();
+  splash = null;
 }
 
 /* ---- live reload while developing ---- */
@@ -163,13 +188,13 @@ app.whenReady().then(() => {
   createSplash();
   createWindow();
   // the renderer signals app:ready once the project is loaded
-  ipcMain.once('app:ready', revealMain);
+  ipcMain.once('app:ready', () => { appReady = true; maybeReveal(); });
   ipcMain.on('app:loading', (_e, data) => {
     if (splash && !splash.isDestroyed())
       splash.webContents.send('splash:status', data || {});
   });
-  // fallback: reveal anyway if the renderer never signals (e.g. a load error)
-  setTimeout(revealMain, 12000);
+  // hard fallback: reveal anyway if the renderer never signals (load error)
+  setTimeout(forceReveal, 12000);
   setupIpc();
   watchForDev();
   setupUpdates();

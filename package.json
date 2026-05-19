@@ -40,6 +40,7 @@
       "fonts/**/*"
     ],
     "win": {
+      "icon": "assets/icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -49,6 +50,14 @@
         }
       ]
     },
+    "fileAssociations": [
+      {
+        "ext": "otoon",
+        "name": "OpenToon Project",
+        "description": "OpenToon animation project",
+        "icon": "assets/otoon-file.ico"
+      }
+    ],
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
