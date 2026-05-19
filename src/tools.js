@@ -204,6 +204,7 @@
     _vUp(pt, app) {
       const cel = this.t.cel;
       if (this.mode === 'eraser') {
+        this._flushErase();
         if (this.changed) { app.history.pushCelEdit('eraser', cel, this.before); app.emit('celchange'); }
         return;
       }
@@ -254,11 +255,27 @@
         if (res === null) next.push(st);
         else { changed = true; for (const p of res) next.push(p); }
       }
-      if (changed) {
-        cel.strokes = next;
-        cel.rebuild();
-        this.changed = true;
-        app.emit('render');
+      if (!changed) return;
+      cel.strokes = next;
+      this.changed = true;
+      // rebuild() re-renders every stroke. A tablet pen fires many coalesced
+      // events per frame, so calling it per event makes the eraser lag.
+      // Defer the heavy rebuild + render to at most once per animation frame.
+      this._erasePending = { cel: cel, app: app };
+      if (!this._eraseRAF) {
+        this._eraseRAF = requestAnimationFrame(() => {
+          this._eraseRAF = 0;
+          const p = this._erasePending;
+          if (p) { p.cel.rebuild(); p.app.emit('render'); }
+        });
+      }
+    }
+    _flushErase() {
+      if (this._eraseRAF) { cancelAnimationFrame(this._eraseRAF); this._eraseRAF = 0; }
+      if (this._erasePending) {
+        this._erasePending.cel.rebuild();
+        this._erasePending.app.emit('render');
+        this._erasePending = null;
       }
     }
   }
