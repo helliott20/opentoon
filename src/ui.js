@@ -172,7 +172,7 @@
           { label: 'Clear Camera Keyframes', fn: () => a.clearCameraKeys() }
         ]],
         ['Help', [
-          { label: 'Keyboard Shortcuts', fn: () => this.shortcutsDialog() },
+          { label: 'Keyboard Shortcuts…', fn: () => this.shortcutsDialog() },
           { label: 'About OpenToon', fn: () => this.aboutDialog() }
         ]]
       ];
@@ -957,30 +957,84 @@
       }
     }
 
+    // Interactive keyboard-shortcut editor: click a key, press the new one.
     shortcutsDialog() {
-      const rows = [
-        ['Space / Enter', 'Play / Stop'],
-        [', / .', 'Previous / next frame'],
-        ['Home / End', 'Go to start / end'],
-        ['V', 'Select pixels'], ['A', 'Transform layer (cut-out)'],
-        ['B', 'Brush'], ['N', 'Pencil'], ['E', 'Eraser'],
-        ['G', 'Paint Bucket'], ['I', 'Eyedropper'], ['R / O / L', 'Rectangle / Ellipse / Line'],
-        ['H', 'Pan tool'], ['Z', 'Zoom tool'], ['M', 'Flip canvas horizontally'],
-        ['[ / ]', 'Brush size down / up'],
-        ['Ctrl+C / X / V', 'Copy / cut / paste drawing'],
-        ['Ctrl+Z / Ctrl+Y', 'Undo / Redo'],
-        ['Ctrl+S / Ctrl+O / Ctrl+N', 'Save / Open / New project'],
-        ['Ctrl+A', 'Select all'],
-        ['F', 'Fit to camera'], ['Del', 'Clear drawing / delete selection'],
-        ['Middle-drag', 'Pan the view'],
-        ['Alt+click', 'Pick colour with a paint tool']
-      ];
-      const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '5px' } },
-        rows.map(([k, d]) => el('div', { class: 'field-row' }, [
-          el('span', { style: { color: '#8b919c' } }, [d]),
-          el('b', {}, [k])
-        ])));
-      this.modal('Keyboard Shortcuts', body);
+      const a = this.app;
+      const cmds = OT.KEY_COMMANDS || [];
+      const KEYNAMES = { ' ': 'Space', arrowleft: '←', arrowright: '→', arrowup: '↑', arrowdown: '↓' };
+      const fmtKey = k => {
+        if (!k) return '—';
+        if (KEYNAMES[k]) return KEYNAMES[k];
+        return k.length === 1 ? k.toUpperCase() : (k.charAt(0).toUpperCase() + k.slice(1));
+      };
+      let capturing = null;
+      const body = el('div', {
+        style: { display: 'flex', flexDirection: 'column', gap: '3px', minWidth: '380px' }
+      });
+
+      const rebuild = () => {
+        body.innerHTML = '';
+        const resolved = a._resolvedKeymap();
+        ['Tools', 'Animation', 'View'].forEach(cat => {
+          body.appendChild(el('div', { class: 'panel-head', style: { margin: '7px 0 2px' } }, [cat]));
+          cmds.filter(c => c.cat === cat).forEach(c => {
+            const key = (a.keymap && a.keymap[c.id]) || c.def;
+            const clash = resolved[key] && resolved[key] !== c.id;
+            const keyBtn = el('button', {
+              class: 'btn', style: { padding: '3px 10px', minWidth: '78px' }
+            }, [capturing === c.id ? 'Press a key…' : fmtKey(key)]);
+            if (clash && capturing !== c.id) keyBtn.style.borderColor = 'var(--hot)';
+            keyBtn.addEventListener('click', () => {
+              capturing = (capturing === c.id) ? null : c.id;
+              rebuild();
+            });
+            body.appendChild(el('div', { class: 'field-row' }, [
+              el('span', {
+                style: { color: capturing === c.id ? 'var(--accent)' : 'var(--text-dim)' }
+              }, [c.label]),
+              keyBtn
+            ]));
+          });
+        });
+        body.appendChild(el('div', { class: 'menu-sep', style: { margin: '8px 0 5px' } }));
+        body.appendChild(el('div', {
+          class: 'chk-row', style: { lineHeight: '1.6' },
+          text: 'Fixed: Ctrl+Z / Y undo·redo · Ctrl+S / O / N · Ctrl+C / X / V · Ctrl+A select all · '
+            + 'Space play · Esc cancel · [ ] brush size · + − zoom · middle-drag pan · Alt+click pick colour.'
+        }));
+      };
+
+      // capture phase, so a captured key never reaches the normal handler
+      const onCapture = ev => {
+        if (!document.body.contains(body)) { window.removeEventListener('keydown', onCapture, true); return; }
+        if (!capturing) return;
+        ev.preventDefault(); ev.stopPropagation();
+        const k = ev.key.toLowerCase();
+        if (['shift', 'control', 'alt', 'meta'].indexOf(k) >= 0) return;
+        if (k !== 'escape') {
+          const cmd = cmds.find(c => c.id === capturing);
+          if (cmd) {
+            if (k === cmd.def) delete a.keymap[capturing];
+            else a.keymap[capturing] = k;
+            a._savePrefs();
+          }
+        }
+        capturing = null;
+        rebuild();
+      };
+
+      rebuild();
+      window.addEventListener('keydown', onCapture, true);
+      this.modal('Keyboard Shortcuts', body, [
+        {
+          label: 'Reset to Defaults',
+          fn: () => { a.keymap = {}; a._savePrefs(); capturing = null; rebuild(); return false; }
+        },
+        {
+          label: 'Close', primary: true,
+          fn: () => { window.removeEventListener('keydown', onCapture, true); }
+        }
+      ]);
     }
     aboutDialog() {
       const desktop = window.OpenToonDesktop;

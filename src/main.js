@@ -19,6 +19,33 @@
     }
   }
 
+  // ---- remappable single-key commands (the keyboard-shortcut editor) ----
+  // `def` is the factory-default key; users override it via app.keymap.
+  const KEY_COMMANDS = [
+    { id: 'tool-select', label: 'Select tool', cat: 'Tools', def: 'v', noRepeat: 1, run: a => a.tools.select('select') },
+    { id: 'tool-transform', label: 'Transform tool', cat: 'Tools', def: 'a', noRepeat: 1, run: a => a.tools.select('transform') },
+    { id: 'tool-brush', label: 'Brush tool', cat: 'Tools', def: 'b', noRepeat: 1, run: a => a.tools.select('brush') },
+    { id: 'tool-pencil', label: 'Pencil tool', cat: 'Tools', def: 'n', noRepeat: 1, run: a => a.tools.select('pencil') },
+    { id: 'tool-eraser', label: 'Eraser tool', cat: 'Tools', def: 'e', noRepeat: 1, run: a => a.tools.select('eraser') },
+    { id: 'tool-fill', label: 'Paint Bucket tool', cat: 'Tools', def: 'g', noRepeat: 1, run: a => a.tools.select('fill') },
+    { id: 'tool-eyedropper', label: 'Eyedropper tool', cat: 'Tools', def: 'i', noRepeat: 1, run: a => a.tools.select('eyedropper') },
+    { id: 'tool-rect', label: 'Rectangle tool', cat: 'Tools', def: 'r', noRepeat: 1, run: a => a.tools.select('rect') },
+    { id: 'tool-ellipse', label: 'Ellipse tool', cat: 'Tools', def: 'o', noRepeat: 1, run: a => a.tools.select('ellipse') },
+    { id: 'tool-line', label: 'Line tool', cat: 'Tools', def: 'l', noRepeat: 1, run: a => a.tools.select('line') },
+    { id: 'tool-hand', label: 'Pan tool', cat: 'Tools', def: 'h', noRepeat: 1, run: a => a.tools.select('hand') },
+    { id: 'tool-zoom', label: 'Zoom tool', cat: 'Tools', def: 'z', noRepeat: 1, run: a => a.tools.select('zoom') },
+    { id: 'play', label: 'Play / Stop', cat: 'Animation', def: 'enter', prevent: 1, noRepeat: 1, run: a => a.playback.toggle() },
+    { id: 'step-next', label: 'Next frame', cat: 'Animation', def: '.', run: a => a.playback.step(1) },
+    { id: 'step-prev', label: 'Previous frame', cat: 'Animation', def: ',', run: a => a.playback.step(-1) },
+    { id: 'goto-start', label: 'Go to start', cat: 'Animation', def: 'home', prevent: 1, run: a => a.playback.gotoStart() },
+    { id: 'goto-end', label: 'Go to end', cat: 'Animation', def: 'end', prevent: 1, run: a => a.playback.gotoEnd() },
+    { id: 'clear', label: 'Clear drawing', cat: 'Animation', def: 'delete', prevent: 1, run: a => a.clearDrawing() },
+    { id: 'fit', label: 'Fit to camera', cat: 'View', def: 'f', run: a => a.stage.fitToCamera() },
+    { id: 'flip-h', label: 'Flip view horizontally', cat: 'View', def: 'm', run: a => a.toggleFlipH() },
+    { id: 'clean-view', label: 'Clean canvas (hide panels)', cat: 'View', def: 'tab', prevent: 1, noRepeat: 1, run: a => a.toggleCleanView() }
+  ];
+  OT.KEY_COMMANDS = KEY_COMMANDS;
+
   class App extends OT.Emitter {
     constructor() {
       super();
@@ -58,6 +85,7 @@
       this.symmetry = { on: false, axis: 'v' };
       // pen-tablet pressure response: out = min + (max-min) * raw^gamma
       this.pen = { gamma: 1, min: 0, max: 1 };
+      this.keymap = {};          // user keyboard-shortcut overrides {cmdId: key}
 
       this.history = new OT.History(60);
       this.history.on('change', () => { this.dirty = true; });
@@ -150,6 +178,7 @@
         if (Array.isArray(pr.recentFiles)) this.recentFiles = pr.recentFiles.slice(0, 8);
         if (pr.sidebarWidth) this.sidebarWidth = pr.sidebarWidth;
         if (pr.pen) Object.assign(this.pen, pr.pen);
+        if (pr.keymap && typeof pr.keymap === 'object') this.keymap = pr.keymap;
       } catch (e) { /* ignore corrupt prefs */ }
     }
     _savePrefs() {
@@ -161,7 +190,8 @@
           loopMode: this.playback ? this.playback.loopMode : null,
           recentFiles: this.recentFiles,
           sidebarWidth: this.sidebarWidth,
-          pen: this.pen
+          pen: this.pen,
+          keymap: this.keymap
         }));
       } catch (e) { /* ignore */ }
     }
@@ -1033,11 +1063,16 @@
     }
 
     /* ---------------- input ---------------- */
+    // Resolve the live key -> command-id table from defaults + user overrides.
+    _resolvedKeymap() {
+      const map = {};
+      for (const c of KEY_COMMANDS) {
+        const key = (this.keymap && this.keymap[c.id]) || c.def;
+        if (key) map[key] = c.id;
+      }
+      return map;
+    }
     _installKeys() {
-      const TOOLKEYS = {
-        v: 'select', a: 'transform', b: 'brush', n: 'pencil', e: 'eraser', g: 'fill',
-        i: 'eyedropper', r: 'rect', o: 'ellipse', l: 'line', h: 'hand', z: 'zoom'
-      };
       window.addEventListener('keydown', ev => {
         const t = ev.target;
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
@@ -1057,17 +1092,19 @@
           return;
         }
 
-        if (TOOLKEYS[k] && !ev.repeat) { this.tools.select(TOOLKEYS[k]); return; }
-        if (k === 'tab' && !ev.repeat) { ev.preventDefault(); this.toggleCleanView(); return; }
-        if (k === 'enter' && !ev.repeat) { ev.preventDefault(); this.playback.toggle(); return; }
+        // remappable single-key commands (see KEY_COMMANDS / the editor)
+        const cmdId = this._resolvedKeymap()[k];
+        if (cmdId) {
+          const cmd = KEY_COMMANDS.find(c => c.id === cmdId);
+          if (cmd) {
+            if (cmd.prevent) ev.preventDefault();
+            if (!(ev.repeat && cmd.noRepeat)) cmd.run(this);
+            return;
+          }
+        }
+
+        // fixed keys -- play (Space), cancel, brush-size and zoom nudges
         if (k === ' ') { ev.preventDefault(); if (!ev.repeat) this.playback.toggle(); return; }
-        if (k === ',') { this.playback.step(-1); return; }
-        if (k === '.') { this.playback.step(1); return; }
-        if (k === 'home') { this.playback.gotoStart(); return; }
-        if (k === 'end') { this.playback.gotoEnd(); return; }
-        if (k === 'f') { this.stage.fitToCamera(); return; }
-        if (k === 'm') { this.toggleFlipH(); return; }
-        if (k === 'delete' || k === 'backspace') { ev.preventDefault(); this.clearDrawing(); return; }
         if (k === 'escape') {
           if (this.tools.active.name === 'select') this.tools.tools.select.cancel(this);
           return;
