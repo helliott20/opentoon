@@ -6,10 +6,11 @@
 
   const TOOL_ICON = {
     select: '<path d="M5 3l15 8-7 1.6L11 20z"/>',
+    lasso: '<path d="M7 22a5 5 0 0 1-2-4"/><path d="M3.3 14A6.8 6.8 0 0 1 2 10c0-4.4 4.5-8 10-8s10 3.6 10 8-4.5 8-10 8a12 12 0 0 1-5-1"/><circle cx="5" cy="16" r="2"/>',
     transform: '<rect x="6" y="6" width="12" height="12"/><circle cx="6" cy="6" r="2.2"/><circle cx="18" cy="6" r="2.2"/><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="18" r="2.2"/>',
     brush: '<path d="M4 21c3.2 0 5-1.8 5-5l-3-3c-3.2 0-5 1.8-5 5z"/><path d="M8 13L19 2.2a2 2 0 0 1 3 3L11 16z"/>',
     pencil: '<path d="M4 20l4-1L19 8l-3-3L5 16z"/><path d="M14 6l3 3"/>',
-    eraser: '<path d="M9 20H5l-2-3 9-9 8 8-4 4"/><path d="M9 11l8 8"/>',
+    eraser: '<path d="M7 21l-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M21 21H7"/><path d="M5 11l9 9"/>',
     fill: '<path d="M11 3l8 8-7.5 7.5L4 11z"/><path d="M9 5l-5 6"/><path d="M20 13c0 0 2.4 3 2.4 4.8a2.4 2.4 0 1 1-4.8 0c0-1.8 2.4-4.8 2.4-4.8z"/>',
     eyedropper: '<path d="M3 21l2-5 9-9 3 3-9 9z"/><path d="M14 4.5l5 5"/><circle cx="18" cy="6" r="2.6"/>',
     rect: '<rect x="4" y="6" width="16" height="12" rx="1"/>',
@@ -19,13 +20,14 @@
     zoom: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-5.5-5.5M11 8v6M8 11h6"/>'
   };
   const TOOL_LIST = [
-    ['select', 'V'], ['transform', 'A'], ['sep'], ['brush', 'B'], ['pencil', 'N'], ['eraser', 'E'],
+    ['select', 'V'], ['lasso', 'Q'], ['transform', 'A'],
+    ['sep'], ['brush', 'B'], ['pencil', 'N'], ['eraser', 'E'],
     ['sep'], ['fill', 'G'], ['eyedropper', 'I'],
     ['sep'], ['rect', 'R'], ['ellipse', 'O'], ['line', 'L'],
     ['sep'], ['hand', 'H'], ['zoom', 'Z']
   ];
   const TOOL_NAME = {
-    select: 'Select Pixels', transform: 'Transform Layer (Cut-out)',
+    select: 'Select Pixels', lasso: 'Lasso Select', transform: 'Transform Layer (Cut-out)',
     brush: 'Brush', pencil: 'Pencil', eraser: 'Eraser',
     fill: 'Paint Bucket', eyedropper: 'Eyedropper', rect: 'Rectangle',
     ellipse: 'Ellipse', line: 'Line', hand: 'Pan', zoom: 'Zoom'
@@ -133,6 +135,12 @@
           { label: 'Layout: Compact', fn: () => a.applyWorkspace('compact') },
           { label: 'Reset Layout', fn: () => a.applyWorkspace('reset') },
           { sep: 1 },
+          {
+            label: 'Drawing Window (Pen Display)…',
+            fn: () => { if (a.penCast) a.penCast.open(); },
+            enabled: !!(a.penCast && a.penCast.available())
+          },
+          { sep: 1 },
           { label: (a.showCamera ? '✓ ' : '') + 'Camera Guide', fn: () => a.toggleCamera() },
           { label: (a.onion.on ? '✓ ' : '') + 'Onion Skin', fn: () => a.toggleOnion() },
           { label: 'Onion Skin Settings…', fn: () => this.onionDialog() },
@@ -171,7 +179,9 @@
           { label: 'Merge Down', fn: () => a.mergeDown(a.activeLayer()) },
           { sep: 1 },
           { label: 'Set Transform Keyframe', fn: () => a.setLayerKeyHere() },
-          { label: 'Reset Layer Transform', fn: () => a.resetLayerTransform(a.activeLayer()) }
+          { label: 'Reset Layer Transform', fn: () => a.resetLayerTransform(a.activeLayer()) },
+          { sep: 1 },
+          { label: 'Auto-Shade Layer (Light & Shade)…', fn: () => this.shadeDialog() }
         ]],
         ['Camera', [
           { label: 'Add / Update Camera Keyframe', fn: () => a.addCameraKey() },
@@ -351,6 +361,11 @@
           mk('Delete', () => a.deleteSelection())
         ]));
         body.appendChild(el('div', { class: 'chk-row', text: 'Drag a box, then move / scale / rotate.' }));
+      } else if (t === 'lasso') {
+        const del = el('button', { class: 'btn', text: 'Delete Selection', style: { padding: '5px 8px' } });
+        del.addEventListener('click', () => a.deleteSelection());
+        body.appendChild(el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } }, [del]));
+        body.appendChild(el('div', { class: 'chk-row', text: 'Draw a freeform loop to grab strokes or a pixel region, then drag it. Esc drops it.' }));
       } else if (t === 'transform') {
         const mk = (lbl, fn) => {
           const b = el('button', { class: 'btn', text: lbl, style: { padding: '5px 8px' } });
@@ -368,6 +383,57 @@
       } else {
         body.appendChild(el('div', { class: 'chk-row', text: 'Drag in the canvas to use this tool.' }));
       }
+      if (t === 'brush' || t === 'pencil' || t === 'eraser')
+        body.appendChild(this._brushPresetsUI());
+    }
+
+    // Saved brush presets — chips that apply a named tool configuration.
+    _brushPresetsUI() {
+      const a = this.app;
+      const wrap = el('div', {
+        style: { display: 'flex', flexDirection: 'column', gap: '5px', marginTop: '4px' }
+      });
+      wrap.appendChild(el('div', { class: 'panel-subhead', text: 'Brushes' }));
+      const chips = el('div', { class: 'preset-row' });
+      (a.brushPresets || []).forEach(p => {
+        const chip = el('button', {
+          class: 'preset-chip', text: p.name,
+          title: p.name + ' — ' + p.tool + ' · ' + U.round(p.size, 0) + 'px'
+        });
+        chip.addEventListener('click', () => a.applyBrushPreset(p.id));
+        chip.addEventListener('contextmenu', e => {
+          e.preventDefault();
+          this.contextMenu(e.clientX, e.clientY, [
+            { label: 'Delete "' + p.name + '"', fn: () => a.deleteBrushPreset(p.id) },
+            { sep: 1 },
+            { label: 'Reset Brushes to Defaults', fn: () => a.resetBrushPresets() }
+          ]);
+        });
+        chips.appendChild(chip);
+      });
+      const add = el('button', {
+        class: 'preset-chip add', text: '+ Save',
+        title: 'Save the current tool settings as a brush'
+      });
+      add.addEventListener('click', () => this._saveBrushDialog());
+      chips.appendChild(add);
+      wrap.appendChild(chips);
+      return wrap;
+    }
+    _saveBrushDialog() {
+      const input = el('input', { type: 'text', value: 'My Brush' });
+      const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px' } }, [
+        el('div', {
+          class: 'chk-row',
+          text: 'Save the current ' + this.app.tools.active.name +
+            ' size, opacity and smoothing as a reusable brush.'
+        }),
+        this._field('Brush name', input)
+      ]);
+      this.modal('Save Brush', body, [
+        { label: 'Cancel' },
+        { label: 'Save', primary: true, fn: () => this.app.saveBrushPreset(input.value) }
+      ]);
     }
 
     /* ============================ layers ============================ */
@@ -592,7 +658,8 @@
         if (!head || !sb.contains(head)) return;
         if (e.target.closest('button,input')) return;   // header controls aren't collapse hits
         const panel = head.closest('.panel');
-        if (!panel || !panel.id) return;
+        // only the panel's own top header collapses it -- not a sub-heading
+        if (!panel || !panel.id || head.parentElement !== panel) return;
         panel.classList.toggle('collapsed');
         const set = {};
         (a.collapsedPanels || []).forEach(id => { set[id] = 1; });
@@ -865,6 +932,142 @@
             this.app._savePrefs();
             this.status('Pen pressure settings saved');
           }
+        }
+      ]);
+    }
+
+    savePaletteDialog() {
+      const a = this.app;
+      const input = el('input', { type: 'text', value: a.project.name || 'My Palette' });
+      const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px' } }, [
+        el('div', {
+          class: 'chk-row',
+          text: 'Save the current ' + a.palette.swatches.length +
+            '-colour palette to your library so other projects can reuse it.'
+        }),
+        this._field('Palette name', input)
+      ]);
+      this.modal('Save Palette', body, [
+        { label: 'Cancel' },
+        { label: 'Save', primary: true, fn: () => a.savePaletteToLibrary(input.value) }
+      ]);
+    }
+    loadPaletteDialog() {
+      const a = this.app;
+      let m;
+      const list = el('div', {
+        style: {
+          display: 'flex', flexDirection: 'column', gap: '6px',
+          maxHeight: '300px', overflow: 'auto', minWidth: '330px'
+        }
+      });
+      const refresh = () => {
+        list.innerHTML = '';
+        if (!a.paletteLibrary.length) {
+          list.appendChild(el('div', {
+            class: 'chk-row', text: 'No saved palettes yet — use “Save Palette to Library”.'
+          }));
+          return;
+        }
+        a.paletteLibrary.forEach(p => {
+          const sw = el('div', { style: { display: 'flex', gap: '2px', flexWrap: 'wrap' } });
+          (p.colors || []).slice(0, 18).forEach(c => sw.appendChild(el('div', {
+            style: {
+              width: '13px', height: '13px', borderRadius: '2px',
+              background: c, border: '1px solid #0007'
+            }
+          })));
+          const load = el('button', { class: 'btn', text: 'Load', style: { padding: '4px 12px' } });
+          load.addEventListener('click', () => { a.loadPaletteFromLibrary(p.name); if (m) m.close(); });
+          const del = el('button', {
+            class: 'icon-btn', title: 'Delete this palette',
+            html: U.svg('<path d="M6 6l12 12M18 6L6 18"/>')
+          });
+          del.addEventListener('click', () => { a.deletePaletteFromLibrary(p.name); refresh(); });
+          list.appendChild(el('div', { class: 'field-row', style: { alignItems: 'flex-start' } }, [
+            el('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } }, [
+              el('span', {}, [p.name + '  ·  ' + (p.colors || []).length + ' colours']), sw
+            ]),
+            el('div', { style: { display: 'flex', gap: '5px', alignItems: 'center' } }, [load, del])
+          ]));
+        });
+      };
+      refresh();
+      m = this.modal('Palette Library', list, [{ label: 'Close', primary: true }]);
+    }
+
+    // Auto-shading: pick a light direction, generate a soft shade layer.
+    shadeDialog() {
+      const a = this.app;
+      const layer = a.activeLayer();
+      const prev = (layer && layer.shadeOpts) || {};
+      let angle = prev.angle != null ? prev.angle : 225;
+
+      const norm = d => ((Math.round(d) % 360) + 360) % 360;
+      // 8-way light-direction picker -- the arrow points toward the light
+      const DIRS = [
+        [-1, -1, '↖'], [0, -1, '↑'], [1, -1, '↗'],
+        [-1, 0, '←'], null, [1, 0, '→'],
+        [-1, 1, '↙'], [0, 1, '↓'], [1, 1, '↘']
+      ];
+      const cells = [];
+      const grid = el('div', {
+        style: { display: 'grid', gridTemplateColumns: 'repeat(3,42px)', gap: '4px', flex: '0 0 auto' }
+      });
+      const markSel = () => cells.forEach(b => b.classList.toggle('primary', b._angle === norm(angle)));
+      DIRS.forEach(d => {
+        if (!d) {
+          grid.appendChild(el('div', {
+            style: {
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: 'var(--accent2)', fontSize: '17px'
+            }
+          }, ['☀']));
+          return;
+        }
+        const btn = el('button', { class: 'btn', text: d[2], style: { padding: '7px 0', fontSize: '15px' } });
+        btn._angle = norm(Math.atan2(d[1], d[0]) * 180 / Math.PI);
+        btn.addEventListener('click', () => { angle = btn._angle; markSel(); });
+        cells.push(btn);
+        grid.appendChild(btn);
+      });
+      markSel();
+
+      const shadow = el('input', {
+        type: 'range', min: 0, max: 1, step: 0.05,
+        value: prev.shadow != null ? prev.shadow : 0.55
+      });
+      const highlight = el('input', {
+        type: 'range', min: 0, max: 1, step: 0.05,
+        value: prev.highlight != null ? prev.highlight : 0.4
+      });
+      const softness = el('input', {
+        type: 'range', min: 2, max: 40, step: 1,
+        value: prev.softness != null ? prev.softness : 12
+      });
+      const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } }, [
+        el('div', {
+          class: 'chk-row',
+          text: 'Generates a soft shading layer above "' + (layer ? layer.name : '—') +
+            '" — one shade drawing per cel, across the whole animation.'
+        }),
+        el('div', { style: { display: 'flex', gap: '14px', alignItems: 'center' } }, [
+          grid,
+          el('div', { class: 'chk-row', text: 'Click the direction the light comes from.' })
+        ]),
+        this._field('Shadow strength', shadow),
+        this._field('Highlight strength', highlight),
+        this._field('Softness', softness)
+      ]);
+      this.modal('Auto-Shade — Light & Shade', body, [
+        { label: 'Cancel' },
+        {
+          label: 'Generate', primary: true, fn: () => a.generateShading({
+            angle: angle,
+            shadow: parseFloat(shadow.value),
+            highlight: parseFloat(highlight.value),
+            softness: parseFloat(softness.value)
+          })
         }
       ]);
     }

@@ -44,6 +44,17 @@
     return c;
   }
 
+  // Ray-cast point-in-polygon test (polygon = array of {x,y}).
+  function pointInPoly(x, y, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+      if (((yi > y) !== (yj > y)) &&
+        (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+
   /* ============================== base ============================== */
   class Tool {
     constructor(name) { this.name = name; }
@@ -96,14 +107,36 @@
       this.sm.y += (pt.y - this.sm.y) * k;
       this._seg(this.last.x, this.last.y, this.last.p, this.sm.x, this.sm.y, pt.pressure);
       this.last = { x: this.sm.x, y: this.sm.y, p: pt.pressure };
-      this._rComposite();
+      this._scheduleComposite();
     }
     _rUp(pt, app) {
+      if (this._compRAF) { cancelAnimationFrame(this._compRAF); this._compRAF = 0; }
       this._seg(this.last.x, this.last.y, this.last.p, pt.x, pt.y, pt.pressure);
       this._rComposite();
       app.history.pushCelEdit(this.mode, this.t.cel, this.before);
       this.t.cel.dirty();
       app.emit('celchange');
+    }
+    // A graphics-tablet pen fires many coalesced move events per frame.
+    // Compositing the whole cel and emitting a full stage render on every one
+    // of them is what makes the raster brush / eraser lag. The dabs are still
+    // stamped into `buf` on every event (cheap); only the heavy composite +
+    // render is deferred to at most once per animation frame.
+    _scheduleComposite() {
+      if (this._compRAF) return;
+      this._compRAF = requestAnimationFrame(() => {
+        this._compRAF = 0;
+        if (this.t && !this.vec) this._rComposite();
+      });
+    }
+    // Same idea for the vector brush, whose live stamp lands on the cel
+    // directly: keep stamping every event, but coalesce the render emit.
+    _rafEmit(app) {
+      if (this._emitRAF) return;
+      this._emitRAF = requestAnimationFrame(() => {
+        this._emitRAF = 0;
+        if (this.t) app.emit('render');
+      });
     }
     _r(p) { return Math.max(0.35, this.size / 2 * p); }
     _dot(x, y, p) {
@@ -199,10 +232,11 @@
       }
       this.lastStamp = b;
       cel.dirty();
-      app.emit('render');
+      this._rafEmit(app);
     }
     _vUp(pt, app) {
       const cel = this.t.cel;
+      if (this._emitRAF) { cancelAnimationFrame(this._emitRAF); this._emitRAF = 0; }
       if (this.mode === 'eraser') {
         this._flushErase();
         if (this.changed) { app.history.pushCelEdit('eraser', cel, this.before); app.emit('celchange'); }
@@ -309,10 +343,20 @@
       this.sm.x += (pt.x - this.sm.x) * k;
       this.sm.y += (pt.y - this.sm.y) * k;
       this.raw.push({ x: this.sm.x, y: this.sm.y });
-      this._render(app);
+      this._schedule(app);
+    }
+    // Coalesce the per-event re-render to one per frame -- a tablet pen would
+    // otherwise re-stroke the whole polyline dozens of times per frame.
+    _schedule(app) {
+      if (this._rRAF) return;
+      this._rRAF = requestAnimationFrame(() => {
+        this._rRAF = 0;
+        if (this.t) this._render(app);
+      });
     }
     pointerUp(pt, e, app) {
       if (!this.t) return;
+      if (this._rRAF) { cancelAnimationFrame(this._rRAF); this._rRAF = 0; }
       this.raw.push({ x: pt.x, y: pt.y });
       const cel = this.t.cel;
       if (this.vec) {
@@ -978,6 +1022,258 @@
     }
   }
 
+  /* ============================== lasso (freeform select) ============================== */
+  // Draw a freeform loop to grab strokes (vector layers) or a pixel region
+  // (bitmap layers), then drag the catch to move it.
+  class LassoTool extends Tool {
+    constructor() {
+      super('lasso');
+      this.mode = 'idle';
+      this.poly = null;        // the loop being drawn
+      this.vsel = [];          // selected vector strokes
+      this.vcel = null;
+      this.raster = null;      // a lifted floating pixel piece
+    }
+    onDeactivate(app) {
+      this._commitRaster(app);
+      this.vsel = []; this.vcel = null; this.poly = null; this.mode = 'idle';
+      app.emit('overlayrender');
+    }
+    // a frame / layer change drops the selection so it can't act on a hidden cel
+    flush(app) {
+      this._commitRaster(app);
+      this.vsel = []; this.vcel = null;
+    }
+
+    pointerDown(pt, e, app) {
+      const layer = app.activeLayer();
+      this.layerKind = layer ? layer.type : null;
+      if (this.layerKind === 'vector') {
+        if (this.vsel.length && this.vcel && this._inVBounds(pt)) {
+          this.mode = 'vmove';
+          this.before = this.vcel.snapshot();
+          this.last = { x: pt.x, y: pt.y };
+          this.moved = false;
+          return;
+        }
+        this.vsel = [];
+      } else if (this.layerKind === 'drawing') {
+        if (this.raster && this._inRasterBounds(pt)) {
+          this.mode = 'rmove';
+          this.off = { x: pt.x - this.raster.x, y: pt.y - this.raster.y };
+          return;
+        }
+        this._commitRaster(app);   // a new loop drops any floating piece
+      } else {
+        app.ui.status('The lasso works on drawing layers');
+        this.mode = 'idle';
+        return;
+      }
+      this.mode = 'lasso';
+      this.poly = [{ x: pt.x, y: pt.y }];
+      app.emit('overlayrender');
+    }
+    pointerMove(pt, e, app) {
+      if (this.mode === 'lasso') {
+        const last = this.poly[this.poly.length - 1];
+        if (U.dist(last.x, last.y, pt.x, pt.y) > 1.6) this.poly.push({ x: pt.x, y: pt.y });
+        app.emit('overlayrender');
+      } else if (this.mode === 'vmove') {
+        const dx = pt.x - this.last.x, dy = pt.y - this.last.y;
+        this.last = { x: pt.x, y: pt.y };
+        if (dx || dy) this.moved = true;
+        for (const st of this.vsel) {
+          if (st.type === 'fill')
+            st.contour = st.contour.map(p => ({ x: p.x + dx, y: p.y + dy }));
+          else
+            st.pts = st.pts.map(p => ({ x: p.x + dx, y: p.y + dy, p: p.p }));
+        }
+        this.vcel.rebuild();
+        app.emit('render'); app.emit('overlayrender');
+      } else if (this.mode === 'rmove') {
+        this.raster.x = pt.x - this.off.x;
+        this.raster.y = pt.y - this.off.y;
+        app.emit('render'); app.emit('overlayrender');
+      }
+    }
+    pointerUp(pt, e, app) {
+      if (this.mode === 'lasso') {
+        if (this.poly && this.poly.length >= 3) {
+          if (this.layerKind === 'vector') this._lassoVector(app);
+          else this._lassoRaster(app);
+        }
+        this.poly = null;
+      } else if (this.mode === 'vmove') {
+        if (this.moved) {
+          app.history.pushCelEdit('Move strokes', this.vcel, this.before);
+          app.emit('celchange');
+        }
+      }
+      this.mode = 'idle';
+      app.emit('render'); app.emit('overlayrender');
+    }
+
+    _strokeCentroid(st) {
+      const pts = st.type === 'fill' ? st.contour : st.pts;
+      if (!pts || !pts.length) return null;
+      let x = 0, y = 0;
+      for (const p of pts) { x += p.x; y += p.y; }
+      return { x: x / pts.length, y: y / pts.length };
+    }
+    _lassoVector(app) {
+      const cel = app.activeLayer().celAt(app.frame);
+      if (!cel) { app.ui.status('Nothing on this frame to select'); return; }
+      this.vcel = cel;
+      const sel = [];
+      for (const st of cel.strokes) {
+        const c = this._strokeCentroid(st);
+        if (c && pointInPoly(c.x, c.y, this.poly)) sel.push(st);
+      }
+      this.vsel = sel;
+      app.ui.status(sel.length
+        ? 'Lassoed ' + sel.length + ' stroke' + (sel.length === 1 ? '' : 's') + ' — drag to move'
+        : 'No strokes inside the lasso');
+    }
+    _lassoRaster(app) {
+      const layer = app.activeLayer();
+      if (layer.locked) { app.ui.status('Layer is locked'); return; }
+      const cel = layer.celAt(app.frame);
+      if (!cel) { app.ui.status('Nothing on this frame'); return; }
+      let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+      for (const p of this.poly) {
+        x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y);
+        x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y);
+      }
+      x0 = U.clamp(Math.floor(x0), 0, cel.w); y0 = U.clamp(Math.floor(y0), 0, cel.h);
+      x1 = U.clamp(Math.ceil(x1), 0, cel.w); y1 = U.clamp(Math.ceil(y1), 0, cel.h);
+      const w = x1 - x0, h = y1 - y0;
+      if (w < 2 || h < 2) return;
+      const before = cel.snapshot();
+      const trace = ctx => {
+        ctx.beginPath();
+        ctx.moveTo(this.poly[0].x - x0, this.poly[0].y - y0);
+        for (let i = 1; i < this.poly.length; i++)
+          ctx.lineTo(this.poly[i].x - x0, this.poly[i].y - y0);
+        ctx.closePath();
+      };
+      // copy the lassoed pixels into a floating canvas
+      const fc = document.createElement('canvas');
+      fc.width = w; fc.height = h;
+      const fx = fc.getContext('2d');
+      fx.save(); trace(fx); fx.clip();
+      fx.drawImage(cel.canvas, -x0, -y0);
+      fx.restore();
+      // erase the lassoed region from the cel
+      const ctx = cel.ctx;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(this.poly[0].x, this.poly[0].y);
+      for (let i = 1; i < this.poly.length; i++) ctx.lineTo(this.poly[i].x, this.poly[i].y);
+      ctx.closePath();
+      ctx.clip();
+      ctx.clearRect(0, 0, cel.w, cel.h);
+      ctx.restore();
+      cel.dirty();
+      this.raster = { canvas: fc, x: x0, y: y0, w: w, h: h, cel: cel, before: before };
+      app.ui.status('Lassoed a region — drag to move it, lasso again to drop it');
+    }
+    _commitRaster(app) {
+      const r = this.raster;
+      if (!r) return;
+      this.raster = null;
+      r.cel.ctx.drawImage(r.canvas, r.x, r.y);
+      r.cel.dirty();
+      app.history.pushCelEdit('Move selection', r.cel, r.before);
+      app.emit('render'); app.emit('celchange');
+    }
+    _inVBounds(pt) {
+      if (!this.vsel.length) return false;
+      let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+      for (const st of this.vsel) {
+        const b = V().strokeBounds(st);
+        x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y);
+        x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
+      }
+      return pt.x >= x0 && pt.x <= x1 && pt.y >= y0 && pt.y <= y1;
+    }
+    _inRasterBounds(pt) {
+      const r = this.raster;
+      return !!r && pt.x >= r.x && pt.x <= r.x + r.w && pt.y >= r.y && pt.y <= r.y + r.h;
+    }
+    // Del key -> remove the lasso catch.
+    deleteLasso(app) {
+      if (this.vsel.length && this.vcel) {
+        const before = this.vcel.snapshot();
+        this.vcel.strokes = this.vcel.strokes.filter(s => this.vsel.indexOf(s) < 0);
+        this.vsel = [];
+        this.vcel.rebuild();
+        app.history.pushCelEdit('Delete strokes', this.vcel, before);
+        app.emit('render'); app.emit('celchange');
+        return true;
+      }
+      if (this.raster) {
+        const r = this.raster;     // region is already cleared from the cel
+        this.raster = null;
+        r.cel.dirty();
+        app.history.pushCelEdit('Delete selection', r.cel, r.before);
+        app.emit('render'); app.emit('celchange');
+        return true;
+      }
+      return false;
+    }
+    // Esc -> drop the selection, restoring lifted pixels.
+    cancel(app) {
+      if (this.raster) {
+        this.raster.cel.restore(this.raster.before);
+        this.raster = null;
+        app.emit('render'); app.emit('celchange');
+      }
+      this.vsel = []; this.vcel = null;
+      app.emit('overlayrender');
+    }
+    hasSelection() { return this.vsel.length > 0 || !!this.raster; }
+
+    drawOverlay(ctx, app) {
+      const zoom = app.stage.view.zoom;
+      if (this.mode === 'lasso' && this.poly && this.poly.length) {
+        ctx.save();
+        ctx.lineWidth = 1.4 / zoom;
+        ctx.setLineDash([5 / zoom, 4 / zoom]);
+        ctx.strokeStyle = '#fff';
+        ctx.beginPath();
+        ctx.moveTo(this.poly[0].x, this.poly[0].y);
+        for (let i = 1; i < this.poly.length; i++) ctx.lineTo(this.poly[i].x, this.poly[i].y);
+        if (this.poly.length > 2) ctx.closePath();
+        ctx.stroke();
+        ctx.restore();
+      }
+      if (this.vsel && this.vsel.length) {
+        ctx.save();
+        ctx.strokeStyle = '#4a9fd4';
+        ctx.lineWidth = 1.4 / zoom;
+        ctx.setLineDash([4 / zoom, 3 / zoom]);
+        for (const st of this.vsel) {
+          const b = V().strokeBounds(st);
+          ctx.strokeRect(b.x, b.y, b.w, b.h);
+        }
+        ctx.restore();
+      }
+      if (this.raster) {
+        const r = this.raster;
+        ctx.save();
+        ctx.globalAlpha = 0.95;
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(r.canvas, r.x, r.y);
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#4a9fd4';
+        ctx.lineWidth = 1.4 / zoom;
+        ctx.setLineDash([4 / zoom, 3 / zoom]);
+        ctx.strokeRect(r.x, r.y, r.w, r.h);
+        ctx.restore();
+      }
+    }
+  }
+
   /* ============================== transform (cut-out / peg) ============================== */
   class TransformTool extends Tool {
     constructor() { super('transform'); }
@@ -1092,13 +1388,14 @@
   const PAINTY = { brush: 1, pencil: 1, fill: 1 };
   // tools that a flipped-over pen eraser should override
   const PEN_ERASE = { brush: 1, pencil: 1 };
-  const CEL_TOOLS = { brush: 1, pencil: 1, eraser: 1, fill: 1, rect: 1, ellipse: 1, line: 1, select: 1 };
+  const CEL_TOOLS = { brush: 1, pencil: 1, eraser: 1, fill: 1, rect: 1, ellipse: 1, line: 1, select: 1, lasso: 1 };
   class ToolManager {
     constructor(app) {
       this.app = app;
       this.dragging = false;
       const list = [
         new SelectTool(),
+        new LassoTool(),
         new TransformTool(),
         new PaintTool('brush'),
         new PencilTool(),

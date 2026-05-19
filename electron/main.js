@@ -1,11 +1,12 @@
 /* OpenToon Studio - Electron main process (desktop app + OTA updates) */
 'use strict';
-const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog, ipcMain, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const isDev = process.argv.includes('--dev') || !app.isPackaged;
 let win = null;
+let penWin = null;         // secondary canvas-only "pen display" window
 let splash = null;
 let updater = null;
 let splashAt = 0;          // when the splash became visible (0 = not shown yet)
@@ -53,6 +54,53 @@ function createWindow() {
   if (isDev) win.webContents.openDevTools({ mode: 'detach' });
   // re-created via 'activate' after startup -> no splash to wait on
   if (revealed) win.show();
+
+  // closing the main window also closes its pen-display companion
+  win.on('closed', () => {
+    win = null;
+    if (penWin && !penWin.isDestroyed()) penWin.close();
+  });
+}
+
+/* ---- secondary "pen display" drawing window ----
+   A canvas-only window meant to be dragged onto a Wacom-style pen display.
+   It owns no project; it mirrors the main window's stage and forwards input
+   back. See src/pencast.js and pen/pen.js for the two ends of the bridge. */
+function createPenWindow() {
+  if (penWin && !penWin.isDestroyed()) { penWin.focus(); return; }
+
+  // a pen tablet is usually a second monitor -- open there if one exists
+  let bounds = { x: undefined, y: undefined, width: 1180, height: 800 };
+  try {
+    const primary = screen.getPrimaryDisplay();
+    const ext = screen.getAllDisplays().find(d => d.id !== primary.id);
+    if (ext && ext.workArea) {
+      bounds = {
+        x: ext.workArea.x, y: ext.workArea.y,
+        width: ext.workArea.width, height: ext.workArea.height
+      };
+    }
+  } catch (e) { /* single display -- use the default size */ }
+
+  penWin = new BrowserWindow({
+    x: bounds.x, y: bounds.y,
+    width: bounds.width, height: bounds.height,
+    minWidth: 480, minHeight: 360,
+    backgroundColor: '#0c0d10',
+    title: 'OpenToon — Drawing Window',
+    autoHideMenuBar: true,
+    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, 'pen-preload.js')
+    }
+  });
+  penWin.loadFile(path.join(__dirname, '..', 'pen', 'pen.html'));
+  penWin.on('closed', () => {
+    penWin = null;
+    if (win && !win.isDestroyed()) win.webContents.send('opentoon:pen-detach');
+  });
 }
 
 /* ---- launch splash window ---- */
@@ -243,6 +291,30 @@ function setupIpc() {
     const f = pendingOpenFile;
     pendingOpenFile = null;
     return f;
+  });
+
+  /* ---- secondary pen-display window: open + relay frames / input ---- */
+  ipcMain.handle('opentoon:pen-open', () => {
+    const existed = !!(penWin && !penWin.isDestroyed());
+    createPenWindow();
+    return { ok: true, focused: existed };
+  });
+  // the pen window finished loading -> tell the main window to start streaming
+  ipcMain.on('opentoon:pen-ready', () => {
+    if (win && !win.isDestroyed()) win.webContents.send('opentoon:pen-attach');
+  });
+  // main -> pen : a composited stage frame (WebP ArrayBuffer + meta)
+  ipcMain.on('opentoon:pen-frame', (_e, buf, meta) => {
+    if (penWin && !penWin.isDestroyed())
+      penWin.webContents.send('opentoon:pen-frame', buf, meta);
+  });
+  // pen -> main : forwarded pointer input
+  ipcMain.on('opentoon:pen-input', (_e, msg) => {
+    if (win && !win.isDestroyed()) win.webContents.send('opentoon:pen-input', msg);
+  });
+  // pen -> main : forwarded toolbar command
+  ipcMain.on('opentoon:pen-command', (_e, msg) => {
+    if (win && !win.isDestroyed()) win.webContents.send('opentoon:pen-command', msg);
   });
 }
 

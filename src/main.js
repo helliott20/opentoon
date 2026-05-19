@@ -19,10 +19,60 @@
     }
   }
 
+  // ---- auto-shading: derive soft form-shadow / highlight bands from a drawing ----
+  // A "crescent" is the character silhouette with a shifted copy of itself
+  // carved out; blurred, the leftover band reads as soft light or shade.
+  function shadeCrescent(src, w, h, color, shx, shy, soft) {
+    const sil = document.createElement('canvas');
+    sil.width = w; sil.height = h;
+    const s = sil.getContext('2d');
+    s.drawImage(src, 0, 0);
+    s.globalCompositeOperation = 'source-in';
+    s.fillStyle = color;
+    s.fillRect(0, 0, w, h);                       // a flat-coloured silhouette
+    const out = document.createElement('canvas');
+    out.width = w; out.height = h;
+    const o = out.getContext('2d');
+    o.drawImage(sil, 0, 0);
+    o.globalCompositeOperation = 'destination-out';
+    o.filter = 'blur(' + soft + 'px)';
+    o.drawImage(src, shx, shy);                   // carve away a shifted copy
+    o.filter = 'none';
+    o.globalCompositeOperation = 'destination-in';
+    o.drawImage(src, 0, 0);                       // keep the band inside the art
+    return out;
+  }
+  // Render a shading cel for `src` into `octx`, lit from the given angle.
+  // The light direction (dx,dy) points toward the light source.
+  function shadeInto(octx, src, w, h, opt) {
+    octx.setTransform(1, 0, 0, 1, 0, 0);
+    octx.clearRect(0, 0, w, h);
+    const angle = (opt && opt.angle != null ? opt.angle : 225) * Math.PI / 180;
+    const dx = Math.cos(angle), dy = Math.sin(angle);
+    const soft = Math.max(0.5, opt && opt.softness != null ? opt.softness : 12);
+    const off = 3 + soft * 0.9;
+    const shadow = opt && opt.shadow != null ? opt.shadow : 0.55;
+    const hi = opt && opt.highlight != null ? opt.highlight : 0.4;
+    // form shadow lands on the side away from the light
+    if (shadow > 0) {
+      octx.globalAlpha = shadow;
+      octx.drawImage(shadeCrescent(src, w, h, '#0a1024', dx * off, dy * off, soft), 0, 0);
+    }
+    // highlight lands on the side facing the light
+    if (hi > 0) {
+      octx.globalAlpha = hi;
+      octx.drawImage(
+        shadeCrescent(src, w, h, '#fff6df', -dx * off * 0.85, -dy * off * 0.85, soft * 0.85), 0, 0);
+    }
+    octx.globalAlpha = 1;
+  }
+  OT.shadeInto = shadeInto;
+
   // ---- remappable single-key commands (the keyboard-shortcut editor) ----
   // `def` is the factory-default key; users override it via app.keymap.
   const KEY_COMMANDS = [
     { id: 'tool-select', label: 'Select tool', cat: 'Tools', def: 'v', noRepeat: 1, run: a => a.tools.select('select') },
+    { id: 'tool-lasso', label: 'Lasso tool', cat: 'Tools', def: 'q', noRepeat: 1, run: a => a.tools.select('lasso') },
     { id: 'tool-transform', label: 'Transform tool', cat: 'Tools', def: 'a', noRepeat: 1, run: a => a.tools.select('transform') },
     { id: 'tool-brush', label: 'Brush tool', cat: 'Tools', def: 'b', noRepeat: 1, run: a => a.tools.select('brush') },
     { id: 'tool-pencil', label: 'Pencil tool', cat: 'Tools', def: 'n', noRepeat: 1, run: a => a.tools.select('pencil') },
@@ -45,6 +95,18 @@
     { id: 'clean-view', label: 'Clean canvas (hide panels)', cat: 'View', def: 'tab', prevent: 1, noRepeat: 1, run: a => a.toggleCleanView() }
   ];
   OT.KEY_COMMANDS = KEY_COMMANDS;
+
+  // Factory brush presets. A preset is just a named bundle of tool settings;
+  // users add their own with "Save Brush" and they persist in prefs.
+  const DEFAULT_BRUSHES = [
+    { id: 'd-ink', name: 'Fine Ink', tool: 'pencil', size: 3, opacity: 1, smoothing: 0.6 },
+    { id: 'd-pen', name: 'Drawing Pen', tool: 'brush', size: 7, opacity: 1, smoothing: 0.45 },
+    { id: 'd-round', name: 'Round Brush', tool: 'brush', size: 14, opacity: 1, smoothing: 0.5 },
+    { id: 'd-marker', name: 'Marker', tool: 'brush', size: 30, opacity: 0.85, smoothing: 0.3 },
+    { id: 'd-pencil', name: 'Sketch Pencil', tool: 'pencil', size: 5, opacity: 0.7, smoothing: 0.25 },
+    { id: 'd-eraser', name: 'Block Eraser', tool: 'eraser', size: 44, opacity: 1, smoothing: 0 }
+  ];
+  OT.DEFAULT_BRUSHES = DEFAULT_BRUSHES;
 
   class App extends OT.Emitter {
     constructor() {
@@ -88,6 +150,8 @@
       this.pen = { gamma: 1, min: 0, max: 1 };
       this.keymap = {};          // user keyboard-shortcut overrides {cmdId: key}
       this.collapsedPanels = []; // ids of sidebar panels collapsed to their header
+      this.brushPresets = DEFAULT_BRUSHES.map(b => Object.assign({}, b));
+      this.paletteLibrary = [];  // saved named palettes {name, colors:[hex]}
 
       this.history = new OT.History(60);
       this.history.on('change', () => { this.dirty = true; });
@@ -102,6 +166,7 @@
       this.ui = new OT.UI(this);
       this.colorPanel = new OT.ColorPanel(this, document.getElementById('colorpanel'));
       this.timeline = new OT.Timeline(this);
+      this.penCast = new OT.PenCast(this);   // secondary pen-display window
 
       this._installKeys();
       this._installGuards();
@@ -183,6 +248,8 @@
         if (pr.pen) Object.assign(this.pen, pr.pen);
         if (pr.keymap && typeof pr.keymap === 'object') this.keymap = pr.keymap;
         if (Array.isArray(pr.collapsedPanels)) this.collapsedPanels = pr.collapsedPanels;
+        if (Array.isArray(pr.brushPresets) && pr.brushPresets.length) this.brushPresets = pr.brushPresets;
+        if (Array.isArray(pr.paletteLibrary)) this.paletteLibrary = pr.paletteLibrary;
       } catch (e) { /* ignore corrupt prefs */ }
     }
     _savePrefs() {
@@ -197,7 +264,9 @@
           timelineHeight: this.timelineHeight,
           pen: this.pen,
           keymap: this.keymap,
-          collapsedPanels: this.collapsedPanels
+          collapsedPanels: this.collapsedPanels,
+          brushPresets: this.brushPresets,
+          paletteLibrary: this.paletteLibrary
         }));
       } catch (e) { /* ignore */ }
     }
@@ -235,6 +304,106 @@
       this._savePrefs();
       this.ui._buildMenu();
       this.ui.status('Recent files cleared');
+    }
+
+    /* ---------------- brush presets (custom brushes) ---------------- */
+    // Which (size, opacity) settings keys a given tool uses.
+    _brushKeys(tool) {
+      if (tool === 'pencil') return { size: 'pencilSize', opacity: 'pencilOpacity' };
+      if (tool === 'eraser') return { size: 'eraserSize', opacity: 'eraserOpacity' };
+      return { size: 'brushSize', opacity: 'brushOpacity' };
+    }
+    applyBrushPreset(id) {
+      const p = this.brushPresets.find(b => b.id === id);
+      if (!p) return;
+      const tool = (p.tool === 'pencil' || p.tool === 'eraser') ? p.tool : 'brush';
+      this.tools.select(tool);
+      const k = this._brushKeys(tool);
+      this.settings[k.size] = U.clamp(p.size, 1, 300);
+      this.settings[k.opacity] = U.clamp(p.opacity, 0.05, 1);
+      if (tool !== 'eraser' && p.smoothing != null)
+        this.settings.smoothing = U.clamp(p.smoothing, 0, 1);
+      this._savePrefs();
+      this.ui._buildToolOpts();
+      this.emit('overlayrender');
+      this.ui.status('Brush: ' + p.name);
+    }
+    // Capture the current paint tool's settings as a new named brush.
+    saveBrushPreset(name) {
+      const tn = this.tools.active.name;
+      const tool = (tn === 'pencil' || tn === 'eraser') ? tn : 'brush';
+      const k = this._brushKeys(tool);
+      const preset = {
+        id: 'u' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36),
+        name: ((name || '').trim() || 'My Brush').slice(0, 28),
+        tool: tool,
+        size: this.settings[k.size],
+        opacity: this.settings[k.opacity],
+        smoothing: this.settings.smoothing
+      };
+      this.brushPresets.push(preset);
+      this._savePrefs();
+      this.ui._buildToolOpts();
+      this.ui.status('Saved brush "' + preset.name + '"');
+    }
+    deleteBrushPreset(id) {
+      this.brushPresets = this.brushPresets.filter(b => b.id !== id);
+      this._savePrefs();
+      this.ui._buildToolOpts();
+      this.ui.status('Brush deleted');
+    }
+    resetBrushPresets() {
+      this.brushPresets = OT.DEFAULT_BRUSHES.map(b => Object.assign({}, b));
+      this._savePrefs();
+      this.ui._buildToolOpts();
+      this.ui.status('Brushes reset to defaults');
+    }
+
+    /* ---------------- colour palettes ---------------- */
+    // Swap the project palette for a fresh set of hex colours.
+    replacePalette(colors, announce) {
+      if (!colors || !colors.length) { this.ui.status('No colours to load'); return; }
+      this.palette = new OT.Palette(colors.slice(0, 256));
+      if (this.colorPanel) this.colorPanel.selIndex = -1;
+      this.emit('palettechange');
+      this.dirty = true;
+      if (announce !== false)
+        this.ui.status('Palette loaded — ' + this.palette.swatches.length + ' colours');
+    }
+    // Import a palette from a .gpl / .json / plain hex-list file.
+    importPaletteFile(file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const colors = OT.Palette.parseText(reader.result);
+        if (!colors.length) { this.ui.status('No colours found in "' + file.name + '"'); return; }
+        this.replacePalette(colors);
+      };
+      reader.onerror = () => this.ui.status('Could not read the palette file');
+      reader.readAsText(file);
+    }
+    // Export the current palette as a GIMP .gpl file (widely importable).
+    exportPalette() {
+      if (!this.palette.swatches.length) { this.ui.status('The palette is empty'); return; }
+      const base = (this.project.name || 'OpenToon').replace(/[^\w\-]+/g, '_') || 'palette';
+      const gpl = OT.Palette.toGPL(this.palette.swatches, this.project.name || 'OpenToon');
+      U.download(base + '.gpl', new Blob([gpl], { type: 'text/plain' }));
+      this.ui.status('Palette exported as ' + base + '.gpl');
+    }
+    savePaletteToLibrary(name) {
+      name = ((name || '').trim() || ('Palette ' + (this.paletteLibrary.length + 1))).slice(0, 40);
+      this.paletteLibrary = this.paletteLibrary.filter(p => p.name !== name);
+      this.paletteLibrary.unshift({ name: name, colors: this.palette.swatches.map(s => s.color) });
+      if (this.paletteLibrary.length > 24) this.paletteLibrary.length = 24;
+      this._savePrefs();
+      this.ui.status('Saved palette "' + name + '" to your library');
+    }
+    loadPaletteFromLibrary(name) {
+      const p = this.paletteLibrary.find(x => x.name === name);
+      if (p) this.replacePalette(p.colors);
+    }
+    deletePaletteFromLibrary(name) {
+      this.paletteLibrary = this.paletteLibrary.filter(p => p.name !== name);
+      this._savePrefs();
     }
 
     /* ---------------- state ---------------- */
@@ -452,6 +621,9 @@
         const t = this.tools.tools.select;
         if (t.sel || (t.vsel && t.vsel.length)) { this.deleteSelection(); return; }
       }
+      if (this.tools.active.name === 'lasso' && this.tools.tools.lasso.hasSelection()) {
+        this.deleteSelection(); return;
+      }
       const cel = l.celAt(this.frame);
       if (!cel) { this.ui.status('Nothing to clear'); return; }
       const before = cel.snapshot();
@@ -564,6 +736,42 @@
       this.doStruct('Reset layer transform', () => { layer.transform.keyframes = []; });
     }
 
+    /* ---------------- auto-shading (light & shade) ---------------- */
+    // Build a shading layer above the active drawing layer: every cel gets a
+    // soft form-shadow / highlight pair derived from a chosen light direction.
+    // Re-running updates the existing shading layer instead of stacking.
+    generateShading(opts) {
+      const src = this._dl();
+      if (!src) return;
+      if (src.shadeOf) { this.ui.status('Pick the character layer, not its shading layer'); return; }
+      let hasCels = false;
+      for (const k in src.cels) { hasCels = true; break; }
+      if (!hasCels) { this.ui.status('"' + src.name + '" has no drawings to shade'); return; }
+      const W = this.project.width, H = this.project.height;
+      this.doStruct('Generate shading', () => {
+        let shade = this.project.layers.find(l => l.shadeOf === src.id);
+        if (!shade) {
+          shade = new OT.Layer(src.name + ' · Shade', 'drawing');
+          shade.shadeOf = src.id;
+          this.project.addLayer(shade, this.project.layers.indexOf(src) + 1);
+        }
+        shade.shadeOpts = Object.assign({}, opts);
+        shade.cels = {};
+        for (const num in src.cels) {
+          const sc = src.cels[num];
+          sc.rebuild();                       // make sure a vector cel's raster is current
+          const cel = new OT.Cel(sc.num, W, H, 'raster');
+          shadeInto(cel.ctx, sc.canvas, W, H, opts);
+          cel.dirty();
+          shade.cels[num] = cel;
+        }
+        shade.exposure = src.exposure.slice();
+        shade.nextNum = src.nextNum;
+        this._activeLayer = shade;
+      });
+      this.ui.status('Shading layer generated from "' + src.name + '"');
+    }
+
     /* ---------------- selection helpers ---------------- */
     flipSelection(axis) {
       const t = this.tools.tools.select;
@@ -579,8 +787,13 @@
       this.emit('render');
     }
     deleteSelection() {
+      const name = this.tools.active.name;
+      if (name === 'lasso') {
+        if (!this.tools.tools.lasso.deleteLasso(this)) this.ui.status('No lasso selection');
+        return;
+      }
       const t = this.tools.tools.select;
-      if (this.tools.active.name !== 'select') { this.ui.status('No selection'); return; }
+      if (name !== 'select') { this.ui.status('No selection'); return; }
       if (t.sel) t.deleteSel(this);
       else if (t.vsel && t.vsel.length) t.deleteVSel(this);
       else this.ui.status('No selection');
@@ -1150,7 +1363,9 @@
         // fixed keys -- play (Space), cancel, brush-size and zoom nudges
         if (k === ' ') { ev.preventDefault(); if (!ev.repeat) this.playback.toggle(); return; }
         if (k === 'escape') {
-          if (this.tools.active.name === 'select') this.tools.tools.select.cancel(this);
+          const an = this.tools.active.name;
+          if (an === 'select') this.tools.tools.select.cancel(this);
+          else if (an === 'lasso') this.tools.tools.lasso.cancel(this);
           return;
         }
         if (k === '[' || k === ']') {

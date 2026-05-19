@@ -29,6 +29,60 @@
       return p;
     }
   }
+  // Normalise any hex string ('#abc', 'AABBCC', ...) to '#rrggbb' lowercase.
+  function normHex(c) {
+    c = String(c || '').trim();
+    if (c[0] !== '#') c = '#' + c;
+    const rgb = U.hexToRgb(c);
+    return U.rgbToHex(rgb.r, rgb.g, rgb.b);
+  }
+  // Parse palette text from a .gpl / .json / plain hex-list file -> [hex,...].
+  Palette.parseText = function (text) {
+    text = String(text || '');
+    const out = [], seen = {};
+    const push = h => { if (h && !seen[h]) { seen[h] = 1; out.push(h); } };
+    const t = text.trim();
+    // JSON: ["#rrggbb",...] | [{color}] | {colors:[...]}
+    if (t[0] === '[' || t[0] === '{') {
+      try {
+        let j = JSON.parse(t);
+        if (j && !Array.isArray(j) && j.colors) j = j.colors;
+        if (Array.isArray(j)) {
+          for (const e of j) {
+            const c = typeof e === 'string' ? e : (e && e.color);
+            if (c && /^#?[0-9a-f]{3}([0-9a-f]{3})?$/i.test(String(c).trim())) push(normHex(c));
+          }
+        }
+        if (out.length) return out;
+      } catch (e) { /* not JSON -- scan as text */ }
+    }
+    // GIMP .gpl: "R G B<TAB>name"
+    if (/GIMP Palette/i.test(text)) {
+      text.split(/\r?\n/).forEach(line => {
+        const m = line.match(/^\s*(\d{1,3})\s+(\d{1,3})\s+(\d{1,3})/);
+        if (m) push(U.rgbToHex(+m[1], +m[2], +m[3]));
+      });
+      if (out.length) return out;
+    }
+    // plain hex, one per line (.txt / .hex)
+    text.split(/\r?\n/).forEach(line => {
+      if (/^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(line.trim())) push(normHex(line.trim()));
+    });
+    // any remaining #rrggbb / #rgb tokens embedded in the text
+    (text.match(/#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3}\b/g) || []).forEach(h => push(normHex(h)));
+    return out;
+  };
+  // Serialise a palette to a GIMP .gpl file (importable by most paint apps).
+  Palette.toGPL = function (swatches, name) {
+    let s = 'GIMP Palette\nName: ' + (name || 'OpenToon') + '\nColumns: 8\n#\n';
+    (swatches || []).forEach((sw, i) => {
+      const rgb = U.hexToRgb(sw.color);
+      const p = n => String(U.clamp(Math.round(n), 0, 255)).padStart(3, ' ');
+      s += p(rgb.r) + ' ' + p(rgb.g) + ' ' + p(rgb.b) + '\t' + (sw.name || ('Color ' + (i + 1))) + '\n';
+    });
+    return s;
+  };
+  Palette.DEFAULTS = DEFAULT_SWATCHES.slice();
   OT.Palette = Palette;
 
   /* ============================== ColorPanel ============================== */
@@ -77,7 +131,14 @@
       body.appendChild(U.el('div', { class: 'color-row' }, [chip, this.hexIn]));
 
       // swatches
-      body.appendChild(U.el('div', { class: 'panel-head', style: { background: 'none', padding: '2px 0' } }, ['Palette']));
+      const palMenu = U.el('button', {
+        class: 'icon-btn', title: 'Palette options — import / export / library',
+        html: U.svg('<circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/>')
+      });
+      palMenu.addEventListener('click', e => { e.stopPropagation(); this._paletteMenu(e); });
+      body.appendChild(U.el('div', { class: 'panel-subhead palette-head' }, [
+        U.el('span', {}, ['Palette']), palMenu
+      ]));
       this.swWrap = U.el('div', { class: 'swatches' });
       body.appendChild(this.swWrap);
       this._renderSwatches();
@@ -139,6 +200,22 @@
         this.app.emit('palettechange');
       });
       this.swWrap.appendChild(add);
+    }
+
+    _paletteMenu(e) {
+      const a = this.app;
+      a.ui.contextMenu(e.clientX, e.clientY, [
+        {
+          label: 'Import Palette File…',
+          fn: () => a._pickFile('.gpl,.txt,.json,.otpal,.hex,.css', f => a.importPaletteFile(f))
+        },
+        { label: 'Export Palette (.gpl)…', fn: () => a.exportPalette() },
+        { sep: 1 },
+        { label: 'Save Palette to Library…', fn: () => a.ui.savePaletteDialog() },
+        { label: 'Load Palette from Library…', fn: () => a.ui.loadPaletteDialog() },
+        { sep: 1 },
+        { label: 'Reset to Default Palette', fn: () => a.replacePalette(OT.Palette.DEFAULTS.slice()) }
+      ]);
     }
 
     setFromHex(hex, silent) {

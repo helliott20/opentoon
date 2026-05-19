@@ -18,6 +18,13 @@ contextBridge.exposeInMainWorld('OpenToonDesktop', {
   splashProgress: (pct, label) => ipcRenderer.send('app:loading', { pct: pct, label: label }),
   // a .otoon double-clicked while the app is already running
   onOpenFile: cb => ipcRenderer.on('opentoon:open-file', (_e, p) => cb(p)),
+  // secondary "pen display" drawing window (see src/pencast.js)
+  openPenWindow: () => ipcRenderer.invoke('opentoon:pen-open'),
+  onPenAttach: cb => ipcRenderer.on('opentoon:pen-attach', () => cb()),
+  onPenDetach: cb => ipcRenderer.on('opentoon:pen-detach', () => cb()),
+  sendPenFrame: (buf, meta) => ipcRenderer.send('opentoon:pen-frame', buf, meta),
+  onPenInput: cb => ipcRenderer.on('opentoon:pen-input', (_e, msg) => cb(msg)),
+  onPenCommand: cb => ipcRenderer.on('opentoon:pen-command', (_e, msg) => cb(msg)),
   // real file IO for the desktop app: native dialogs, save-in-place, autosave
   fs: {
     saveDialog: (defaultPath) => ipcRenderer.invoke('opentoon:save-dialog', defaultPath),

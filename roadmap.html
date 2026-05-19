@@ -146,8 +146,12 @@
       incremental save and revert-to-saved were added; pen pressure is
       curve-adjustable; canvas rotation, a customizable shortcut editor and
       workspace layout presets shipped; settings persist; Wacom eraser-flip works;
-      the laggy vector eraser is throttled; and the right-click / context-menu /
-      status-bar-clipping bugs are resolved. Remaining items:
+      the secondary pen-display drawing window landed; the brush / pencil /
+      eraser are frame-throttled so a tablet pen no longer lags; a lasso
+      selection tool, custom brush presets, colour-palette import / export and
+      directional auto-shading were added; the UI got a refinement pass; and
+      the right-click / context-menu / status-bar-clipping bugs are resolved.
+      Remaining items:
     </p>
     <ul>
       <li><span class="tag med">Medium</span>
@@ -177,11 +181,12 @@ const DATA = [
     ['done','Smart paint bucket','Fills line-enclosed regions with gap closing and a live hover highlight.'],
     ['done','Auto-connect strokes','Stroke endpoints snap together so line art forms closed shapes.'],
     ['done','Vector stroke editing','Eraser splits strokes; select / move / delete strokes.'],
+    ['done','Lasso selection tool','Freeform-lasso individual strokes or a pixel region, then drag the catch to move it.'],
     ['done','Eyedropper &amp; symmetry','Colour pick plus mirror / symmetry drawing.'],
     ['done','Wacom eraser-flip support','Flip the pen to its eraser end and it erases, even with the brush selected.'],
     ['done','Pen pressure curve','Adjustable sensitivity curve plus min / max pressure range, set in a Pen Pressure dialog.'],
     ['done','Canvas rotation','Rotate the drawing view in 15° steps from the viewbar — turn the paper while inking.'],
-    ['rec','Brush presets &amp; custom brushes','Saveable brush library — a core Harmony workflow.'],
+    ['done','Brush presets &amp; custom brushes','Save the current tool settings as a named brush; the preset library persists between sessions.'],
     ['rec','Pen tilt support','Tilt-aware brushes for shading and calligraphic strokes.'],
     ['rec','Layer blend modes','Multiply / screen / overlay etc. — only opacity exists today.'],
   ]],
@@ -215,6 +220,7 @@ const DATA = [
   ['Camera &amp; Effects','🎥',[
     ['done','Camera framing guide','On-stage camera rectangle.'],
     ['done','Camera keyframes','Pan / zoom / rotate with smooth interpolation; export is camera-aware.'],
+    ['done','Auto-shading from a light direction','Generate a soft form-shadow / highlight layer for a coloured character — the light angle, shadow / highlight strength and softness are all adjustable.'],
     ['planned','Multiplane camera depth','Parallax depth between layers.'],
     ['planned','Particle effects','Emitter-based effects (snow, sparks, etc.).'],
   ]],
@@ -235,7 +241,8 @@ const DATA = [
     ['done','Undo / redo history','Full history for drawing and structural edits.'],
     ['done','Export GIF / MP4 / WebM / PNG','Animated GIF, H.264 MP4, WebM video, PNG sequence (ZIP), single frame.'],
     ['done','Project templates','New Project offers seven full templates — resolution, frame rate, length and background.'],
-    ['done','Import image as layer','Bring reference art onto the stage.'],
+    ['done','Import image as layer','Bring reference art, backgrounds and character sheets onto the stage.'],
+    ['done','Colour palette import / export','Import .gpl / .json / hex-list palettes and export to .gpl, with a saved-palette library that persists between projects.'],
     ['done','Canvas resize after drawing','Change the project resolution later, scaling the artwork or cropping / extending it.'],
     ['done','Persist app settings','Tool sizes, onion, grid, pen, layout and shortcuts are remembered between sessions.'],
   ]],
@@ -252,7 +259,7 @@ const DATA = [
     ['done','Resizable &amp; collapsible panels','Drag the sidebar width, collapse panels to their header, resize the timeline.'],
     ['done','Workspace layout presets','One-click Drawing / Animation / Compact layouts from the View menu.'],
     ['done','Scripting console','A JavaScript console (Help menu) for automating the app — `app` and `OT` in scope.'],
-    ['planned','Second canvas window for a pen display','A separate canvas-only window to drag onto a Wacom display.'],
+    ['done','Second canvas window for a pen display','A canvas-only window to drag onto a Wacom pen display — mirrors the stage with its own toolbar, live wet-ink preview, pen-pressure input and pan / zoom / undo.'],
     ['rec','Dockable panels','Tear panels off and rearrange them freely.'],
   ]],
 ];

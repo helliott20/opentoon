@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OpenToon — Drawing Window</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;}
+  body{
+    background:#0c0d10;color:#cdd2d9;
+    font:12px/1.4 "Segoe UI",Roboto,system-ui,sans-serif;
+    display:flex;flex-direction:column;overflow:hidden;
+    user-select:none;-webkit-user-select:none;
+  }
+  /* ---- toolbar ---- */
+  #bar{
+    height:48px;flex:0 0 48px;
+    background:#1f2228;border-bottom:1px solid #060708;
+    display:flex;align-items:center;gap:4px;padding:0 8px;
+  }
+  .pbtn{
+    width:36px;height:34px;border-radius:6px;
+    background:#272b32;border:1px solid #00000055;color:#7d838f;
+    display:flex;align-items:center;justify-content:center;cursor:pointer;
+    transition:background-color .12s ease,color .12s ease,border-color .12s ease;
+  }
+  .pbtn:hover{background:#343942;color:#cdd2d9;}
+  .pbtn:active{transform:translateY(1px);}
+  .pbtn.active{
+    background:linear-gradient(180deg,#4a9fd4,#3a86ba);color:#fff;
+    border-color:#0009;box-shadow:inset 0 1px 0 #ffffff38;
+  }
+  .pbtn svg{width:21px;height:21px;}
+  .pbtn .glyph{font-size:17px;line-height:1;font-weight:700;}
+  .psep{width:1px;height:26px;background:#060708;margin:0 4px;}
+  .pspacer{flex:1;}
+  .pframe{
+    min-width:60px;text-align:center;color:#9aa0ab;
+    font-variant-numeric:tabular-nums;font-size:11px;
+  }
+  .pcolor{
+    width:34px;height:34px;border-radius:6px;cursor:pointer;
+    border:2px solid #00000066;box-shadow:0 0 0 1px #ffffff1f inset;
+    position:relative;overflow:hidden;flex:0 0 auto;
+  }
+  .pcolor input{
+    position:absolute;inset:-6px;width:200%;height:200%;
+    border:none;padding:0;cursor:pointer;opacity:0;
+  }
+  /* ---- canvas ---- */
+  #stage{flex:1;position:relative;min-height:0;}
+  #screen{position:absolute;top:0;left:0;touch-action:none;display:block;}
+  #hint{
+    position:absolute;inset:0;display:flex;align-items:center;
+    justify-content:center;flex-direction:column;gap:8px;
+    color:#5d636e;text-align:center;padding:24px;pointer-events:none;
+  }
+  #hint .big{
+    font-family:"Space Grotesk","Segoe UI",system-ui,sans-serif;
+    font-weight:700;font-size:18px;color:#7d838f;letter-spacing:-.01em;
+  }
+</style>
+</head>
+<body>
+  <div id="bar"></div>
+  <div id="stage">
+    <canvas id="screen"></canvas>
+    <div id="hint">
+      <div class="big">OpenToon Drawing Window</div>
+      <div>Waiting for the main window… draw here once the canvas appears.</div>
+    </div>
+  </div>
+  <script src="pen.js"></script>
+</body>
+</html>
