@@ -59,6 +59,7 @@
       this.projectPath = null;   // path of the open .otoon file (desktop)
       this.recentFiles = [];     // recently opened / saved .otoon paths (desktop)
       this.sidebarWidth = 0;     // user-dragged sidebar width (0 = CSS default)
+      this.timelineHeight = 0;   // user-dragged timeline height (0 = CSS default)
       this.playIn = null;
       this.playOut = null;
       this.audioBuffer = null;   // decoded AudioBuffer (runtime)
@@ -178,6 +179,7 @@
         if (pr.loopMode && this.playback) this.playback.loopMode = pr.loopMode;
         if (Array.isArray(pr.recentFiles)) this.recentFiles = pr.recentFiles.slice(0, 8);
         if (pr.sidebarWidth) this.sidebarWidth = pr.sidebarWidth;
+        if (pr.timelineHeight) this.timelineHeight = pr.timelineHeight;
         if (pr.pen) Object.assign(this.pen, pr.pen);
         if (pr.keymap && typeof pr.keymap === 'object') this.keymap = pr.keymap;
         if (Array.isArray(pr.collapsedPanels)) this.collapsedPanels = pr.collapsedPanels;
@@ -192,6 +194,7 @@
           loopMode: this.playback ? this.playback.loopMode : null,
           recentFiles: this.recentFiles,
           sidebarWidth: this.sidebarWidth,
+          timelineHeight: this.timelineHeight,
           pen: this.pen,
           keymap: this.keymap,
           collapsedPanels: this.collapsedPanels
@@ -676,6 +679,26 @@
       this.ui.status(this.cleanView
         ? 'Clean canvas - press Tab to restore the panels'
         : 'Panels restored');
+    }
+    // Apply a saved workspace layout (sidebar width, timeline height, panels).
+    applyWorkspace(name) {
+      const presets = {
+        drawing: { sidebar: 300, timeline: 150, collapsed: [] },
+        animation: { sidebar: 232, timeline: 330, collapsed: [] },
+        compact: { sidebar: 212, timeline: 132, collapsed: ['toolopts'] },
+        reset: { sidebar: 260, timeline: 208, collapsed: [] }
+      };
+      const p = presets[name];
+      if (!p) return;
+      if (this.cleanView) this.toggleCleanView();   // a layout implies panels are visible
+      this.sidebarWidth = p.sidebar;
+      this.collapsedPanels = p.collapsed.slice();
+      this.ui.applySidebarWidth(p.sidebar);
+      this.ui.applyPanelCollapse();
+      if (this.timeline) this.timeline.setHeight(p.timeline);
+      this._savePrefs();
+      if (this.stage) this.stage.resize();
+      this.ui.status('Workspace layout: ' + name);
     }
     // rotate the drawing view -- like turning the paper while sketching
     rotateView(deg) {

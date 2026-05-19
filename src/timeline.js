@@ -32,6 +32,7 @@
       ['framechange', 'projectchange', 'layerschange', 'celchange',
         'playbackstate', 'onionchange', 'layerselect']
         .forEach(ev => app.on(ev, () => this.render()));
+      if (app.timelineHeight) this.setHeight(app.timelineHeight);
     }
 
     /* rows are displayed top = front-most layer */
@@ -157,11 +158,23 @@
         const h = U.clamp(drag.h + (drag.y - e.clientY), 120, max);
         tl.style.height = h + 'px';
         tl.style.flexBasis = h + 'px';
+        this.app.timelineHeight = h;
         this.render();
       });
-      const stop = () => { drag = null; };
+      const stop = () => { if (drag) { drag = null; this.app._savePrefs(); } };
       handle.addEventListener('pointerup', stop);
       handle.addEventListener('pointercancel', stop);
+    }
+
+    // Set the timeline height (used by the resizer-restore and layout presets).
+    setHeight(h) {
+      const tl = this.root;
+      const max = Math.max(160, window.innerHeight - 260);
+      h = U.clamp(h, 120, max);
+      tl.style.height = h + 'px';
+      tl.style.flexBasis = h + 'px';
+      this.app.timelineHeight = h;
+      this.render();
     }
 
     _runAt(layer, f) {

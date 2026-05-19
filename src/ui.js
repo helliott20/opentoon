@@ -128,6 +128,11 @@
           { sep: 1 },
           { label: (a.cleanView ? '✓ ' : '') + 'Clean Canvas (hide panels)', sc: 'Tab', fn: () => a.toggleCleanView() },
           { sep: 1 },
+          { label: 'Layout: Drawing', fn: () => a.applyWorkspace('drawing') },
+          { label: 'Layout: Animation', fn: () => a.applyWorkspace('animation') },
+          { label: 'Layout: Compact', fn: () => a.applyWorkspace('compact') },
+          { label: 'Reset Layout', fn: () => a.applyWorkspace('reset') },
+          { sep: 1 },
           { label: (a.showCamera ? '✓ ' : '') + 'Camera Guide', fn: () => a.toggleCamera() },
           { label: (a.onion.on ? '✓ ' : '') + 'Onion Skin', fn: () => a.toggleOnion() },
           { label: 'Onion Skin Settings…', fn: () => this.onionDialog() },
@@ -538,18 +543,27 @@
 
     /* ============================ sidebar resize ============================ */
     // Drag the divider between the canvas and the panels to resize the sidebar.
+    applySidebarWidth(w) {
+      const sb = document.getElementById('sidebar');
+      if (!sb) return;
+      w = U.clamp(Math.round(w), 210, 480);
+      sb.style.flex = '0 0 ' + w + 'px';
+      sb.style.width = w + 'px';
+      this.app.sidebarWidth = w;
+    }
+    applyPanelCollapse() {
+      const ids = this.app.collapsedPanels || [];
+      ['colorpanel', 'toolopts', 'layerpanel'].forEach(id => {
+        const p = document.getElementById(id);
+        if (p) p.classList.toggle('collapsed', ids.indexOf(id) >= 0);
+      });
+    }
     _installSidebarResize() {
       const res = document.getElementById('sidebar-resizer');
       const sb = document.getElementById('sidebar');
       if (!res || !sb) return;
       const a = this.app;
-      const apply = w => {
-        w = U.clamp(Math.round(w), 210, 480);
-        sb.style.flex = '0 0 ' + w + 'px';
-        sb.style.width = w + 'px';
-        a.sidebarWidth = w;
-      };
-      if (a.sidebarWidth) apply(a.sidebarWidth);
+      if (a.sidebarWidth) this.applySidebarWidth(a.sidebarWidth);
       let drag = null;
       res.addEventListener('pointerdown', e => {
         drag = { x: e.clientX, w: sb.getBoundingClientRect().width };
@@ -558,7 +572,7 @@
       });
       res.addEventListener('pointermove', e => {
         if (!drag) return;
-        apply(drag.w + (drag.x - e.clientX));   // drag toward the canvas = wider
+        this.applySidebarWidth(drag.w + (drag.x - e.clientX));   // drag toward the canvas = wider
         if (a.stage) a.stage.resize();
       });
       const stop = () => { if (drag) { drag = null; a._savePrefs(); } };
@@ -571,10 +585,7 @@
       const sb = document.getElementById('sidebar');
       if (!sb) return;
       const a = this.app;
-      (a.collapsedPanels || []).forEach(id => {
-        const p = document.getElementById(id);
-        if (p) p.classList.add('collapsed');
-      });
+      this.applyPanelCollapse();
       sb.addEventListener('click', e => {
         const head = e.target.closest('.panel-head');
         if (!head || !sb.contains(head)) return;
