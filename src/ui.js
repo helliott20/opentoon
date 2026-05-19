@@ -41,6 +41,7 @@
       this._buildViewbar();
       this._buildStatus();
       this._installSidebarResize();
+      this._installPanelCollapse();
 
       app.on('toolchange', () => { this._refreshTool(); this._buildToolOpts(); });
       app.on('layerschange', () => this._refreshLayers());
@@ -65,6 +66,7 @@
       ];
       // Recent files only make sense on desktop, where projects have real paths.
       if (window.OpenToonDesktop) {
+        rows.push({ label: 'Save Incremental Copy', fn: () => a.saveIncrement() });
         rows.push({ label: 'Revert to Saved', fn: () => a.revertProject(), enabled: !!a.projectPath });
         rows.push({ sep: 1 });
         const recent = a.recentFiles || [];
@@ -562,6 +564,31 @@
       const stop = () => { if (drag) { drag = null; a._savePrefs(); } };
       res.addEventListener('pointerup', stop);
       res.addEventListener('pointercancel', stop);
+    }
+
+    // Click a panel header to collapse it to just the header; state persists.
+    _installPanelCollapse() {
+      const sb = document.getElementById('sidebar');
+      if (!sb) return;
+      const a = this.app;
+      (a.collapsedPanels || []).forEach(id => {
+        const p = document.getElementById(id);
+        if (p) p.classList.add('collapsed');
+      });
+      sb.addEventListener('click', e => {
+        const head = e.target.closest('.panel-head');
+        if (!head || !sb.contains(head)) return;
+        if (e.target.closest('button,input')) return;   // header controls aren't collapse hits
+        const panel = head.closest('.panel');
+        if (!panel || !panel.id) return;
+        panel.classList.toggle('collapsed');
+        const set = {};
+        (a.collapsedPanels || []).forEach(id => { set[id] = 1; });
+        if (panel.classList.contains('collapsed')) set[panel.id] = 1;
+        else delete set[panel.id];
+        a.collapsedPanels = Object.keys(set);
+        a._savePrefs();
+      });
     }
 
     /* ============================ modal / context ============================ */

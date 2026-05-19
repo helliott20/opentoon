@@ -86,6 +86,7 @@
       // pen-tablet pressure response: out = min + (max-min) * raw^gamma
       this.pen = { gamma: 1, min: 0, max: 1 };
       this.keymap = {};          // user keyboard-shortcut overrides {cmdId: key}
+      this.collapsedPanels = []; // ids of sidebar panels collapsed to their header
 
       this.history = new OT.History(60);
       this.history.on('change', () => { this.dirty = true; });
@@ -179,6 +180,7 @@
         if (pr.sidebarWidth) this.sidebarWidth = pr.sidebarWidth;
         if (pr.pen) Object.assign(this.pen, pr.pen);
         if (pr.keymap && typeof pr.keymap === 'object') this.keymap = pr.keymap;
+        if (Array.isArray(pr.collapsedPanels)) this.collapsedPanels = pr.collapsedPanels;
       } catch (e) { /* ignore corrupt prefs */ }
     }
     _savePrefs() {
@@ -191,7 +193,8 @@
           recentFiles: this.recentFiles,
           sidebarWidth: this.sidebarWidth,
           pen: this.pen,
-          keymap: this.keymap
+          keymap: this.keymap,
+          collapsedPanels: this.collapsedPanels
         }));
       } catch (e) { /* ignore */ }
     }
@@ -947,6 +950,24 @@
           .then(d => this.loadProjectData(d))
           .catch(e => this.ui.status('Open failed: ' + e.message));
       });
+    }
+    // Work out the next numbered file name, e.g. scene.otoon -> scene_002.otoon.
+    _nextIncrementPath(path) {
+      const m = path.match(/^(.*?)(?:_(\d+))?\.otoon$/i);
+      let base, num;
+      if (m) { base = m[1]; num = m[2] ? parseInt(m[2], 10) + 1 : 2; }
+      else { base = path.replace(/\.otoon$/i, ''); num = 2; }
+      return base + '_' + String(num).padStart(3, '0') + '.otoon';
+    }
+    // Save a numbered copy and continue working in it (desktop only).
+    saveIncrement() {
+      const fsd = window.OpenToonDesktop && window.OpenToonDesktop.fs;
+      if (!fsd) { this.ui.status('Incremental save is a desktop feature'); return; }
+      if (!this.projectPath) { this.saveProject(true); return; }   // no file yet -> Save As
+      const next = this._nextIncrementPath(this.projectPath);
+      OT.IO.writeProjectTo(this, next)
+        .then(p => { this.projectPath = p; this._addRecent(p); this.ui.status('Saved increment ' + p); })
+        .catch(e => this.ui.status('Incremental save failed: ' + e.message));
     }
     // Reload the last saved version, discarding unsaved changes (desktop).
     revertProject() {

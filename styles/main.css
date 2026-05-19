@@ -162,9 +162,15 @@ input,select{font:inherit;}
   border-bottom:1px solid var(--edge);
   box-shadow:inset 0 -2px 0 #4a9fd433;
   display:flex;justify-content:space-between;align-items:center;
+  cursor:pointer;user-select:none;-webkit-user-select:none;
 }
+.panel-head:hover{color:var(--text);}
 .panel-body{padding:8px 9px;display:flex;flex-direction:column;gap:7px;}
 #layerpanel{flex:1;min-height:120px;}
+/* a collapsed panel shrinks to just its header */
+.panel.collapsed{flex:0 0 auto;}
+.panel.collapsed .panel-body{display:none;}
+#layerpanel.collapsed{flex:0 0 auto;min-height:0;}
 #layerpanel .panel-body{flex:1;overflow-y:auto;padding:6px;}
 
 /* ---------- Color panel ---------- */
