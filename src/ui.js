@@ -145,7 +145,18 @@
     _buildMenu() {
       const bar = document.getElementById('menubar');
       bar.innerHTML = '';
-      bar.appendChild(el('div', { class: 'menu-title' }, ['OpenToon']));
+      // brand cell: 3-ring mark + wordmark; the centre ring uses currentColor
+      // so it follows the .menu-title { color: var(--cream) } rule
+      bar.appendChild(el('div', {
+        class: 'menu-title', 'aria-label': 'OpenToon',
+        html:
+          '<svg class="menu-title-mark" viewBox="0 0 200 200" fill="none" aria-hidden="true">' +
+          '<circle cx="85" cy="100" r="68" stroke="#DD5038" stroke-width="17" stroke-linecap="round" opacity="0.55"/>' +
+          '<circle cx="115" cy="100" r="68" stroke="#54B06A" stroke-width="17" stroke-linecap="round" opacity="0.55"/>' +
+          '<circle cx="100" cy="100" r="68" stroke="currentColor" stroke-width="17" stroke-linecap="round"/>' +
+          '</svg>' +
+          '<span class="menu-title-text"><span class="open">Open</span><span class="toon">Toon</span></span>'
+      }));
       this._menuData().forEach(([name]) => {
         const item = el('div', { class: 'menu-item' }, [name]);
         item.addEventListener('click', e => {
@@ -842,15 +853,23 @@
     }
     aboutDialog() {
       const desktop = window.OpenToonDesktop;
-      const verLine = el('div', { class: 'chk-row', text: 'Checking version…' });
-      const status = el('div', {
-        class: 'chk-row', style: { minHeight: '17px', color: '#4a9fd4' }
-      });
-      const body = el('div', { style: { maxWidth: '380px', lineHeight: '1.6' } }, [
-        el('div', { html: '<b style="color:#3d9be0;font-size:14px">OpenToon Studio</b>' }),
-        el('div', { text: 'An open-source 2D animation studio for Windows, inspired by Toon Boom Harmony.' }),
+      const mark =
+        '<svg class="about-mark" viewBox="0 0 200 200" fill="none" aria-hidden="true">' +
+        '<circle cx="85" cy="100" r="68" stroke="#DD5038" stroke-width="17" stroke-linecap="round" opacity="0.55"/>' +
+        '<circle cx="115" cy="100" r="68" stroke="#54B06A" stroke-width="17" stroke-linecap="round" opacity="0.55"/>' +
+        '<circle cx="100" cy="100" r="68" stroke="#F7F1E5" stroke-width="17" stroke-linecap="round"/>' +
+        '</svg>';
+      const verLine = el('div', { class: 'about-version brand-mono', text: 'checking version…' });
+      const status = el('div', { class: 'about-status' });
+      const body = el('div', { class: 'about-body' }, [
+        el('div', { html: mark }),
+        el('div', { class: 'brand-wordmark', html: '<span class="open">Open</span><span class="toon">Toon</span>' }),
         verLine,
-        el('div', { class: 'chk-row', text: 'Paperless animation · xsheet timeline · onion skinning · camera · GIF / WebM / PNG export. MIT licensed.' }),
+        el('div', { class: 'about-sep' }),
+        el('div', { class: 'about-blurb',
+          html: 'An open-source 2D animation studio, inspired by Toon Boom Harmony.<br>Frame by frame, the slow way.' }),
+        el('div', { class: 'about-link brand-mono',
+          html: 'MIT License · <a href="https://github.com/helliott20/opentoon" target="_blank" rel="noopener">github.com/helliott20/opentoon</a>' }),
         status
       ]);
       const buttons = [{ label: 'Close', primary: true }];
@@ -860,13 +879,14 @@
           fn: () => { this._checkUpdates(status); return false; }
         });
       }
-      this.modal('About', body, buttons);
+      const m = this.modal('About', body, buttons);
+      m.box.classList.add('about-modal');
       if (desktop && desktop.getVersion) {
         desktop.getVersion()
-          .then(v => { verLine.textContent = 'Version ' + v + ' — desktop app'; })
-          .catch(() => { verLine.textContent = 'Desktop app'; });
+          .then(v => { verLine.textContent = 'v ' + v + ' · desktop'; })
+          .catch(() => { verLine.textContent = 'desktop'; });
       } else {
-        verLine.textContent = 'Web version — runs offline in your browser';
+        verLine.textContent = 'web · runs offline in your browser';
       }
     }
     _checkUpdates(statusEl) {

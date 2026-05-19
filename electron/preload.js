@@ -12,5 +12,8 @@ contextBridge.exposeInMainWorld('OpenToonDesktop', {
   // subscribe to update lifecycle events (checking / available / ... )
   onUpdateStatus: cb =>
     ipcRenderer.on('opentoon:update-status', (_e, data) => cb(data)),
-  quitAndInstall: () => ipcRenderer.send('opentoon:quit-install')
+  quitAndInstall: () => ipcRenderer.send('opentoon:quit-install'),
+  // tell the main process the app has finished booting (dismisses the splash)
+  signalReady: () => ipcRenderer.send('app:ready'),
+  splashProgress: (pct, label) => ipcRenderer.send('app:loading', { pct: pct, label: label })
 });

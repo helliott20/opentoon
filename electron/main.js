@@ -6,7 +6,10 @@ const fs = require('fs');
 
 const isDev = process.argv.includes('--dev') || !app.isPackaged;
 let win = null;
+let splash = null;
 let updater = null;
+let splashShownAt = 0;
+let revealed = false;
 
 function createWindow() {
   win = new BrowserWindow({
@@ -14,6 +17,7 @@ function createWindow() {
     height: 950,
     minWidth: 900,
     minHeight: 600,
+    show: false,                 // revealed once the renderer signals app:ready
     backgroundColor: '#14161a',
     title: 'OpenToon Studio',
     autoHideMenuBar: true,
@@ -34,6 +38,50 @@ function createWindow() {
   });
 
   if (isDev) win.webContents.openDevTools({ mode: 'detach' });
+  // re-created via 'activate' after startup -> no splash to wait on
+  if (revealed) win.show();
+}
+
+/* ---- launch splash window ---- */
+function createSplash() {
+  splash = new BrowserWindow({
+    width: 540,
+    height: 360,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: true,
+    show: false,
+    backgroundColor: '#00000000',
+    title: 'OpenToon',
+    webPreferences: {
+      preload: path.join(__dirname, 'splash-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  splash.loadFile(path.join(__dirname, '..', 'splash', 'splash.html'));
+  splash.once('ready-to-show', () => {
+    if (splash && !splash.isDestroyed()) { splash.show(); splashShownAt = Date.now(); }
+  });
+  splash.webContents.on('did-finish-load', () => {
+    if (splash && !splash.isDestroyed())
+      splash.webContents.send('splash:version', app.getVersion());
+  });
+  splash.on('closed', () => { splash = null; });
+}
+
+// Reveal the main window and dismiss the splash. Idempotent -- called by the
+// renderer's app:ready signal and by a fallback timer, whichever fires first.
+function revealMain() {
+  if (revealed) return;
+  revealed = true;
+  const wait = Math.max(0, 700 - (splashShownAt ? Date.now() - splashShownAt : 700));
+  setTimeout(() => {
+    if (win && !win.isDestroyed()) win.show();
+    if (splash && !splash.isDestroyed()) splash.close();
+    splash = null;
+  }, wait);
 }
 
 /* ---- live reload while developing ---- */
@@ -112,7 +160,16 @@ function setupIpc() {
 }
 
 app.whenReady().then(() => {
+  createSplash();
   createWindow();
+  // the renderer signals app:ready once the project is loaded
+  ipcMain.once('app:ready', revealMain);
+  ipcMain.on('app:loading', (_e, data) => {
+    if (splash && !splash.isDestroyed())
+      splash.webContents.send('splash:status', data || {});
+  });
+  // fallback: reveal anyway if the renderer never signals (e.g. a load error)
+  setTimeout(revealMain, 12000);
   setupIpc();
   watchForDev();
   setupUpdates();

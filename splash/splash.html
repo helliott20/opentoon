@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>OpenToon</title>
+<style>
+  /* ---------- Tokens (mirror app's main.css) ---------- */
+  :root {
+    --bg:      #14161a;
+    --panel:   #1f2228;
+    --panel2:  #272b32;
+    --panel3:  #343942;
+    --edge:    #080a0c;
+    --cream:   #f7f1e5;
+    --text:    #cdd2d9;
+    --text-dim:#7d838f;
+    --blue:    #4a9fd4;
+    --amber:   #e8a23a;
+    --red:     #dd5038;
+    --green:   #54b06a;
+  }
+
+  /* Space Grotesk + JetBrains Mono are bundled in /fonts so the splash
+     renders identically offline. */
+  @font-face {
+    font-family: "Space Grotesk";
+    src: url("../fonts/SpaceGrotesk-Regular.woff2") format("woff2");
+    font-weight: 400; font-style: normal; font-display: block;
+  }
+  @font-face {
+    font-family: "Space Grotesk";
+    src: url("../fonts/SpaceGrotesk-Bold.woff2") format("woff2");
+    font-weight: 700; font-style: normal; font-display: block;
+  }
+  @font-face {
+    font-family: "JetBrains Mono";
+    src: url("../fonts/JetBrainsMono-Regular.woff2") format("woff2");
+    font-weight: 400; font-style: normal; font-display: block;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 540px;
+    height: 360px;
+    background: transparent;
+    color: var(--cream);
+    font-family: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+    overflow: hidden;
+    -webkit-user-select: none;
+            user-select: none;
+    -webkit-app-region: drag;        /* let user drag the frameless window */
+  }
+
+  .splash {
+    width: 540px;
+    height: 360px;
+    border-radius: 14px;
+    background: var(--bg);
+    border: 1px solid #2a2d33;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.55),
+                inset 0 1px 0 rgba(255,255,255,0.04);
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  /* Subtle ambient gradients */
+  .splash::before {
+    content: "";
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(circle at 30% 30%, rgba(74,159,212,0.10), transparent 55%),
+      radial-gradient(circle at 70% 80%, rgba(232,162,58,0.07), transparent 55%);
+    pointer-events: none;
+  }
+
+  .stage {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 22px;
+    position: relative;
+    z-index: 1;
+  }
+
+  .mark { width: 120px; height: 120px; display: block; }
+
+  .wordmark {
+    font-size: 44px;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    line-height: 1;
+  }
+  .wordmark .open { font-weight: 400; }
+
+  .foot {
+    padding: 14px 22px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    position: relative;
+    z-index: 1;
+  }
+  .foot-row {
+    display: flex;
+    justify-content: space-between;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+  }
+
+  .bar {
+    height: 3px;
+    border-radius: 2px;
+    background: #2a2d33;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--red), var(--amber), var(--green));
+    border-radius: 2px;
+    transition: width 240ms ease-out;
+  }
+
+  /* Indeterminate sweep before the main process reports progress */
+  .bar.indeterminate .bar-fill {
+    width: 38%;
+    animation: sweep 1.4s ease-in-out infinite;
+  }
+  @keyframes sweep {
+    0%   { transform: translateX(-110%); }
+    100% { transform: translateX(280%); }
+  }
+</style>
+</head>
+<body>
+  <div class="splash" role="dialog" aria-label="Loading OpenToon">
+    <div class="stage">
+      <!-- Mark: identical geometry to assets/brand/opentoon-mark.svg -->
+      <svg class="mark" viewBox="0 0 200 200" fill="none" aria-hidden="true">
+        <circle cx="85"  cy="100" r="68" stroke="#DD5038" stroke-width="17" stroke-linecap="round" opacity="0.55"/>
+        <circle cx="115" cy="100" r="68" stroke="#54B06A" stroke-width="17" stroke-linecap="round" opacity="0.55"/>
+        <circle cx="100" cy="100" r="68" stroke="#F7F1E5" stroke-width="17" stroke-linecap="round"/>
+      </svg>
+      <div class="wordmark"><span class="open">Open</span><span class="toon">Toon</span></div>
+    </div>
+
+    <div class="foot">
+      <div class="foot-row">
+        <span id="version">v0.0.0</span>
+        <span id="status">Loading…</span>
+      </div>
+      <div class="bar indeterminate" id="bar"><div class="bar-fill" id="bar-fill"></div></div>
+    </div>
+  </div>
+
+<script>
+  /* Driven by the main process over IPC through splash-preload.js:
+   *   splashWindow.webContents.send('splash:status', { pct: 0.42, label: '…' });
+   *   splashWindow.webContents.send('splash:version', '1.0.4'); */
+  const api = window.opentoonSplash || {};
+
+  function setProgress(pct, label) {
+    const bar = document.getElementById('bar');
+    const fill = document.getElementById('bar-fill');
+    const status = document.getElementById('status');
+    if (typeof pct === 'number') {
+      bar.classList.remove('indeterminate');
+      fill.style.width = Math.max(0, Math.min(1, pct)) * 100 + '%';
+    }
+    if (label) status.textContent = label;
+  }
+  function setVersion(v) {
+    if (v) document.getElementById('version').textContent = 'v' + v;
+  }
+
+  if (api.onStatus) api.onStatus(({ pct, label }) => setProgress(pct, label));
+  if (api.onVersion) api.onVersion(setVersion);
+
+  // postMessage fallback (dev / web preview)
+  window.addEventListener('message', (e) => {
+    const d = e.data || {};
+    if (d.type === 'splash:status') setProgress(d.pct, d.label);
+    if (d.type === 'splash:version') setVersion(d.version);
+  });
+</script>
+</body>
+</html>

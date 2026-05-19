@@ -73,7 +73,13 @@
       this.tools.select('brush');
       this.emitAll();
       this.timeline.render();
-      requestAnimationFrame(() => { this.stage.resize(); this.stage.fitToCamera(); });
+      requestAnimationFrame(() => {
+        this.stage.resize();
+        this.stage.fitToCamera();
+        // tell the desktop shell we're ready so it can dismiss the splash
+        if (window.OpenToonDesktop && window.OpenToonDesktop.signalReady)
+          window.OpenToonDesktop.signalReady();
+      });
 
       setInterval(() => {
         if (this.dirty && OT.IO.autosave(this)) this.dirty = false;

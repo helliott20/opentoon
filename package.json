@@ -34,7 +34,10 @@
       "index.html",
       "src/**/*",
       "styles/**/*",
-      "electron/**/*"
+      "electron/**/*",
+      "assets/**/*",
+      "splash/**/*",
+      "fonts/**/*"
     ],
     "win": {
       "target": [
