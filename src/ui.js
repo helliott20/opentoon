@@ -503,6 +503,9 @@
         item.appendChild(thumb);
         item.appendChild(name);
         item.appendChild(tag);
+        item.setAttribute('draggable', 'true');
+        item.dataset.layerId = layer.id;
+        this._installLayerDnD(item, layer, 'layer-item');
         item.addEventListener('click', () => a.selectLayer(layer));
         item.addEventListener('contextmenu', e => {
           e.preventDefault();
@@ -526,6 +529,67 @@
           ]));
         }
       }
+    }
+
+    /* Drag-to-reorder behaviour shared by the layer panel rows. The same
+       logic is duplicated in timeline.js for the names column. Rows are
+       displayed front-to-back (top = front), so "above" in the DOM means a
+       higher index in project.layers. */
+    _installLayerDnD(row, layer, cls) {
+      const a = this.app;
+      const clearMarks = () => {
+        const parent = row.parentNode;
+        if (!parent) return;
+        parent.querySelectorAll('.' + cls + '.drop-above, .' + cls + '.drop-below')
+          .forEach(n => { n.classList.remove('drop-above'); n.classList.remove('drop-below'); });
+      };
+      row.addEventListener('dragstart', e => {
+        e.dataTransfer.effectAllowed = 'move';
+        try { e.dataTransfer.setData('text/plain', layer.id); } catch (_) {}
+        row.classList.add('dragging');
+      });
+      row.addEventListener('dragend', () => {
+        row.classList.remove('dragging');
+        clearMarks();
+      });
+      row.addEventListener('dragover', e => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const r = row.getBoundingClientRect();
+        const above = e.clientY < r.top + r.height / 2;
+        clearMarks();
+        row.classList.add(above ? 'drop-above' : 'drop-below');
+      });
+      row.addEventListener('dragleave', e => {
+        // only clear if leaving the row itself (not into a child)
+        if (e.relatedTarget && row.contains(e.relatedTarget)) return;
+        row.classList.remove('drop-above');
+        row.classList.remove('drop-below');
+      });
+      row.addEventListener('drop', e => {
+        e.preventDefault();
+        const srcId = (e.dataTransfer && e.dataTransfer.getData('text/plain')) || '';
+        clearMarks();
+        if (!srcId || srcId === layer.id) return;
+        const L = a.project.layers;
+        const src = L.find(l => l.id === srcId);
+        if (!src) return;
+        const r = row.getBoundingClientRect();
+        const above = e.clientY < r.top + r.height / 2;
+        const srcIdx = L.indexOf(src);
+        let tgtIdx = L.indexOf(layer);
+        if (srcIdx < 0 || tgtIdx < 0) return;
+        // "above" visually -> higher index in L (top = front-most)
+        let insert = above ? tgtIdx + 1 : tgtIdx;
+        if (srcIdx < insert) insert--;
+        if (insert === srcIdx) return;   // no-op
+        const apply = () => {
+          L.splice(srcIdx, 1);
+          L.splice(insert, 0, src);
+        };
+        if (typeof a.doStruct === 'function') a.doStruct('Reorder layer', apply);
+        else { apply(); a.emit('layerschange'); a.emit('render'); }
+      });
     }
 
     /* ============================ viewbar ============================ */

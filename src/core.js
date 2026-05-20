@@ -242,6 +242,38 @@ window.OT = window.OT || {};
       this.exposure[f] = n;
       return this.ensureCel(n, w, h);
     }
+    // Harmony-style "Make Unique": if the cel exposed at `frame` is also
+    // exposed on neighbouring frames (a held exposure run), clone it so an
+    // edit only affects this frame. Returns the cel that should be drawn on
+    // (possibly the original if the run has length 1, or there is no cel).
+    forkAt(frame) {
+      const oldNum = this.exposure[frame];
+      if (!oldNum) return null;
+      const src = this.cels[oldNum];
+      if (!src) return null;
+      // Find the start/end of the identical-exposure run containing `frame`.
+      let start = frame, end = frame;
+      while (start > 0 && this.exposure[start - 1] === oldNum) start--;
+      while (end < this.exposure.length - 1 && this.exposure[end + 1] === oldNum) end++;
+      // Also walk forward through any trailing same-num entries beyond
+      // exposure.length (defensive: exposure may be sparse).
+      const runLen = end - start + 1;
+      if (runLen <= 1) return src;
+      // Create a fresh cel and deep-copy contents.
+      const newNum = this.nextNum++;
+      const fresh = new Cel(newNum, src.w, src.h, src.kind);
+      if (src.kind === 'vector') {
+        fresh.strokes = JSON.parse(JSON.stringify(src.strokes || []));
+        fresh.ctx.drawImage(src.canvas, 0, 0);
+      } else {
+        fresh.ctx.drawImage(src.canvas, 0, 0);
+      }
+      fresh.dirty();
+      this.cels[newNum] = fresh;
+      this.exposure[frame] = newNum;
+      fresh.forked = true;
+      return fresh;
+    }
     usedNums() {
       const s = {};
       for (const n of this.exposure) if (n) s[n] = 1;

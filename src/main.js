@@ -68,30 +68,54 @@
   }
   OT.shadeInto = shadeInto;
 
+  // Normalise a shortcut spec ('Shift+F', 'cmd+d', 'ctrl+Shift+N', 'v') to a
+  // canonical lookup string: modifiers in fixed order (ctrl+alt+shift) +
+  // lowercased base key. cmd+ is folded to ctrl+ so mac/win bindings match.
+  function normKey(spec) {
+    if (!spec) return '';
+    const parts = String(spec).toLowerCase().split('+').map(s => s.trim()).filter(Boolean);
+    if (parts.length === 1) return parts[0];
+    const base = parts.pop();
+    const mods = new Set(parts.map(m => m === 'cmd' || m === 'meta' ? 'ctrl' : m));
+    const order = ['ctrl', 'alt', 'shift'];
+    return order.filter(m => mods.has(m)).concat([base]).join('+');
+  }
+  OT.normKey = normKey;
+
   // ---- remappable single-key commands (the keyboard-shortcut editor) ----
   // `def` is the factory-default key; users override it via app.keymap.
+  // Defaults aligned with Toon Boom Harmony / Adobe Animate muscle memory.
+  // Shuttle uses shift+J/K/L (not bare j/k/l) so it doesn't clash with the Lasso (L) shortcut.
+  // Modifier-prefixed defs ('shift+', 'ctrl+'/'cmd+', 'alt+') are matched by _resolvedKeymap.
   const KEY_COMMANDS = [
     { id: 'tool-select', label: 'Select tool', cat: 'Tools', def: 'v', noRepeat: 1, run: a => a.tools.select('select') },
-    { id: 'tool-lasso', label: 'Lasso tool', cat: 'Tools', def: 'q', noRepeat: 1, run: a => a.tools.select('lasso') },
-    { id: 'tool-transform', label: 'Transform tool', cat: 'Tools', def: 'a', noRepeat: 1, run: a => a.tools.select('transform') },
+    { id: 'tool-lasso', label: 'Lasso tool', cat: 'Tools', def: 'l', noRepeat: 1, run: a => a.tools.select('lasso') },
+    { id: 'tool-transform', label: 'Transform tool', cat: 'Tools', def: 'm', noRepeat: 1, run: a => a.tools.select('transform') },
     { id: 'tool-brush', label: 'Brush tool', cat: 'Tools', def: 'b', noRepeat: 1, run: a => a.tools.select('brush') },
-    { id: 'tool-pencil', label: 'Pencil tool', cat: 'Tools', def: 'n', noRepeat: 1, run: a => a.tools.select('pencil') },
+    { id: 'tool-pencil', label: 'Pencil tool', cat: 'Tools', def: 'p', noRepeat: 1, run: a => a.tools.select('pencil') },
     { id: 'tool-eraser', label: 'Eraser tool', cat: 'Tools', def: 'e', noRepeat: 1, run: a => a.tools.select('eraser') },
-    { id: 'tool-fill', label: 'Paint Bucket tool', cat: 'Tools', def: 'g', noRepeat: 1, run: a => a.tools.select('fill') },
+    { id: 'tool-fill', label: 'Paint Bucket tool', cat: 'Tools', def: 'k', noRepeat: 1, run: a => a.tools.select('fill') },
     { id: 'tool-eyedropper', label: 'Eyedropper tool', cat: 'Tools', def: 'i', noRepeat: 1, run: a => a.tools.select('eyedropper') },
     { id: 'tool-rect', label: 'Rectangle tool', cat: 'Tools', def: 'r', noRepeat: 1, run: a => a.tools.select('rect') },
     { id: 'tool-ellipse', label: 'Ellipse tool', cat: 'Tools', def: 'o', noRepeat: 1, run: a => a.tools.select('ellipse') },
-    { id: 'tool-line', label: 'Line tool', cat: 'Tools', def: 'l', noRepeat: 1, run: a => a.tools.select('line') },
+    { id: 'tool-line', label: 'Line tool', cat: 'Tools', def: '/', noRepeat: 1, run: a => a.tools.select('line') },
     { id: 'tool-hand', label: 'Pan tool', cat: 'Tools', def: 'h', noRepeat: 1, run: a => a.tools.select('hand') },
     { id: 'tool-zoom', label: 'Zoom tool', cat: 'Tools', def: 'z', noRepeat: 1, run: a => a.tools.select('zoom') },
     { id: 'play', label: 'Play / Stop', cat: 'Animation', def: 'enter', prevent: 1, noRepeat: 1, run: a => a.playback.toggle() },
     { id: 'step-next', label: 'Next frame', cat: 'Animation', def: '.', run: a => a.playback.step(1) },
     { id: 'step-prev', label: 'Previous frame', cat: 'Animation', def: ',', run: a => a.playback.step(-1) },
+    { id: 'shuttle-prev', label: 'Shuttle backward (J)', cat: 'Animation', def: 'shift+j', run: a => a.playback.step(-1) },
+    { id: 'shuttle-stop', label: 'Shuttle pause (K)', cat: 'Animation', def: 'shift+k', noRepeat: 1, run: a => a.playback.stop() },
+    { id: 'shuttle-next', label: 'Shuttle forward (L)', cat: 'Animation', def: 'shift+l', run: a => a.playback.step(1) },
     { id: 'goto-start', label: 'Go to start', cat: 'Animation', def: 'home', prevent: 1, run: a => a.playback.gotoStart() },
     { id: 'goto-end', label: 'Go to end', cat: 'Animation', def: 'end', prevent: 1, run: a => a.playback.gotoEnd() },
+    { id: 'frame-insert', label: 'Insert frame', cat: 'Animation', def: 'f', noRepeat: 1, run: a => a.insertFrame() },
+    { id: 'frame-extend', label: 'Extend exposure', cat: 'Animation', def: 'shift+f', noRepeat: 1, run: a => a.extendExposure() },
+    { id: 'frame-duplicate', label: 'Duplicate drawing', cat: 'Animation', def: 'ctrl+d', prevent: 1, noRepeat: 1, run: a => a.duplicateDrawing() },
+    { id: 'layer-new', label: 'New layer', cat: 'Animation', def: 'ctrl+shift+n', prevent: 1, noRepeat: 1, run: a => a.addLayer() },
     { id: 'clear', label: 'Clear drawing', cat: 'Animation', def: 'delete', prevent: 1, run: a => a.clearDrawing() },
-    { id: 'fit', label: 'Fit to camera', cat: 'View', def: 'f', run: a => a.stage.fitToCamera() },
-    { id: 'flip-h', label: 'Flip view horizontally', cat: 'View', def: 'm', run: a => a.toggleFlipH() },
+    { id: 'fit', label: 'Fit to camera', cat: 'View', def: 'shift+\\', run: a => a.stage.fitToCamera() },
+    { id: 'flip-h', label: 'Flip view horizontally', cat: 'View', def: 'shift+m', run: a => a.toggleFlipH() },
     { id: 'clean-view', label: 'Clean canvas (hide panels)', cat: 'View', def: 'tab', prevent: 1, noRepeat: 1, run: a => a.toggleCleanView() }
   ];
   OT.KEY_COMMANDS = KEY_COMMANDS;
@@ -1342,11 +1366,13 @@
 
     /* ---------------- input ---------------- */
     // Resolve the live key -> command-id table from defaults + user overrides.
+    // Keys can be a plain char ('v') or modifier-prefixed ('shift+f', 'ctrl+d',
+    // 'ctrl+shift+n'). cmd+ is treated as ctrl+ (mac parity).
     _resolvedKeymap() {
       const map = {};
       for (const c of KEY_COMMANDS) {
         const key = (this.keymap && this.keymap[c.id]) || c.def;
-        if (key) map[key] = c.id;
+        if (key) map[OT.normKey(key)] = c.id;
       }
       return map;
     }
@@ -1373,6 +1399,39 @@
         const k = ev.key.toLowerCase();
         const ctrl = ev.ctrlKey || ev.metaKey;
 
+        // Build the modifier-aware lookup key so KEY_COMMANDS with modifier
+        // prefixes (e.g. 'shift+f', 'ctrl+d') can match. Plain single-key
+        // bindings continue to work because normKey('v') === 'v'.
+        const lookup = [
+          ctrl ? 'ctrl' : null,
+          ev.altKey ? 'alt' : null,
+          ev.shiftKey ? 'shift' : null,
+          k
+        ].filter(Boolean).join('+');
+
+        // Remappable commands win over the hardcoded ctrl block below, so
+        // explicit ctrl+ defs (frame-duplicate, layer-new) take precedence.
+        const cmdId = this._resolvedKeymap()[lookup] || (!ctrl && !ev.altKey && !ev.shiftKey ? this._resolvedKeymap()[k] : null);
+        if (cmdId) {
+          const cmd = KEY_COMMANDS.find(c => c.id === cmdId);
+          if (cmd) {
+            if (cmd.prevent) ev.preventDefault();
+            if (ev.repeat && cmd.noRepeat) return;
+            // While auto-repeat fires, cap step-prev / step-next (and the
+            // shuttle aliases) at the project frame rate; a single tap
+            // always passes through.
+            if (ev.repeat && (cmd.id === 'step-next' || cmd.id === 'step-prev'
+                || cmd.id === 'shuttle-next' || cmd.id === 'shuttle-prev')) {
+              const now = performance.now();
+              const minGap = 1000 / Math.max(1, this.project.fps);
+              if (this._lastStepKeyAt && now - this._lastStepKeyAt < minGap) return;
+              this._lastStepKeyAt = now;
+            }
+            cmd.run(this);
+            return;
+          }
+        }
+
         if (ctrl) {
           if (k === 'z') { ev.preventDefault(); ev.shiftKey ? this.redo() : this.undo(); return; }
           if (k === 'y') { ev.preventDefault(); this.redo(); return; }
@@ -1384,26 +1443,6 @@
           if (k === 'x') { ev.preventDefault(); this.cutDrawing(); return; }
           if (k === 'v') { ev.preventDefault(); this.pasteDrawing(); return; }
           return;
-        }
-
-        // remappable single-key commands (see KEY_COMMANDS / the editor)
-        const cmdId = this._resolvedKeymap()[k];
-        if (cmdId) {
-          const cmd = KEY_COMMANDS.find(c => c.id === cmdId);
-          if (cmd) {
-            if (cmd.prevent) ev.preventDefault();
-            if (ev.repeat && cmd.noRepeat) return;
-            // While auto-repeat fires, cap step-prev / step-next at the
-            // project frame rate; a single tap always passes through.
-            if (ev.repeat && (cmd.id === 'step-next' || cmd.id === 'step-prev')) {
-              const now = performance.now();
-              const minGap = 1000 / Math.max(1, this.project.fps);
-              if (this._lastStepKeyAt && now - this._lastStepKeyAt < minGap) return;
-              this._lastStepKeyAt = now;
-            }
-            cmd.run(this);
-            return;
-          }
         }
 
         // fixed keys -- play (Space), cancel, brush-size and zoom nudges

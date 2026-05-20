@@ -14,9 +14,25 @@
     if (!isDrawable(layer)) { app.ui.status('Not a drawing layer'); return null; }
     if (layer.locked) { app.ui.status('Layer is locked'); return null; }
     let cel;
-    if (allowCreate === false) cel = layer.celAt(app.frame);
-    else cel = layer.drawingAt(app.frame, app.project.width, app.project.height);
+    if (allowCreate === false) {
+      // Read-only intent must not create or fork.
+      cel = layer.celAt(app.frame);
+    } else {
+      // Edit intent: ensure a cel exists, then fork if it is held across
+      // multiple frames so the edit only affects this frame.
+      cel = layer.drawingAt(app.frame, app.project.width, app.project.height);
+      if (cel && typeof layer.forkAt === 'function') {
+        const forked = layer.forkAt(app.frame);
+        if (forked) cel = forked;
+      }
+    }
     if (!cel) return null;
+    // Surface "Made unique" status once, then clear the flag so subsequent
+    // strokes on the same cel don't repeat the message.
+    if (cel.forked) {
+      cel.forked = false;
+      if (app.ui && app.ui.status) app.ui.status('Made unique: Drawing ' + cel.num);
+    }
     return { layer, cel };
   }
 
@@ -137,6 +153,7 @@
       if (this._eraseRAF) { cancelAnimationFrame(this._eraseRAF); this._eraseRAF = 0; }
       this._erasePending = null;
       this._lastErasePt = null;
+      if (this.t && this.t.cel) this.t.cel._liveDrawing = false;
       if (this.before) this.t.cel.restore(this.before);
       this.t = null;
       this.buf = null; this.base = null;
@@ -157,9 +174,16 @@
       this._rComposite();
     }
     _rMove(pt, app) {
-      const k = 1 - this.smooth * 0.82;
-      this.sm.x += (pt.x - this.sm.x) * k;
-      this.sm.y += (pt.y - this.sm.y) * k;
+      // Distance-aware low-pass: smooth only when the pen is moving slowly
+      // (where the artist sees lag as wobble), and catch up quickly on fast
+      // strokes (where lag would be perceived as the cursor falling behind).
+      const dx = pt.x - this.sm.x, dy = pt.y - this.sm.y;
+      const dist = Math.hypot(dx, dy);
+      const baseK = Math.max(0.18, 1 - this.smooth * 0.7);
+      const catchUp = Math.min(1, dist / 80);
+      const k = baseK + (1 - baseK) * catchUp;
+      this.sm.x += dx * k;
+      this.sm.y += dy * k;
       this._seg(this.last.x, this.last.y, this.last.p, this.sm.x, this.sm.y, pt.pressure);
       this.last = { x: this.sm.x, y: this.sm.y, p: pt.pressure };
       this._scheduleComposite();
@@ -258,10 +282,19 @@
         this._erase(cel, pt.x, pt.y, app);
         return;
       }
-      this.base = canvasCopy(cel);
+      // Paint the first dot synchronously so the artist sees their input
+      // immediately. The previous code allocated an 8 MB cel-sized
+      // canvas (`canvasCopy`) BEFORE the first dot landed, which made
+      // the brush feel choppy on stroke start. `_vUp` now uses
+      // `cel.rebuild()` instead of a pre-stroke raster, so we don't
+      // need that snapshot any more.
       this.raw = [{ x: pt.x, y: pt.y, p: pt.pressure }];
       this.sm = { x: pt.x, y: pt.y };
       this.lastStamp = { x: pt.x, y: pt.y, p: pt.pressure };
+      // mark this cel as actively being drawn into so compositeStage
+      // falls back to reading cel.canvas (where the live stamps live)
+      // rather than the not-yet-committed strokes array
+      cel._liveDrawing = true;
       cel.ctx.fillStyle = this.color;
       cel.ctx.beginPath();
       cel.ctx.arc(pt.x, pt.y, this._r(pt.pressure), 0, 7);
@@ -272,9 +305,14 @@
     _vMove(pt, app) {
       const cel = this.t.cel;
       if (this.mode === 'eraser') { this._erase(cel, pt.x, pt.y, app); return; }
-      const k = 1 - this.smooth * 0.82;
-      this.sm.x += (pt.x - this.sm.x) * k;
-      this.sm.y += (pt.y - this.sm.y) * k;
+      // Distance-aware low-pass (see _rMove for rationale).
+      const dx = pt.x - this.sm.x, dy = pt.y - this.sm.y;
+      const dist = Math.hypot(dx, dy);
+      const baseK = Math.max(0.18, 1 - this.smooth * 0.7);
+      const catchUp = Math.min(1, dist / 80);
+      const k = baseK + (1 - baseK) * catchUp;
+      this.sm.x += dx * k;
+      this.sm.y += dy * k;
       this.raw.push({ x: this.sm.x, y: this.sm.y, p: pt.pressure });
       // live stamp preview
       const c = cel.ctx;
@@ -336,16 +374,13 @@
       if (app.symmetry && app.symmetry.on) {
         cel.strokes.push(V().mirrorStroke(stroke, app.symmetry.axis,
           app.project.width / 2, app.project.height / 2));
-        cel.rebuild();
-      } else {
-        // fast commit: base + this stroke only
-        const c = cel.ctx;
-        c.setTransform(1, 0, 0, 1, 0, 0);
-        c.clearRect(0, 0, cel.w, cel.h);
-        c.drawImage(this.base, 0, 0);
-        V().renderStroke(c, stroke);
-        cel.dirty();
       }
+      // Rebuild cel.canvas from every stroke (including the new one). This
+      // is the same result as the old "clearRect + drawImage(base) +
+      // renderStroke" path, but no pre-stroke snapshot is needed -- which
+      // is what removed the lag on stroke start.
+      cel.rebuild();
+      cel._liveDrawing = false;
       app.history.pushCelEdit('brush', cel, this.before);
       app.emit('render'); app.emit('celchange');
     }
@@ -432,9 +467,14 @@
     }
     pointerMove(pt, e, app) {
       if (!this.t) return;
-      const k = 1 - this.smooth * 0.82;
-      this.sm.x += (pt.x - this.sm.x) * k;
-      this.sm.y += (pt.y - this.sm.y) * k;
+      // Distance-aware low-pass (see PaintTool._rMove for rationale).
+      const dx = pt.x - this.sm.x, dy = pt.y - this.sm.y;
+      const dist = Math.hypot(dx, dy);
+      const baseK = Math.max(0.18, 1 - this.smooth * 0.7);
+      const catchUp = Math.min(1, dist / 80);
+      const k = baseK + (1 - baseK) * catchUp;
+      this.sm.x += dx * k;
+      this.sm.y += dy * k;
       this.raw.push({ x: this.sm.x, y: this.sm.y });
       this._schedule(app);
     }
@@ -1371,8 +1411,16 @@
     _lassoRaster(app) {
       const layer = app.activeLayer();
       if (layer.locked) { app.ui.status('Layer is locked'); return; }
-      const cel = layer.celAt(app.frame);
+      // Lasso lifts pixels destructively, so fork held exposure runs to
+      // prevent the lift from mutating every frame that shares this cel.
+      const cel = (typeof layer.forkAt === 'function')
+        ? layer.forkAt(app.frame)
+        : layer.celAt(app.frame);
       if (!cel) { app.ui.status('Nothing on this frame'); return; }
+      if (cel.forked) {
+        cel.forked = false;
+        app.ui.status('Made unique: Drawing ' + cel.num);
+      }
       // bring the polygon into cel-local space so it matches the cel's
       // pixel grid on layers with a transform applied
       const localPoly = this.poly.map(p => layerLocal(p, layer, app.frame, app));

@@ -426,9 +426,70 @@
           }
         ));
         if (!layer.visible) row.style.opacity = '.45';
+        row.setAttribute('draggable', 'true');
+        row.dataset.layerId = layer.id;
+        this._installNameDnD(row, layer);
         row.addEventListener('click', () => app.selectLayer(layer));
         this.namesInner.appendChild(row);
       }
+    }
+
+    /* Drag-to-reorder for the timeline names column. Mirrors the panel's
+       behaviour in ui.js. Rows are top = front-most layer. */
+    _installNameDnD(row, layer) {
+      const app = this.app;
+      const cls = 'tl-name-row';
+      const clearMarks = () => {
+        const parent = row.parentNode;
+        if (!parent) return;
+        parent.querySelectorAll('.' + cls + '.drop-above, .' + cls + '.drop-below')
+          .forEach(n => { n.classList.remove('drop-above'); n.classList.remove('drop-below'); });
+      };
+      row.addEventListener('dragstart', e => {
+        e.dataTransfer.effectAllowed = 'move';
+        try { e.dataTransfer.setData('text/plain', layer.id); } catch (_) {}
+        row.classList.add('dragging');
+      });
+      row.addEventListener('dragend', () => {
+        row.classList.remove('dragging');
+        clearMarks();
+      });
+      row.addEventListener('dragover', e => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const r = row.getBoundingClientRect();
+        const above = e.clientY < r.top + r.height / 2;
+        clearMarks();
+        row.classList.add(above ? 'drop-above' : 'drop-below');
+      });
+      row.addEventListener('dragleave', e => {
+        if (e.relatedTarget && row.contains(e.relatedTarget)) return;
+        row.classList.remove('drop-above');
+        row.classList.remove('drop-below');
+      });
+      row.addEventListener('drop', e => {
+        e.preventDefault();
+        const srcId = (e.dataTransfer && e.dataTransfer.getData('text/plain')) || '';
+        clearMarks();
+        if (!srcId || srcId === layer.id) return;
+        const L = app.project.layers;
+        const src = L.find(l => l.id === srcId);
+        if (!src) return;
+        const r = row.getBoundingClientRect();
+        const above = e.clientY < r.top + r.height / 2;
+        const srcIdx = L.indexOf(src);
+        let tgtIdx = L.indexOf(layer);
+        if (srcIdx < 0 || tgtIdx < 0) return;
+        let insert = above ? tgtIdx + 1 : tgtIdx;
+        if (srcIdx < insert) insert--;
+        if (insert === srcIdx) return;
+        const apply = () => {
+          L.splice(srcIdx, 1);
+          L.splice(insert, 0, src);
+        };
+        if (typeof app.doStruct === 'function') app.doStruct('Reorder layer', apply);
+        else { apply(); app.emit('layerschange'); app.emit('render'); }
+      });
     }
 
     // Tiny inline-SVG toggle button for the names column (eye / lock).

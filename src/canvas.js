@@ -217,7 +217,21 @@
           ctx.scale(tr.sx, tr.sy);
           ctx.translate(-px, -py);
         }
-        ctx.drawImage(cel.canvas, 0, 0, p.width, p.height);
+        // Vector cels: re-render strokes directly into the stage instead of
+        // upscaling cel.canvas, so the linework stays crisp at any zoom.
+        // Skip the direct path while a stroke is being live-drawn (the
+        // committed stroke isn't in cel.strokes yet -- live stamps live on
+        // cel.canvas) so the brush wet-ink preview stays visible. Raster
+        // cels and the cached cel.canvas (used for thumbs/exports/onion) are
+        // untouched.
+        if (cel.kind === 'vector' && cel.strokes && OT.Vector
+            && !opts.useRaster && !cel._liveDrawing) {
+          const V = OT.Vector;
+          for (const st of cel.strokes) if (st.type === 'fill') V.renderStroke(ctx, st);
+          for (const st of cel.strokes) if (st.type !== 'fill') V.renderStroke(ctx, st);
+        } else {
+          ctx.drawImage(cel.canvas, 0, 0, p.width, p.height);
+        }
         ctx.restore();
       }
       ctx.globalAlpha = 1;

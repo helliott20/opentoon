@@ -427,6 +427,21 @@ input[type=range]::-webkit-slider-thumb:active{
 .tl-name-row .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .tl-name-row .dot{width:8px;height:8px;border-radius:50%;}
 
+/* ---------- Drag-to-reorder (layer panel + timeline names) ---------- */
+.layer-item,.tl-name-row{position:relative;}
+.layer-item.dragging,
+.tl-name-row.dragging{opacity:0.4;}
+.layer-item.drop-above::before,
+.tl-name-row.drop-above::before{
+  content:"";position:absolute;left:0;right:0;top:-1px;height:2px;
+  background:var(--accent);border-radius:2px;pointer-events:none;z-index:5;
+}
+.layer-item.drop-below::after,
+.tl-name-row.drop-below::after{
+  content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;
+  background:var(--accent);border-radius:2px;pointer-events:none;z-index:5;
+}
+
 #timeline canvas{display:block;}
 
 /* ---------- Status bar ---------- */

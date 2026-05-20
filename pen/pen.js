@@ -292,6 +292,22 @@
       // Cintiq-class tablet that has no mouse wheel.
       this.pointers = new Map();
       this.gesture = null;        // { dist, midX, midY }
+      // Palm rejection: any touch is held in limbo for 80ms; if a pen
+      // pointerdown lands during the wait, we discard the touch instead of
+      // letting it pan. Keyed by pointerId -> { x, y, t, timer, clientX, clientY }.
+      this._pendingTouch = new Map();
+      const PALM_DELAY = 80;
+
+      const clearPendingTouches = () => {
+        // Pen has arrived -- abandon every tentative touch. Release captures
+        // so the OS stops feeding move events to a phantom gesture.
+        for (const [pid, pt] of this._pendingTouch) {
+          if (pt.timer) clearTimeout(pt.timer);
+          this.pointers.delete(pid);
+          try { cv.releasePointerCapture(pid); } catch (_) {}
+        }
+        this._pendingTouch.clear();
+      };
 
       const cancelStroke = () => {
         if (!this.stroking) return;
@@ -329,12 +345,35 @@
 
       cv.addEventListener('pointerdown', e => {
         if (!this.bmp) return;
+        // Palm rejection: an active pen stroke vetos any touch entirely --
+        // a resting palm must not interrupt the line being drawn.
+        if (e.pointerType === 'touch' && this.stroking) return;
+        // Pen arriving cancels any pending touch (resting palm) and any
+        // tentative single-touch pan it may have promoted before we got here.
+        if (e.pointerType === 'pen') {
+          clearPendingTouches();
+          // If we were panning from a single touch (not a confirmed
+          // 2-finger gesture), drop it -- artist clearly wants to draw.
+          if (this.panning && !this.gesture) {
+            this.panning = null;
+            this.canvas.style.cursor = this.panLock ? 'grab' : '';
+          }
+        }
         try { cv.setPointerCapture(e.pointerId); } catch (_) {}
         const r = rect();
         // remember every pointer so multi-touch gestures can react
         this.pointers.set(e.pointerId, {
           x: e.clientX - r.left, y: e.clientY - r.top, type: e.pointerType
         });
+        // A second touch arriving while the first is still pending promotes
+        // both immediately -- this is a deliberate two-finger gesture, not
+        // a stray palm. Clear timers but keep the pointers tracked.
+        if (e.pointerType === 'touch' && this._pendingTouch.size > 0) {
+          for (const [, pt] of this._pendingTouch) {
+            if (pt.timer) clearTimeout(pt.timer);
+          }
+          this._pendingTouch.clear();
+        }
         if (this.pointers.size >= 2) { beginGesture(); return; }
         // middle / right button pans the canvas (mouse / pen barrel button)
         if (e.button === 1 || e.button === 2 || this.panLock) {
@@ -342,10 +381,22 @@
           this.canvas.style.cursor = 'grabbing';
           return;
         }
-        // single-touch (finger) by itself is treated as a tentative drag --
-        // start panning. A second finger upgrades it to pinch + pan.
+        // Single-touch (finger) by itself is held in limbo for 80ms.
+        // If a pen lands during that window we discard it (palm rejection);
+        // otherwise we promote it to a pan.
         if (e.pointerType === 'touch') {
-          this.panning = { x: e.clientX, y: e.clientY };
+          const pid = e.pointerId;
+          const startX = e.clientX, startY = e.clientY;
+          const pend = { x: startX, y: startY, t: performance.now(), timer: null };
+          pend.timer = setTimeout(() => {
+            // Only promote if the touch is still down and no pen took over.
+            if (!this._pendingTouch.has(pid)) return;
+            this._pendingTouch.delete(pid);
+            if (this.stroking) return;
+            if (!this.pointers.has(pid)) return;
+            this.panning = { x: startX, y: startY };
+          }, PALM_DELAY);
+          this._pendingTouch.set(pid, pend);
           return;
         }
         const n = norm(e.clientX, e.clientY, r);
@@ -366,6 +417,9 @@
           const p = this.pointers.get(e.pointerId);
           p.x = e.clientX - r.left; p.y = e.clientY - r.top;
         }
+        // A touch that is still in its palm-rejection grace window must not
+        // pan, draw, or emit hover events -- it's quarantined until promoted.
+        if (this._pendingTouch.has(e.pointerId)) return;
         if (this.gesture && this.pointers.size >= 2) {
           updateGesture(e);
           return;
@@ -400,6 +454,14 @@
 
       const end = e => {
         if (this.pointers.has(e.pointerId)) this.pointers.delete(e.pointerId);
+        // Touch released before its 80ms grace window elapsed: just cancel
+        // the timer, no pan was ever started.
+        if (this._pendingTouch.has(e.pointerId)) {
+          const pt = this._pendingTouch.get(e.pointerId);
+          if (pt.timer) clearTimeout(pt.timer);
+          this._pendingTouch.delete(e.pointerId);
+          return;
+        }
         if (this.gesture) {
           // dropping a second finger ends the pinch / pan immediately so the
           // remaining finger doesn't suddenly pan from far away
