@@ -1428,53 +1428,48 @@
         if (this.raster) {
           const r = this.raster;
           const local = layerLocal(pt, r.layer, r.frame, app);
-          // First drag on an unlifted selection: lift now so handles + bbox
-          // are available
-          if (!r.lifted) {
-            // unlifted: check if click was inside the polygon bbox
-            if (local.x >= r.x && local.x <= r.x + r.w &&
-                local.y >= r.y && local.y <= r.y + r.h) {
-              this._liftRaster(app);
-            } else {
-              this._commitRaster(app);   // click outside -- drop selection
-            }
+          const zoom = app.stage.view.zoom;
+          const thr = 11 / zoom;   // generous on a tablet
+          // Rotation knob (sits outside the bbox so check it first)
+          const rh = selRotHandleWorld(r, zoom);
+          if (U.dist(local.x, local.y, rh.x, rh.y) < thr) {
+            this.mode = 'rrotate';
+            this.startRot = r.rot;
+            this.startAng = Math.atan2(local.y - r.cy, local.x - r.cx);
+            return;
           }
-          // After (possible) lift, check transform handles
-          if (this.raster && this.raster.lifted) {
-            const rl = this.raster;
-            const zoom = app.stage.view.zoom;
-            const thr = 9 / zoom;
-            // rotation knob
-            const rh = selRotHandleWorld(rl, zoom);
-            if (U.dist(local.x, local.y, rh.x, rh.y) < thr) {
-              this.mode = 'rrotate';
-              this.startRot = rl.rot;
-              this.startAng = Math.atan2(local.y - rl.cy, local.x - rl.cx);
+          // 8 scale handles
+          for (let i = 0; i < 8; i++) {
+            const a = selAnchor(i, r.sw, r.sh);
+            const w = selWorld(r, a.x, a.y);
+            if (U.dist(local.x, local.y, w.x, w.y) < thr) {
+              this.mode = 'rscale';
+              this.hIdx = i;
+              const opp = selAnchor((i + 4) % 8, r.sw, r.sh);
+              this.fixed = selWorld(r, opp.x, opp.y);
+              this.oppA = opp; this.hA = a;
               return;
             }
-            // 8 scale handles
-            for (let i = 0; i < 8; i++) {
-              const a = selAnchor(i, rl.sw, rl.sh);
-              const w = selWorld(rl, a.x, a.y);
-              if (U.dist(local.x, local.y, w.x, w.y) < thr) {
-                this.mode = 'rscale';
-                this.hIdx = i;
-                const opp = selAnchor((i + 4) % 8, rl.sw, rl.sh);
-                this.fixed = selWorld(rl, opp.x, opp.y);
-                this.oppA = opp; this.hA = a;
-                return;
-              }
-            }
-            // inside the transformed bbox -- translate
-            const loc = selLocal(rl, local.x, local.y);
-            if (Math.abs(loc.x) <= rl.sw / 2 && Math.abs(loc.y) <= rl.sh / 2) {
-              this.mode = 'rmove';
-              this.moveOff = { x: local.x - rl.cx, y: local.y - rl.cy };
-              return;
-            }
-            // clicked outside the floating piece -- commit and start a new lasso
-            this._commitRaster(app);
           }
+          // Inside the bbox/polygon — translate. For lifted state we use the
+          // transformed bbox; for unlifted state we test the actual polygon
+          // so clicks in the lasso's concave gaps fall through to a new
+          // lasso instead of grabbing the selection.
+          let inside;
+          if (r.lifted) {
+            const loc = selLocal(r, local.x, local.y);
+            inside = Math.abs(loc.x) <= r.sw / 2 && Math.abs(loc.y) <= r.sh / 2;
+          } else {
+            inside = pointInPoly(local.x, local.y, r.poly);
+          }
+          if (inside) {
+            this.mode = 'rmove';
+            this.moveOff = { x: local.x - r.cx, y: local.y - r.cy };
+            return;
+          }
+          // Clicked clean off the selection — commit anything that was lifted
+          // and fall through to start a new lasso loop.
+          this._commitRaster(app);
         }
       } else {
         app.ui.status('The lasso works on drawing layers');
@@ -1515,14 +1510,17 @@
         this._scheduleVMove(app);
         app.emit('overlayrender');
       } else if (this.mode === 'rmove') {
-        // translate the lifted piece in cel-local space (so the layer's own
-        // rotation/scale doesn't fight the cursor)
+        // First actual drag on an unlifted selection: clip pixels off the cel
+        // into a floating canvas now. Doing this lazily means a stray
+        // pointerdown-and-release-without-moving never modifies the cel.
+        if (this.raster && !this.raster.lifted) this._liftRaster(app);
         const r = this.raster;
         const local = layerLocal(pt, r.layer, r.frame, app);
         r.cx = local.x - this.moveOff.x;
         r.cy = local.y - this.moveOff.y;
         app.emit('render'); app.emit('overlayrender');
       } else if (this.mode === 'rrotate') {
+        if (this.raster && !this.raster.lifted) this._liftRaster(app);
         const r = this.raster;
         const local = layerLocal(pt, r.layer, r.frame, app);
         const ang = Math.atan2(local.y - r.cy, local.x - r.cx);
@@ -1530,6 +1528,7 @@
         if (e && e.shiftKey) r.rot = Math.round(r.rot / (Math.PI / 12)) * (Math.PI / 12);
         app.emit('render'); app.emit('overlayrender');
       } else if (this.mode === 'rscale') {
+        if (this.raster && !this.raster.lifted) this._liftRaster(app);
         // Drag a scale handle: keep the opposite corner fixed, derive new
         // scale factors by projecting the cursor into the selection's local
         // frame. Shift-drag = uniform scale (preserve aspect ratio).
@@ -1651,13 +1650,20 @@
       // selection (e.g. to delete it). Lifting on close is destructive --
       // every Esc-ed selection would otherwise leave a hole on the cel.
       // Lifting is deferred to the first actual drag (see `_liftRaster`).
+      // Pre-populate the free-transform fields so handles + rotation knob
+      // are visible immediately after the loop closes — even before any
+      // pixels are actually lifted. Lifting happens lazily on the first
+      // real drag (see pointerMove), so a quick lasso-and-Esc still leaves
+      // the cel untouched.
       this.raster = {
         canvas: null, lifted: false,
         poly: localPoly, layer: layer, frame: app.frame,
-        x: x0, y: y0, w: w, h: h, cel: cel, before: null
+        x: x0, y: y0, w: w, h: h, cel: cel, before: null,
+        sw: w, sh: h, cx: x0 + w / 2, cy: y0 + h / 2,
+        scaleX: 1, scaleY: 1, rot: 0
       };
       this._startAnts(app);
-      app.ui.status('Lassoed a region — drag to move it, Del to remove, Esc to deselect');
+      app.ui.status('Lassoed a region — drag inside to move, corners to scale, top knob to rotate (Del / Esc)');
     }
     // Lift pixels off the cel into a floating canvas. Called lazily the first
     // time the user actually drags the lasso catch, so a quick lasso-and-Esc
@@ -1695,13 +1701,15 @@
       r.canvas = fc;
       r.before = before;
       r.lifted = true;
-      // Initialise free-transform state on the lifted piece so the user
-      // can scale / rotate / move it via handles. cx/cy is the centre,
-      // sw/sh are the canvas-pixel dimensions, scaleX/scaleY and rot
-      // accumulate as the user drags handles.
-      r.sw = w; r.sh = h;
-      r.cx = x0 + w / 2; r.cy = y0 + h / 2;
-      r.scaleX = 1; r.scaleY = 1; r.rot = 0;
+      // Free-transform fields (cx/cy/sw/sh/scaleX/scaleY/rot) are
+      // pre-populated by `_lassoRaster` so handles are visible before lift.
+      // Only initialise here as a fallback in case lift is reached via some
+      // other code path — never clobber a live transform.
+      if (r.sw == null) {
+        r.sw = w; r.sh = h;
+        r.cx = x0 + w / 2; r.cy = y0 + h / 2;
+        r.scaleX = 1; r.scaleY = 1; r.rot = 0;
+      }
       app.emit('render');
     }
     _commitRaster(app) {
@@ -1839,6 +1847,47 @@
       ctx.stroke();
       ctx.restore();
     }
+    // 8 scale handles around the bbox plus a rotation knob hovering above
+    // the top edge. Filled white with a thin black outline so they read on
+    // any artwork without the heavy blue accent that the previous version
+    // used. The rotation knob is a slightly larger circle to telegraph its
+    // role at a glance.
+    _drawTransformHandles(ctx, r, zoom) {
+      const hs = 5 / zoom;
+      const kr = 6.5 / zoom;
+      const tc = selWorld(r, 0, -r.sh / 2);
+      const rh = selRotHandleWorld(r, zoom);
+      ctx.save();
+      // Faint stem connecting the top of the bbox to the rotation knob.
+      // Dashed so it doesn't compete with the marching ants.
+      ctx.lineWidth = 1 / zoom;
+      ctx.setLineDash([3 / zoom, 3 / zoom]);
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.beginPath(); ctx.moveTo(tc.x, tc.y); ctx.lineTo(rh.x, rh.y); ctx.stroke();
+      ctx.setLineDash([]);
+      // 8 corner/edge handles
+      ctx.lineWidth = 1.1 / zoom;
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#000';
+      for (let i = 0; i < 8; i++) {
+        const a = selAnchor(i, r.sw, r.sh);
+        const w = selWorld(r, a.x, a.y);
+        ctx.beginPath();
+        ctx.rect(w.x - hs, w.y - hs, hs * 2, hs * 2);
+        ctx.fill(); ctx.stroke();
+      }
+      // Rotation knob — larger circle so it visually reads as a different
+      // affordance from the scale handles
+      ctx.beginPath(); ctx.arc(rh.x, rh.y, kr, 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+      // Tiny curved tick inside the knob hints at rotation
+      ctx.lineWidth = 1.1 / zoom;
+      ctx.strokeStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(rh.x, rh.y, kr * 0.45, Math.PI * 0.15, Math.PI * 1.55);
+      ctx.stroke();
+      ctx.restore();
+    }
     drawOverlay(ctx, app) {
       const zoom = app.stage.view.zoom;
       if (this.mode === 'lasso' && this.poly && this.poly.length) {
@@ -1901,8 +1950,9 @@
           ctx.drawImage(r.canvas, -r.sw / 2, -r.sh / 2);
           ctx.restore();
         }
+        // Marching-ants outline: the actual polygon while unlifted, the
+        // transformed bbox once the artist starts squashing/rotating.
         if (r.lifted) {
-          // Transformed bbox outline + 8 scale handles + rotation knob.
           const corners = [0, 2, 4, 6].map(i => {
             const a = selAnchor(i, r.sw, r.sh);
             return selWorld(r, a.x, a.y);
@@ -1914,27 +1964,7 @@
             ctx.closePath();
           };
           this._ants(ctx, zoom, trace);
-          // rotation knob + connecting stem
-          const tc = selWorld(r, 0, -r.sh / 2);
-          const rh = selRotHandleWorld(r, zoom);
-          ctx.save();
-          ctx.lineWidth = 1.4 / zoom;
-          ctx.strokeStyle = '#4a9fd4';
-          ctx.beginPath(); ctx.moveTo(tc.x, tc.y); ctx.lineTo(rh.x, rh.y); ctx.stroke();
-          // 8 square handles
-          const hs = 4 / zoom;
-          ctx.fillStyle = '#fff';
-          for (let i = 0; i < 8; i++) {
-            const a = selAnchor(i, r.sw, r.sh);
-            const w = selWorld(r, a.x, a.y);
-            ctx.beginPath(); ctx.rect(w.x - hs, w.y - hs, hs * 2, hs * 2);
-            ctx.fill(); ctx.stroke();
-          }
-          // rotation knob (circle)
-          ctx.beginPath(); ctx.arc(rh.x, rh.y, hs, 0, 7); ctx.fill(); ctx.stroke();
-          ctx.restore();
         } else if (r.poly) {
-          // unlifted: still showing the lassoed polygon outline
           const trace = () => {
             ctx.beginPath();
             ctx.moveTo(r.poly[0].x, r.poly[0].y);
@@ -1943,6 +1973,10 @@
           };
           this._ants(ctx, zoom, trace);
         }
+        // Free-transform handles — drawn for BOTH unlifted and lifted state
+        // so the artist can see at a glance that the selection is
+        // squashable / rotatable without first guessing-and-clicking.
+        this._drawTransformHandles(ctx, r, zoom);
         ctx.restore();
       }
     }
