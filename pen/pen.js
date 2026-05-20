@@ -25,8 +25,18 @@
 
   class PenWindow {
     constructor() {
+      // Two layered canvases:
+      //   #screen carries the streamed bitmap from the main window. It only
+      //   repaints when a new frame arrives -- so a full-resolution drawImage
+      //   doesn't run on every pointer move.
+      //   #wet carries the in-progress brush stroke (transparent). It redraws
+      //   on every pointermove but the work is tiny (just the new segment).
+      // The split removes the per-event 4K bitmap blit that was making the
+      // wet preview feel laggy on a Cintiq.
       this.canvas = document.getElementById('screen');
       this.ctx = this.canvas.getContext('2d');
+      this.wetCanvas = document.getElementById('wet');
+      this.wctx = this.wetCanvas ? this.wetCanvas.getContext('2d') : null;
       this.bar = document.getElementById('bar');
       this.hint = document.getElementById('hint');
       this.bmp = null;
@@ -166,10 +176,13 @@
       // a properly high-resolution backing store.
       this.dpr = Math.min(window.devicePixelRatio || 1, 3);
       this.cssW = w; this.cssH = h;
-      this.canvas.style.width = w + 'px';
-      this.canvas.style.height = h + 'px';
-      this.canvas.width = Math.round(w * this.dpr);
-      this.canvas.height = Math.round(h * this.dpr);
+      for (const c of [this.canvas, this.wetCanvas]) {
+        if (!c) continue;
+        c.style.width = w + 'px';
+        c.style.height = h + 'px';
+        c.width = Math.round(w * this.dpr);
+        c.height = Math.round(h * this.dpr);
+      }
       this._computeFit();
       // Let the main window know what resolution to encode for, so the
       // streamed bitmap arrives at 1:1 with no upscaling = no pixelation.
@@ -200,11 +213,16 @@
         if (this.bmp && this.bmp.close) this.bmp.close();
         this.bmp = bmp;
         this._computeFit();
-        if (this.awaitingCommit && !this.stroking) {
+        const wetCleared = this.awaitingCommit && !this.stroking;
+        if (wetCleared) {
           this.wet = []; this.awaitingCommit = false;
         }
         if (this.hint) this.hint.style.display = 'none';
-        this.draw();
+        // Bitmap arrived: redraw the streamed background. Wet-ink layer is only
+        // touched when it changed (e.g. the stroke just committed), avoiding a
+        // pointless wet repaint on idle frame deliveries.
+        this._drawBg();
+        if (wetCleared) this._drawWet();
       }).catch(() => {});
     }
     _applyMeta(meta) {
@@ -221,7 +239,14 @@
     }
 
     /* ---------------- draw ---------------- */
+    // Full redraw -- bitmap + wet. Called on frame arrival, view change, resize.
     draw() {
+      this._drawBg();
+      this._drawWet();
+    }
+    // Bitmap-only redraw. Heavy (full-resolution drawImage) but only runs when
+    // the streamed bitmap or local view actually changes -- never on a pen move.
+    _drawBg() {
       const c = this.ctx;
       c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
       c.clearRect(0, 0, this.cssW, this.cssH);
@@ -237,30 +262,40 @@
         c.drawImage(this.bmp, this.fit.x, this.fit.y, this.fit.w, this.fit.h);
         c.restore();
       }
-      this._drawWet();
     }
-    // Local in-progress stroke preview -- instant feedback while the
-    // authoritative render streams back from the main window.
+    // RAF-coalesced wet-ink redraw. Multiple pen samples in the same frame
+    // produce one canvas paint instead of N.
+    _scheduleWet() {
+      if (this._wetRAF) return;
+      this._wetRAF = requestAnimationFrame(() => {
+        this._wetRAF = 0;
+        this._drawWet();
+      });
+    }
+    // Local in-progress stroke preview -- runs on its own transparent canvas
+    // so we never re-blit the streamed bitmap per pointer move.
     _drawWet() {
+      const w = this.wctx || this.ctx;
+      w.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      w.clearRect(0, 0, this.cssW, this.cssH);
       if (this.wet.length < 1 || !this.fit.w) return;
       const tool = this.meta.tool;
       if (tool !== 'brush' && tool !== 'pencil' && tool !== 'eraser') return;
-      const c = this.ctx;
       // brush radius scales with the local view so the wet-ink preview
       // matches the diameter the artist will actually see after commit
       const dia = Math.max(1.5,
         (this.meta.brushFrac || 0.02) * this.fit.w * 2 * (this.view.scale || 1));
-      c.save();
-      c.lineJoin = 'round'; c.lineCap = 'round';
-      c.lineWidth = dia;
-      c.strokeStyle = tool === 'eraser' ? 'rgb(202,208,216)' : (this.meta.color || '#222222');
-      c.globalAlpha = tool === 'eraser' ? 0.5 : 0.9;
-      c.beginPath();
-      c.moveTo(this.wet[0].x, this.wet[0].y);
-      for (let i = 1; i < this.wet.length; i++) c.lineTo(this.wet[i].x, this.wet[i].y);
-      if (this.wet.length === 1) c.lineTo(this.wet[0].x + 0.1, this.wet[0].y + 0.1);
-      c.stroke();
-      c.restore();
+      w.save();
+      w.lineJoin = 'round'; w.lineCap = 'round';
+      w.lineWidth = dia;
+      w.strokeStyle = tool === 'eraser' ? 'rgb(202,208,216)' : (this.meta.color || '#222222');
+      w.globalAlpha = tool === 'eraser' ? 0.5 : 0.9;
+      w.beginPath();
+      w.moveTo(this.wet[0].x, this.wet[0].y);
+      for (let i = 1; i < this.wet.length; i++) w.lineTo(this.wet[i].x, this.wet[i].y);
+      if (this.wet.length === 1) w.lineTo(this.wet[0].x + 0.1, this.wet[0].y + 0.1);
+      w.stroke();
+      w.restore();
     }
 
     /* ---------------- pointer input ---------------- */
@@ -315,7 +350,7 @@
         this.awaitingCommit = false;
         this.wet = [];
         if (PEN) PEN.sendInput({ type: 'cancel' });
-        this.draw();
+        this._drawWet();
       };
       const beginGesture = () => {
         cancelStroke();
@@ -407,7 +442,9 @@
           type: 'down', nx: n.nx, ny: n.ny,
           pressure: e.pointerType === 'pen' ? e.pressure : 1
         }, mods(e)));
-        this.draw();
+        // Wet-ink only: the bitmap hasn't changed. Avoids a full-resolution
+        // drawImage on every pen down.
+        this._drawWet();
       });
 
       cv.addEventListener('pointermove', e => {
@@ -442,7 +479,9 @@
             this.wet.push({ x: ce.clientX - r.left, y: ce.clientY - r.top });
           }
           if (PEN) PEN.sendInput(Object.assign({ type: 'move', pts: pts }, mods(e)));
-          this.draw();
+          // Wet-ink only, RAF-coalesced: heavy bitmap blit no longer runs per
+          // pointer move, which removes the main source of pen-window lag.
+          this._scheduleWet();
         } else {
           const now = performance.now();
           if (now - this._lastHover < 55) return;

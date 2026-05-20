@@ -53,7 +53,12 @@
   }
   /* ---- canvas ---- */
   #stage{flex:1;position:relative;min-height:0;}
-  #screen{position:absolute;top:0;left:0;touch-action:none;display:block;}
+  /* #screen carries the bitmap streamed from the main window and only
+     repaints when a new frame arrives. #wet sits on top and carries the
+     in-progress brush stroke -- redrawn every pointer move but tiny. The
+     split avoids a full-resolution drawImage per pen sample. */
+  #screen,#wet{position:absolute;top:0;left:0;touch-action:none;display:block;}
+  #wet{pointer-events:none;}
   #hint{
     position:absolute;inset:0;display:flex;align-items:center;
     justify-content:center;flex-direction:column;gap:8px;
@@ -69,6 +74,7 @@
   <div id="bar"></div>
   <div id="stage">
     <canvas id="screen"></canvas>
+    <canvas id="wet"></canvas>
     <div id="hint">
       <div class="big">OpenToon Drawing Window</div>
       <div>Waiting for the main window… draw here once the canvas appears.</div>

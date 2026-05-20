@@ -60,6 +60,25 @@
     return c;
   }
 
+  // Lazy-pointer / rope smoothing: the smoothed point `sm` trails the raw
+  // cursor `pt` by a fixed maxLag distance regardless of pen speed.
+  // sm only moves when the pen drags it beyond maxLag, so jitter inside the
+  // radius is silently absorbed while bigger moves track 1:1. This produces
+  // CONSISTENT smoothing at any speed (vs a per-frame EMA factor which gives
+  // wildly different results for slow vs fast strokes).
+  //   smooth = 0   -> maxLag ~2 px  (no perceptible smoothing)
+  //   smooth = 0.5 -> maxLag ~13 px
+  //   smooth = 1   -> maxLag ~24 px (strong shaping, ~2 frames of lag)
+  function lazyAdvance(sm, pt, smooth) {
+    const maxLag = 2 + (smooth || 0) * 22;
+    const dx = pt.x - sm.x, dy = pt.y - sm.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist <= maxLag) return;
+    const t = (dist - maxLag) / dist;
+    sm.x += dx * t;
+    sm.y += dy * t;
+  }
+
   // Invert a layer's transform: convert a project-space point into the
   // layer's cel-local coords. Matches the forward chain in canvas.js
   // (`_layerXform`): translate(tr.x+px, tr.y+py); rotate(rot); scale(sx,sy);
@@ -174,16 +193,11 @@
       this._rComposite();
     }
     _rMove(pt, app) {
-      // Distance-aware low-pass: smooth only when the pen is moving slowly
-      // (where the artist sees lag as wobble), and catch up quickly on fast
-      // strokes (where lag would be perceived as the cursor falling behind).
-      const dx = pt.x - this.sm.x, dy = pt.y - this.sm.y;
-      const dist = Math.hypot(dx, dy);
-      const baseK = Math.max(0.18, 1 - this.smooth * 0.7);
-      const catchUp = Math.min(1, dist / 80);
-      const k = baseK + (1 - baseK) * catchUp;
-      this.sm.x += dx * k;
-      this.sm.y += dy * k;
+      // Lazy-pointer / rope smoothing: the smoothed point trails the cursor by
+      // a fixed maxLag in project pixels. Identical smoothing strength at any
+      // speed -- slow strokes get the same shaping as fast ones, which is the
+      // consistency animators expect (Procreate / Animate behave this way).
+      lazyAdvance(this.sm, pt, this.smooth);
       this._seg(this.last.x, this.last.y, this.last.p, this.sm.x, this.sm.y, pt.pressure);
       this.last = { x: this.sm.x, y: this.sm.y, p: pt.pressure };
       this._scheduleComposite();
@@ -305,14 +319,8 @@
     _vMove(pt, app) {
       const cel = this.t.cel;
       if (this.mode === 'eraser') { this._erase(cel, pt.x, pt.y, app); return; }
-      // Distance-aware low-pass (see _rMove for rationale).
-      const dx = pt.x - this.sm.x, dy = pt.y - this.sm.y;
-      const dist = Math.hypot(dx, dy);
-      const baseK = Math.max(0.18, 1 - this.smooth * 0.7);
-      const catchUp = Math.min(1, dist / 80);
-      const k = baseK + (1 - baseK) * catchUp;
-      this.sm.x += dx * k;
-      this.sm.y += dy * k;
+      // Lazy-pointer rope smoothing (see _rMove). Consistent at any speed.
+      lazyAdvance(this.sm, pt, this.smooth);
       this.raw.push({ x: this.sm.x, y: this.sm.y, p: pt.pressure });
       // live stamp preview
       const c = cel.ctx;
@@ -467,14 +475,8 @@
     }
     pointerMove(pt, e, app) {
       if (!this.t) return;
-      // Distance-aware low-pass (see PaintTool._rMove for rationale).
-      const dx = pt.x - this.sm.x, dy = pt.y - this.sm.y;
-      const dist = Math.hypot(dx, dy);
-      const baseK = Math.max(0.18, 1 - this.smooth * 0.7);
-      const catchUp = Math.min(1, dist / 80);
-      const k = baseK + (1 - baseK) * catchUp;
-      this.sm.x += dx * k;
-      this.sm.y += dy * k;
+      // Lazy-pointer rope smoothing (see PaintTool._rMove for rationale).
+      lazyAdvance(this.sm, pt, this.smooth);
       this.raw.push({ x: this.sm.x, y: this.sm.y });
       this._schedule(app);
     }
@@ -1602,11 +1604,15 @@
       const zoom = app.stage.view.zoom;
       if (this.mode === 'lasso' && this.poly && this.poly.length) {
         const poly = this.poly, n = poly.length;
+        // Open-path trace (no closePath): matches the Photoshop lasso look,
+        // where the user sees only the line they've actually drawn, with no
+        // ghost line snapping back to the start point. Canvas `fill()`
+        // closes the path implicitly for the translucent area, so we still
+        // get a region tint without a visible closing stroke.
         const tracePath = () => {
           ctx.beginPath();
           ctx.moveTo(poly[0].x, poly[0].y);
           for (let i = 1; i < n; i++) ctx.lineTo(poly[i].x, poly[i].y);
-          if (n > 2) ctx.closePath();
         };
         // translucent tint inside the loop so you can see what you're enclosing
         if (n > 2) {
