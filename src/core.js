@@ -159,6 +159,10 @@ window.OT = window.OT || {};
       const c = this.thumb && this.thumb.width === tw ? this.thumb : document.createElement('canvas');
       c.width = tw; c.height = th;
       const x = c.getContext('2d');
+      // high-quality downscale -- without this the thumb looks like a
+      // poorly resized JPEG at any non-trivial zoom in the timeline / layer panel
+      x.imageSmoothingEnabled = true;
+      x.imageSmoothingQuality = 'high';
       x.clearRect(0, 0, tw, th);
       x.drawImage(this.canvas, 0, 0, tw, th);
       this.thumb = c; this.thumbDirty = false;

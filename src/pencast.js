@@ -79,10 +79,23 @@
       if (!src || !src.width || !src.height) return;
       this._dirty = false;
 
-      // Downscale to a sane cap so the WebP encode + IPC copy stay cheap even
-      // on a hi-DPI canvas. Aspect ratio is preserved, so the pen window can
-      // map a touch back to project space from a plain 0..1 fraction.
-      const CAP = 1680;
+      // Target the pen window's actual backing-store resolution so the
+      // bitmap arrives at 1:1 with no upscaling -- that was the main
+      // source of "pixelated" pen display. If the pen window hasn't
+      // reported its size yet, fall back to a generous cap.
+      let CAP;
+      if (this.penSize && this.penSize.cssW && this.penSize.cssH) {
+        const aspect = src.width / src.height;
+        const px = Math.min(
+          this.penSize.cssW * this.penSize.dpr,
+          this.penSize.cssH * this.penSize.dpr * aspect
+        );
+        // a touch of headroom for sub-pixel resampling and modest local zoom
+        CAP = Math.round(px * 1.1);
+      } else {
+        CAP = 2200;
+      }
+      CAP = Math.min(Math.max(CAP, 800), 4096);
       const scale = Math.min(1, CAP / Math.max(src.width, src.height));
       const w = Math.max(2, Math.round(src.width * scale));
       const h = Math.max(2, Math.round(src.height * scale));
@@ -106,7 +119,7 @@
             .catch(() => {});
         }
         if (this._dirty) this._schedule();    // coalesced change while encoding
-      }, 'image/webp', 0.72);
+      }, 'image/webp', 0.88);
     }
     // State the pen window needs: which tool is live, the colour, and the
     // brush radius as a fraction of stage width (resolution-independent, so
@@ -224,6 +237,16 @@
           break;
         }
         case 'flip': a.toggleFlipH(); break;
+        case 'pen-size':
+          // pen window reports its CSS size + DPR so the stream can be
+          // encoded at exactly the resolution it will be displayed at
+          this.penSize = {
+            cssW: Math.max(1, msg.cssW | 0),
+            cssH: Math.max(1, msg.cssH | 0),
+            dpr: Math.max(1, Math.min(3, msg.dpr || 1))
+          };
+          this._dirty = true; this._schedule();
+          break;
       }
     }
   }

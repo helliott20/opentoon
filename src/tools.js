@@ -44,6 +44,45 @@
     return c;
   }
 
+  // Invert a layer's transform: convert a project-space point into the
+  // layer's cel-local coords. Matches the forward chain in canvas.js
+  // (`_layerXform`): translate(tr.x+px, tr.y+py); rotate(rot); scale(sx,sy);
+  // translate(-px,-py).
+  function layerLocal(pt, layer, frame, app) {
+    if (!layer || !layer.transformAt) return { x: pt.x, y: pt.y };
+    const tr = layer.transformAt(frame);
+    if (!tr.x && !tr.y && !tr.rot && tr.sx === 1 && tr.sy === 1)
+      return { x: pt.x, y: pt.y };
+    const p = app.project, px = p.width / 2, py = p.height / 2;
+    const u = pt.x - tr.x - px;
+    const v = pt.y - tr.y - py;
+    const r = tr.rot * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    const ux = u * c + v * s, uy = -u * s + v * c;
+    return { x: ux / (tr.sx || 1) + px, y: uy / (tr.sy || 1) + py };
+  }
+  // Inverse layer transform applied to a delta vector (no translation).
+  function layerLocalDelta(dx, dy, layer, frame) {
+    if (!layer || !layer.transformAt) return { dx, dy };
+    const tr = layer.transformAt(frame);
+    if (!tr.rot && tr.sx === 1 && tr.sy === 1) return { dx, dy };
+    const r = tr.rot * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    return { dx: (dx * c + dy * s) / (tr.sx || 1), dy: (-dx * s + dy * c) / (tr.sy || 1) };
+  }
+  // Apply a layer's forward transform to a canvas 2D ctx, so overlay
+  // shapes drawn in cel-local coords visually align with the rendered
+  // artwork on a translated/rotated/scaled layer.
+  function applyLayerXform(ctx, layer, frame, app) {
+    if (!layer || !layer.transformAt) return false;
+    const tr = layer.transformAt(frame);
+    if (!tr.x && !tr.y && !tr.rot && tr.sx === 1 && tr.sy === 1) return false;
+    const p = app.project, px = p.width / 2, py = p.height / 2;
+    ctx.translate(tr.x + px, tr.y + py);
+    ctx.rotate(tr.rot * Math.PI / 180);
+    ctx.scale(tr.sx, tr.sy);
+    ctx.translate(-px, -py);
+    return true;
+  }
+
   // Ray-cast point-in-polygon test (polygon = array of {x,y}).
   function pointInPoly(x, y, poly) {
     let inside = false;
@@ -1194,7 +1233,7 @@
       const layer = app.activeLayer();
       this.layerKind = layer ? layer.type : null;
       if (this.layerKind === 'vector') {
-        if (this.vsel.length && this.vcel && this._inVBounds(pt)) {
+        if (this.vsel.length && this.vcel && this._inVBounds(pt, app)) {
           this.mode = 'vmove';
           this.before = this.vcel.snapshot();
           this.last = { x: pt.x, y: pt.y };
@@ -1203,14 +1242,17 @@
         }
         this.vsel = [];
       } else if (this.layerKind === 'drawing') {
-        if (this.raster && this._inRasterBounds(pt)) {
+        if (this.raster && this._inRasterBounds(pt, app)) {
           // First drag after a fresh lasso: actually lift the pixels off the
           // cel now. Until this point the artist just had a selection
           // outline -- they may only have wanted to select, not destructively
           // cut.
           if (!this.raster.lifted) this._liftRaster(app);
           this.mode = 'rmove';
-          this.off = { x: pt.x - this.raster.x, y: pt.y - this.raster.y };
+          // record the drag offset in cel-local coords so rotation/scale
+          // of the layer doesn't fight the cursor while dragging
+          const local = layerLocal(pt, this.raster.layer, this.raster.frame, app);
+          this.off = { x: local.x - this.raster.x, y: local.y - this.raster.y };
           return;
         }
         this._commitRaster(app);   // a new loop drops any floating piece
@@ -1227,31 +1269,51 @@
     pointerMove(pt, e, app) {
       if (this.mode === 'lasso') {
         const last = this.poly[this.poly.length - 1];
-        // 1.6 was a project-space threshold; at 8x zoom that collapses many
-        // pen samples into one polygon vertex and the lasso looks jagged.
-        // Use a screen-space threshold (~1.6 screen px) instead so the loop
-        // stays smooth no matter the zoom level.
+        // tighter screen-space threshold (was 1.6) -- captures pen samples
+        // more densely so the polygon hugs the user's drawn path
         const zoom = (app.stage && app.stage.view && app.stage.view.zoom) || 1;
-        const thr = 1.6 / zoom;
+        const thr = 1.0 / zoom;
         if (U.dist(last.x, last.y, pt.x, pt.y) > thr) this.poly.push({ x: pt.x, y: pt.y });
         app.emit('overlayrender');
       } else if (this.mode === 'vmove') {
         const dx = pt.x - this.last.x, dy = pt.y - this.last.y;
         this.last = { x: pt.x, y: pt.y };
         if (dx || dy) this.moved = true;
+        // delta is in project-space; convert to cel-local if the layer
+        // has a rotation/scale transform so strokes move with the cursor
+        // rather than at a confusing offset
+        const layer = app.activeLayer();
+        const ld = layerLocalDelta(dx, dy, layer, app.frame);
         for (const st of this.vsel) {
           if (st.type === 'fill')
-            st.contour = st.contour.map(p => ({ x: p.x + dx, y: p.y + dy }));
+            st.contour = st.contour.map(p => ({ x: p.x + ld.dx, y: p.y + ld.dy }));
           else
-            st.pts = st.pts.map(p => ({ x: p.x + dx, y: p.y + dy, p: p.p }));
+            st.pts = st.pts.map(p => ({ x: p.x + ld.dx, y: p.y + ld.dy, p: p.p }));
         }
-        this.vcel.rebuild();
-        app.emit('render'); app.emit('overlayrender');
+        // RAF-debounce the heavy rebuild + render. Without this, a vector cel
+        // with many strokes lags noticeably while dragging a selection.
+        this._scheduleVMove(app);
+        app.emit('overlayrender');
       } else if (this.mode === 'rmove') {
-        this.raster.x = pt.x - this.off.x;
-        this.raster.y = pt.y - this.off.y;
+        // move the floating piece in cel-local space so it tracks the cursor
+        // when the layer has a rotation/scale transform
+        const layer = app.activeLayer();
+        const local = layerLocal(pt, layer, app.frame, app);
+        this.raster.x = local.x - this.off.x;
+        this.raster.y = local.y - this.off.y;
         app.emit('render'); app.emit('overlayrender');
       }
+    }
+    _scheduleVMove(app) {
+      if (this._vmoveRAF) return;
+      this._vmoveRAF = requestAnimationFrame(() => {
+        this._vmoveRAF = 0;
+        if (this.vcel) { this.vcel.rebuild(); app.emit('render'); }
+      });
+    }
+    _flushVMove(app) {
+      if (this._vmoveRAF) { cancelAnimationFrame(this._vmoveRAF); this._vmoveRAF = 0; }
+      if (this.vcel) { this.vcel.rebuild(); app.emit('render'); }
     }
     pointerUp(pt, e, app) {
       if (this.mode === 'lasso') {
@@ -1261,6 +1323,7 @@
         }
         this.poly = null;
       } else if (this.mode === 'vmove') {
+        this._flushVMove(app);
         if (this.moved) {
           app.history.pushCelEdit('Move strokes', this.vcel, this.before);
           app.emit('celchange');
@@ -1287,12 +1350,17 @@
       return false;
     }
     _lassoVector(app) {
-      const cel = app.activeLayer().celAt(app.frame);
+      const layer = app.activeLayer();
+      const cel = layer.celAt(app.frame);
       if (!cel) { app.ui.status('Nothing on this frame to select'); return; }
       this.vcel = cel;
+      // convert the project-space polygon into cel-local space so it lines
+      // up with the strokes (whose points are stored cel-local) on a layer
+      // that has a transform applied
+      const localPoly = this.poly.map(p => layerLocal(p, layer, app.frame, app));
       const sel = [];
       for (const st of cel.strokes) {
-        if (this._strokeInLasso(st, this.poly)) sel.push(st);
+        if (this._strokeInLasso(st, localPoly)) sel.push(st);
       }
       this.vsel = sel;
       if (sel.length) this._startAnts(app);
@@ -1305,8 +1373,11 @@
       if (layer.locked) { app.ui.status('Layer is locked'); return; }
       const cel = layer.celAt(app.frame);
       if (!cel) { app.ui.status('Nothing on this frame'); return; }
+      // bring the polygon into cel-local space so it matches the cel's
+      // pixel grid on layers with a transform applied
+      const localPoly = this.poly.map(p => layerLocal(p, layer, app.frame, app));
       let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
-      for (const p of this.poly) {
+      for (const p of localPoly) {
         x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y);
         x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y);
       }
@@ -1320,7 +1391,7 @@
       // Lifting is deferred to the first actual drag (see `_liftRaster`).
       this.raster = {
         canvas: null, lifted: false,
-        poly: this.poly.slice(),
+        poly: localPoly, layer: layer, frame: app.frame,
         x: x0, y: y0, w: w, h: h, cel: cel, before: null
       };
       this._startAnts(app);
@@ -1376,19 +1447,29 @@
       app.history.pushCelEdit('Move selection', r.cel, r.before);
       app.emit('render'); app.emit('celchange');
     }
-    _inVBounds(pt) {
+    _inVBounds(pt, app) {
       if (!this.vsel.length) return false;
+      // bounds are in cel-local space; pointer comes in project-space
+      const local = app
+        ? layerLocal(pt, app.activeLayer(), app.frame, app)
+        : pt;
       let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
       for (const st of this.vsel) {
         const b = V().strokeBounds(st);
         x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y);
         x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
       }
-      return pt.x >= x0 && pt.x <= x1 && pt.y >= y0 && pt.y <= y1;
+      return local.x >= x0 && local.x <= x1 && local.y >= y0 && local.y <= y1;
     }
-    _inRasterBounds(pt) {
+    _inRasterBounds(pt, app) {
       const r = this.raster;
-      return !!r && pt.x >= r.x && pt.x <= r.x + r.w && pt.y >= r.y && pt.y <= r.y + r.h;
+      if (!r) return false;
+      // raster bounds are in cel-local space
+      const local = app && r.layer
+        ? layerLocal(pt, r.layer, r.frame, app)
+        : pt;
+      return local.x >= r.x && local.x <= r.x + r.w &&
+             local.y >= r.y && local.y <= r.y + r.h;
     }
     // Del key -> remove the lasso catch.
     deleteLasso(app) {
@@ -1498,7 +1579,9 @@
         ctx.restore();
       }
       if (this.vsel && this.vsel.length) {
-        // bounding box around each selected stroke, with marching ants
+        // bounding box around each selected stroke, with marching ants.
+        // Strokes are stored in cel-local coords; apply the layer's
+        // transform so the bbox visually wraps the rendered artwork.
         let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
         for (const st of this.vsel) {
           const b = V().strokeBounds(st);
@@ -1510,16 +1593,22 @@
           ctx.beginPath();
           ctx.rect(x0 - pad, y0 - pad, (x1 - x0) + pad * 2, (y1 - y0) + pad * 2);
         };
+        ctx.save();
+        applyLayerXform(ctx, app.activeLayer(), app.frame, app);
         this._ants(ctx, zoom, trace);
+        ctx.restore();
       }
       if (this.raster) {
         const r = this.raster;
+        // raster bounds + canvas live in cel-local space -- apply the layer
+        // transform so the overlay tracks the cursor on transformed layers
+        ctx.save();
+        applyLayerXform(ctx, r.layer || app.activeLayer(), r.frame != null ? r.frame : app.frame, app);
         if (r.lifted && r.canvas) {
-          ctx.save();
           ctx.globalAlpha = 0.95;
           ctx.imageSmoothingEnabled = true;
           ctx.drawImage(r.canvas, r.x, r.y);
-          ctx.restore();
+          ctx.globalAlpha = 1;
         }
         // Outline: trace the actual polygon if pixels haven't been lifted
         // yet (so the user sees what was lassoed), otherwise the bbox of the
@@ -1536,6 +1625,7 @@
           }
         };
         this._ants(ctx, zoom, trace);
+        ctx.restore();
       }
     }
   }

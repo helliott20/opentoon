@@ -551,7 +551,16 @@
             c.fillStyle = '#c6cbd2';
             c.fill();
             c.clip();
-            const th = cel.getThumb(84, Math.max(8, Math.round(84 * p.height / p.width)));
+            // request the thumb at the actual displayed width so timeline-zoom
+            // doesn't upscale a tiny 84 px source into a blurry mess. Round to
+            // 64-px steps so the per-cel cache still hits across small zoom
+            // deltas. Cap at 384 px to stay memory-frugal for very wide runs.
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const tw = Math.min(384, Math.max(64, Math.ceil(bw * dpr / 64) * 64));
+            const tth = Math.max(8, Math.round(tw * p.height / p.width));
+            const th = cel.getThumb(tw, tth);
+            c.imageSmoothingEnabled = true;
+            c.imageSmoothingQuality = 'high';
             c.drawImage(th, bx, by, bw, bh);
             c.restore();
             c.lineWidth = 1.5;

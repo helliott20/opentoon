@@ -52,6 +52,9 @@
       if (PEN) {
         PEN.onFrame((buf, meta) => this._onFrame(buf, meta));
         PEN.ready();
+        // initial size report so the very first frame is encoded at the
+        // correct resolution rather than the legacy 1680 px fallback
+        this._reportSize();
       }
     }
 
@@ -159,13 +162,26 @@
       const barH = this.bar.offsetHeight || 48;
       const w = window.innerWidth;
       const h = Math.max(1, window.innerHeight - barH);
-      this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+      // Cap DPR at 3 (was 2) so Cintiq Pro / iPad-class pen displays get
+      // a properly high-resolution backing store.
+      this.dpr = Math.min(window.devicePixelRatio || 1, 3);
       this.cssW = w; this.cssH = h;
       this.canvas.style.width = w + 'px';
       this.canvas.style.height = h + 'px';
       this.canvas.width = Math.round(w * this.dpr);
       this.canvas.height = Math.round(h * this.dpr);
       this._computeFit();
+      // Let the main window know what resolution to encode for, so the
+      // streamed bitmap arrives at 1:1 with no upscaling = no pixelation.
+      this._reportSize();
+    }
+    _reportSize() {
+      if (!PEN) return;
+      // throttle: only resend if size meaningfully changed
+      const k = this.cssW + 'x' + this.cssH + '@' + this.dpr;
+      if (k === this._lastSizeKey) return;
+      this._lastSizeKey = k;
+      this._cmd({ type: 'pen-size', cssW: this.cssW, cssH: this.cssH, dpr: this.dpr });
     }
     _computeFit() {
       if (!this.bmp) { this.fit = { x: 0, y: 0, w: 0, h: 0 }; return; }
