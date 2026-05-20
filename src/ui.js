@@ -706,13 +706,36 @@
       const root = document.getElementById('modal-root');
       root.style.pointerEvents = 'auto';
       const box = el('div', { class: 'modal' });
-      box.appendChild(el('div', { class: 'modal-head' }, [title]));
+      // header with title + an X close button (right-aligned via flex)
+      const closeBtn = el('button', {
+        class: 'icon-btn modal-close', title: 'Close (Esc)',
+        html: U.svg('<path d="M6 6l12 12M18 6L6 18"/>')
+      });
+      const head = el('div', { class: 'modal-head' }, [
+        el('span', { class: 'modal-title' }, [title]),
+        closeBtn
+      ]);
+      box.appendChild(head);
       const body = el('div', { class: 'modal-body' });
       body.appendChild(bodyEl);
       box.appendChild(body);
       const foot = el('div', { class: 'modal-foot' });
       const bg = el('div', { class: 'modal-bg' }, [box]);
-      const close = () => { bg.remove(); if (!root.children.length) root.style.pointerEvents = 'none'; };
+      // remember whatever was focused so we can restore it on close
+      const prevFocus = document.activeElement;
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        window.removeEventListener('keydown', onKey, true);
+        bg.remove();
+        if (!root.children.length) root.style.pointerEvents = 'none';
+        // restore previous focus if it still exists
+        if (prevFocus && typeof prevFocus.focus === 'function' && document.body.contains(prevFocus)) {
+          try { prevFocus.focus(); } catch (_) {}
+        }
+      };
+      closeBtn.addEventListener('click', e => { e.stopPropagation(); close(); });
       (buttons || [{ label: 'Close', primary: true }]).forEach(b => {
         const btn = el('button', { class: 'btn' + (b.primary ? ' primary' : '') + (b.danger ? ' danger' : '') }, [b.label]);
         btn.addEventListener('click', () => {
@@ -723,7 +746,53 @@
       });
       box.appendChild(foot);
       bg.addEventListener('pointerdown', e => { if (e.target === bg) close(); });
+
+      // Esc closes; Enter triggers the primary button; Tab is trapped inside the modal.
+      const onKey = ev => {
+        if (ev.key === 'Escape') {
+          ev.preventDefault(); ev.stopPropagation();
+          close();
+          return;
+        }
+        if (ev.key === 'Enter') {
+          // don't hijack Enter from textareas or buttons (let them handle it)
+          const t = ev.target;
+          const tag = t && t.tagName;
+          if (tag === 'TEXTAREA') return;
+          if (tag === 'BUTTON') return;
+          const primary = foot.querySelector('.btn.primary');
+          if (primary) {
+            ev.preventDefault(); ev.stopPropagation();
+            primary.click();
+          }
+          return;
+        }
+        if (ev.key === 'Tab') {
+          // trap focus inside the modal box
+          const focusables = box.querySelectorAll(
+            'a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),' +
+            'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+          );
+          if (!focusables.length) return;
+          const first = focusables[0], last = focusables[focusables.length - 1];
+          const a = document.activeElement;
+          if (ev.shiftKey && (a === first || !box.contains(a))) {
+            ev.preventDefault(); last.focus();
+          } else if (!ev.shiftKey && (a === last || !box.contains(a))) {
+            ev.preventDefault(); first.focus();
+          }
+        }
+      };
+      window.addEventListener('keydown', onKey, true);
+
       root.appendChild(bg);
+      // Focus the first input/textarea/select inside the body, deferred a frame
+      // so the browser has actually laid the modal out.
+      requestAnimationFrame(() => {
+        const f = body.querySelector('input,textarea,select');
+        if (f) { try { f.focus(); if (f.select) f.select(); } catch (_) {} }
+        else closeBtn.focus();
+      });
       return { close, box };
     }
     progress(title) {

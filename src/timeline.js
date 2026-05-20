@@ -18,7 +18,11 @@
     addframe: '<path d="M12 5v14M5 12h14"/>',
     onion: '<circle cx="9.5" cy="12" r="6.5"/><circle cx="14.5" cy="12" r="6.5"/>',
     addlayer: '<rect x="3" y="4" width="13" height="13" rx="1.5"/><path d="M19 10v9M14.5 14.5h9"/>',
-    thumbs: '<rect x="3" y="5" width="8" height="6" rx="1"/><rect x="13" y="5" width="8" height="6" rx="1"/><rect x="3" y="14" width="8" height="6" rx="1"/><rect x="13" y="14" width="8" height="6" rx="1"/>'
+    thumbs: '<rect x="3" y="5" width="8" height="6" rx="1"/><rect x="13" y="5" width="8" height="6" rx="1"/><rect x="3" y="14" width="8" height="6" rx="1"/><rect x="13" y="14" width="8" height="6" rx="1"/>',
+    eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+    eyeoff: '<path d="M3 3l18 18"/><path d="M10.6 10.6a3 3 0 0 0 4.2 4.2"/><path d="M9.9 5.1A10.9 10.9 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4.2"/><path d="M6.1 6.1A17 17 0 0 0 2 12s3.5 7 10 7a10.9 10.9 0 0 0 5.1-1.3"/>',
+    lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+    unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/>'
   };
 
   class Timeline {
@@ -198,12 +202,14 @@
         const x = e.clientX - r.left, y = e.clientY - r.top;
         const f = frameAt(x);
         if (e.button === 2) {
+          // Right-click should never silently move the playhead -- the artist
+          // expects a context menu, not a scrub. Just select the row's layer
+          // and open the menu; menu items still operate on the current frame.
           e.preventDefault();
           if (y > this.headerH) {
             const ly = this.rowToLayer(Math.floor((y - this.headerH) / this.rowH));
             if (ly) app.selectLayer(ly);
           }
-          app.setFrame(f);
           this._context(e);
           return;
         }
@@ -211,23 +217,37 @@
           // grab the handle just past the last frame to set the frame count
           const endX = app.project.frameCount * this.cellW;
           if (x >= endX - 6) {
+            // Frame-count drag also actively edits the timeline -- pause any
+            // playback so the artist's drag isn't fighting the play loop.
+            if (app.playback && app.playback.playing) app.playback.stop();
             this._fcDrag = { before: app._structSnapshot(), changed: false };
             return;
           }
+          // Header scrub: explicit playhead drag must stop playback first
+          // so the scrub takes over cleanly.
+          if (app.playback && app.playback.playing) app.playback.stop();
           this._mode = 'scrub'; app.setFrame(f); return;
         }
         const layer = this.rowToLayer(Math.floor((y - this.headerH) / this.rowH));
         if (layer) app.selectLayer(layer);
         const run = layer ? this._runAt(layer, f) : null;
         if (run && !layer.locked) {
+          // About to move / resize an exposure run -- stop playback so the
+          // edit isn't chased by the playhead.
+          if (app.playback && app.playback.playing) app.playback.stop();
           const edge = (run.end + 1) * this.cellW;
+          // a generous 9 px grab zone past the run's right edge -- on a small
+          // cellW the original 5 px was effectively invisible to mouse / pen
           this._celDrag = {
             layer: layer, num: run.num, runStart: run.start, runEnd: run.end,
-            startFrame: f, mode: (x > edge - 5) ? 'resize' : 'move',
+            startFrame: f, mode: (x > edge - 9) ? 'resize' : 'move',
             base: layer.exposure.slice(), before: app._structSnapshot(), moved: false
           };
           app.setFrame(f);
-        } else { this._mode = 'scrub'; app.setFrame(f); }
+        } else {
+          if (app.playback && app.playback.playing) app.playback.stop();
+          this._mode = 'scrub'; app.setFrame(f);
+        }
       });
 
       g.addEventListener('pointermove', e => {
@@ -248,11 +268,45 @@
         if (this._celDrag) this._applyCelDrag(f);
         else if (this._mode === 'scrub') app.setFrame(f);
         else {
+          const y = e.clientY - r.top;
           const endX = app.project.frameCount * this.cellW;
-          g.style.cursor = (e.clientY - r.top <= this.headerH && x >= endX - 6)
-            ? 'ew-resize' : '';
+          let cur = '';
+          if (y <= this.headerH && x >= endX - 6) cur = 'ew-resize';
+          else if (y > this.headerH) {
+            // hovering near the right edge of an exposure run shows the
+            // resize cursor so artists know it's a draggable handle
+            const layer = this.rowToLayer(Math.floor((y - this.headerH) / this.rowH));
+            if (layer && !layer.locked) {
+              const run = this._runAt(layer, frameAt(x));
+              if (run) {
+                const edge = (run.end + 1) * this.cellW;
+                if (x > edge - 9 && x < edge + 2) cur = 'ew-resize';
+                else cur = 'grab';
+              }
+            }
+          }
+          g.style.cursor = cur;
         }
       });
+      // Ctrl + wheel zooms the timeline horizontally, centred on the cursor.
+      // Plain wheel falls through to the browser's native scroll on .tl-grid-wrap.
+      g.addEventListener('wheel', e => {
+        if (!(e.ctrlKey || e.metaKey)) return;
+        e.preventDefault();
+        const r = g.getBoundingClientRect();
+        const x = e.clientX - r.left;
+        const frameUnderCursor = x / this.cellW;
+        const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const next = U.clamp(this.cellW * factor, 4, 80);
+        if (next === this.cellW) return;
+        this.cellW = next;
+        // keep the frame under the cursor stable -- scroll the wrap so the
+        // same frame stays under the pointer after the rescale
+        const newX = frameUnderCursor * this.cellW;
+        const wrap = this.gridWrap;
+        wrap.scrollLeft += (newX - x);
+        this.render();
+      }, { passive: false });
 
       const end = () => {
         if (this._celDrag) {
@@ -329,7 +383,7 @@
     render() {
       const app = this.app, p = app.project;
       this.counter.innerHTML = 'Frame <b>' + (app.frame + 1) + '</b> / ' + p.frameCount +
-        ' &nbsp; ' + p.fps + ' fps';
+        ' &nbsp; ' + p.fps + ' fps &nbsp; · ' + this._smpte(app.frame, p.fps);
       this.playBtn.firstChild.innerHTML = U.svg(app.playback.playing ? ICON.pause : ICON.play);
       this.playBtn.firstChild.firstChild.style.width = '15px';
       this.playBtn.firstChild.firstChild.style.height = '15px';
@@ -350,10 +404,49 @@
         row.style.height = this.rowH + 'px';
         row.appendChild(U.el('div', { class: 'dot', style: { background: layer.color } }));
         row.appendChild(U.el('div', { class: 'nm', text: layer.name }));
+        // Visibility (eye) and lock toggles -- dim, 12 px inline SVGs that
+        // don't trigger the row's selectLayer handler.
+        row.appendChild(this._layerIconBtn(
+          layer.visible ? 'eye' : 'eyeoff',
+          layer.visible ? 'Hide layer' : 'Show layer',
+          ev => {
+            ev.stopPropagation();
+            layer.visible = !layer.visible;
+            app.emit('layerschange');
+            app.emit('render');
+          }
+        ));
+        row.appendChild(this._layerIconBtn(
+          layer.locked ? 'lock' : 'unlock',
+          layer.locked ? 'Unlock layer' : 'Lock layer',
+          ev => {
+            ev.stopPropagation();
+            layer.locked = !layer.locked;
+            app.emit('layerschange');
+          }
+        ));
         if (!layer.visible) row.style.opacity = '.45';
         row.addEventListener('click', () => app.selectLayer(layer));
         this.namesInner.appendChild(row);
       }
+    }
+
+    // Tiny inline-SVG toggle button for the names column (eye / lock).
+    _layerIconBtn(iconKey, title, fn) {
+      const b = U.el('button', { class: 'tl-name-icon', title: title });
+      b.innerHTML = U.svg(ICON[iconKey]);
+      // keep them tiny and dim -- they are secondary controls
+      Object.assign(b.style, {
+        width: '18px', height: '18px', padding: '0',
+        marginLeft: '2px', background: 'transparent', border: '0',
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        cursor: 'pointer', opacity: '0.55', color: 'inherit'
+      });
+      const svg = b.firstChild;
+      if (svg) { svg.style.width = '13px'; svg.style.height = '13px'; }
+      b.addEventListener('pointerdown', ev => ev.stopPropagation());
+      b.addEventListener('click', fn);
+      return b;
     }
 
     _renderGrid() {
@@ -475,6 +568,17 @@
           c.beginPath();
           c.arc(f * cw + cw / 2, y + 8, 3, 0, 7);
           c.fill();
+          // right-edge resize handle -- two short vertical bars on the trailing
+          // edge of the run, signalling "drag me to extend"
+          if (bw > 8) {
+            const hx = bx + bw - 2.5;
+            c.strokeStyle = isActive ? '#ffffff80' : '#ffffff44';
+            c.lineWidth = 1;
+            c.beginPath();
+            c.moveTo(hx, by + 3); c.lineTo(hx, by + bh - 3);
+            c.moveTo(hx + 2, by + 3); c.lineTo(hx + 2, by + bh - 3);
+            c.stroke();
+          }
           // drawing number
           if (bw > 16 && !this.showThumbs) {
             c.fillStyle = '#0009';
@@ -528,6 +632,19 @@
       c.beginPath();
       c.moveTo(cf * cw + cw / 2, hh); c.lineTo(cf * cw + cw / 2, h);
       c.stroke();
+    }
+
+    // hh:mm:ss:ff zero-padded SMPTE timecode for the current frame.
+    _smpte(frame, fps) {
+      fps = Math.max(1, Math.round(fps || 24));
+      const total = Math.max(0, frame | 0);
+      const ff = total % fps;
+      const totalSec = Math.floor(total / fps);
+      const ss = totalSec % 60;
+      const mm = Math.floor(totalSec / 60) % 60;
+      const hh = Math.floor(totalSec / 3600);
+      const pad = n => (n < 10 ? '0' + n : '' + n);
+      return pad(hh) + ':' + pad(mm) + ':' + pad(ss) + ':' + pad(ff);
     }
 
     _alpha(hex, a) {

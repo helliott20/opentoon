@@ -165,9 +165,11 @@
     ctx.strokeStyle = st.color;
     pathThrough(ctx, st.contour, true);
     ctx.fill();
-    // fatten outward so the fill tucks under the line art
+    // outward stroke that fattens the fill so it tucks cleanly under the
+    // anti-aliased edge of the surrounding line. The contour was already
+    // dilated by computeFill; this extra ~1.5 px stroke is the safety net.
     ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-    ctx.lineWidth = Math.max(1, (st.grow || 0) * 2 + 1.5);
+    ctx.lineWidth = Math.max(1.4, (st.grow || 0) * 2 + 1.8);
     ctx.stroke();
     ctx.restore();
   }
@@ -317,10 +319,38 @@
     return contour;
   }
 
+  // Morphological 4-connected dilation of a binary mask by `n` pixels.
+  // Used to extend a flood-fill region under the surrounding anti-aliased
+  // line edge so no gap is visible between fill and line.
+  function dilate(mask, w, h, n) {
+    if (n <= 0) return mask;
+    let cur = mask;
+    for (let pass = 0; pass < n; pass++) {
+      const next = new Uint8Array(w * h);
+      for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+          const i = row + x;
+          if (cur[i]) { next[i] = 1; continue; }
+          if ((x > 0 && cur[i - 1]) ||
+              (x < w - 1 && cur[i + 1]) ||
+              (y > 0 && cur[i - w]) ||
+              (y < h - 1 && cur[i + w])) next[i] = 1;
+        }
+      }
+      cur = next;
+    }
+    return cur;
+  }
+
   // Detect the enclosed region at (fx,fy). Returns {contour, count, open} or null.
   function computeFill(cel, fx, fy, opts) {
     opts = opts || {};
     const gap = Math.max(0, opts.gap || 0);
+    // `expand` is how many pixels the contour grows past the flood boundary,
+    // so the fill tucks under the anti-aliased edge of the surrounding line
+    // and there is no visible white sliver between fill and line.
+    const expand = opts.expand == null ? 2 : Math.max(0, opts.expand | 0);
     const w = cel.w, h = cel.h;
     fx = Math.round(fx); fy = Math.round(fy);
     if (fx < 0 || fy < 0 || fx >= w || fy >= h) return null;
@@ -364,9 +394,13 @@
     }
     if (count === 0) return null;
     const open = count > w * h * 0.8;
-    const raw = traceContour(region, w, h);
+    // dilate the region by `expand` px so the traced contour extends past
+    // the anti-aliased line edge -- prevents the visible gap between fill
+    // and surrounding line art
+    const grown = expand > 0 && !open ? dilate(region, w, h, expand) : region;
+    const raw = traceContour(grown, w, h);
     if (!raw || raw.length < 3) return null;
-    return { contour: simplify(raw, 1.4), count, open };
+    return { contour: simplify(raw, 0.9), count, open };
   }
 
   OT.Vector = {

@@ -11,7 +11,9 @@
       this.viewport = document.getElementById('viewport');
       this.ctx = this.canvas.getContext('2d');
       this.octx = this.overlay.getContext('2d');
-      this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+      // 4K pen displays (Cintiq Pro / iPad-as-display) often report a DPR
+      // between 2.5 and 3, so cap at 3 instead of 2 to avoid a soft canvas.
+      this.dpr = Math.min(window.devicePixelRatio || 1, 3);
       this.view = { zoom: 1, x: 0, y: 0, rot: 0 };
       this.flipH = false;
       this.flipV = false;
@@ -32,8 +34,22 @@
       const ro = new ResizeObserver(() => this.resize());
       ro.observe(this.viewport);
       window.addEventListener('resize', () => this.resize());
+      // Re-raster when the monitor's pixel ratio changes (e.g. window dragged
+      // between a retina laptop and an external 1x display, or OS scaling
+      // tweaked) so the canvas backing store stays crisp.
+      if (window.matchMedia) {
+        try {
+          const mq = window.matchMedia('(resolution: 1dppx)');
+          const onChange = () => this.resize();
+          if (mq.addEventListener) mq.addEventListener('change', onChange);
+          else if (mq.addListener) mq.addListener(onChange);
+        } catch (_) { /* media query unsupported -- ignore */ }
+      }
     }
     resize() {
+      // Read DPR fresh each time so cross-monitor moves (or zoom changes)
+      // pick up the new value -- capped at 3 for high-DPI pen displays.
+      this.dpr = Math.min(window.devicePixelRatio || 1, 3);
       const r = this.viewport.getBoundingClientRect();
       this.cw = Math.max(1, Math.round(r.width));
       this.ch = Math.max(1, Math.round(r.height));
@@ -472,12 +488,28 @@
       };
       c.addEventListener('pointerup', end);
       c.addEventListener('pointercancel', end);
-      c.addEventListener('pointerleave', () => { this.cursorPt = null; this.renderOverlay(); });
+      c.addEventListener('pointerleave', e => {
+        // If the pen / mouse leaves the canvas mid-stroke we must still tell
+        // the active tool the stroke ended -- otherwise it stays "dragging"
+        // forever and the next pointerdown looks like a continuation. Use the
+        // last known project-space cursor so the synthesised up lands at a
+        // sane position rather than (0,0).
+        if (this.app.tools && this.app.tools.dragging && this.cursorPt) {
+          const pt = Object.assign({}, this.cursorPt, { button: 0 });
+          try { this.app.tools.pointerUp(pt, e); } catch (_) {}
+        }
+        this.cursorPt = null;
+        this.renderOverlay();
+      });
       c.addEventListener('contextmenu', e => e.preventDefault());
 
       c.addEventListener('wheel', e => {
         e.preventDefault();
-        const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+        // Match the pen-window UX: hold Ctrl / Meta for a fine 1.05x step,
+        // plain wheel keeps the coarser 1.15x. Zoom centring on cursor is
+        // preserved because zoomAt anchors to the screen coords.
+        const step = (e.ctrlKey || e.metaKey) ? 1.05 : 1.15;
+        const f = e.deltaY < 0 ? step : 1 / step;
         this.zoomAt(e.clientX, e.clientY, f);
       }, { passive: false });
 

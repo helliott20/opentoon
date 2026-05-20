@@ -26,8 +26,9 @@
   --edge:#080a0c;
   --text:#cdd2d9;
   --text-dim:#7d838f;
-  --accent:#4a9fd4;
-  --accent-lo:#3a86ba;
+  --accent:#4ba8e0;
+  --accent-lo:#3c8cc4;
+  --accent-glow:#4ba8e033;
   --accent2:#e8a23a;
   --hot:#dd5038;
   --ok:#54b06a;
@@ -52,7 +53,7 @@ input,select,textarea{font:inherit;}
 .field-row input:focus,.field-row select:focus,
 textarea:focus{
   outline:none;border-color:var(--accent);
-  box-shadow:0 0 0 2px #4a9fd440;
+  box-shadow:0 0 0 2px var(--accent-glow);
 }
 
 /* ---------- Menu bar ---------- */
@@ -166,6 +167,10 @@ textarea:focus{
   background:var(--panel);border-left:1px solid var(--edge);
   cursor:ew-resize;touch-action:none;position:relative;
 }
+/* invisible wider hit zone for an easier grab; visible bar still 6px */
+#sidebar-resizer::before{
+  content:"";position:absolute;inset:0 -6px;z-index:1;
+}
 #sidebar-resizer::after{
   content:"";position:absolute;left:50%;top:50%;
   width:2px;height:30px;margin:-15px 0 0 -1px;
@@ -178,7 +183,7 @@ textarea:focus{
   background:var(--panel);border-left:1px solid var(--edge);
   display:flex;flex-direction:column;overflow:hidden;
 }
-.panel{border-bottom:1px solid var(--edge);display:flex;flex-direction:column;}
+.panel{border-bottom:1px solid var(--edge);display:flex;flex-direction:column;min-height:0;}
 .panel-head{
   background:var(--panel2);padding:6px 9px;
   font-weight:700;color:var(--text-dim);text-transform:uppercase;
@@ -194,18 +199,27 @@ textarea:focus{
    collapsed. Only the three real panel headers (direct .panel children) get
    it; sub-headings inside a panel body keep the plain look. */
 .panel > .panel-head::before{
-  content:"";flex:0 0 auto;
-  border-left:4.5px solid currentColor;
-  border-top:3.5px solid transparent;
-  border-bottom:3.5px solid transparent;
-  transform:rotate(90deg);opacity:.6;
+  content:"\25B8";flex:0 0 auto;
+  font-family:"JetBrains Mono",ui-monospace,Consolas,monospace;
+  font-size:10px;line-height:1;display:inline-block;
+  width:10px;text-align:center;
+  color:currentColor;opacity:.6;
+  transform:rotate(90deg);
   transition:transform .15s ease,opacity var(--t);
 }
 .panel > .panel-head:hover::before{opacity:1;}
 .panel.collapsed > .panel-head::before{transform:rotate(0deg);}
 .panel-head .icon-btn{margin-left:auto;}
-.panel-body{padding:8px 9px;display:flex;flex-direction:column;gap:7px;}
+.panel-body{padding:8px 9px;display:flex;flex-direction:column;gap:7px;
+  min-height:0;overflow-y:auto;overscroll-behavior:contain;
+  /* reserve scrollbar gutter so the slider-value text on the right edge
+     never sits under (and gets clipped by) the scrollbar */
+  scrollbar-gutter:stable;}
 #layerpanel{flex:1;min-height:120px;}
+/* Cap tool options so brush mode (many sliders + presets) can't crush the
+   layers panel down to nothing. */
+#toolopts{max-height:42vh;}
+#toolopts .panel-body{overflow-y:auto;}
 /* a collapsed panel shrinks to just its header */
 .panel.collapsed{flex:0 0 auto;}
 .panel.collapsed .panel-body{display:none;}
@@ -270,17 +284,26 @@ textarea:focus{
 }
 
 /* ---------- Tool options ---------- */
-.opt-row{display:flex;align-items:center;gap:8px;}
-.opt-row label{flex:0 0 64px;color:var(--text-dim);}
-.opt-row input[type=range]{flex:1;}
-.opt-row .val{flex:0 0 38px;text-align:right;color:var(--text);}
+.opt-row{display:flex;align-items:center;gap:6px;min-width:0;}
+.opt-row label{flex:0 0 58px;color:var(--text-dim);}
+.opt-row input[type=range]{flex:1 1 0;min-width:0;}
+.opt-row .val{flex:0 0 34px;text-align:right;color:var(--text);
+  font-variant-numeric:tabular-nums;}
 input[type=range]{
   -webkit-appearance:none;appearance:none;height:4px;border-radius:2px;
   background:var(--panel3);outline:none;
 }
 input[type=range]::-webkit-slider-thumb{
-  -webkit-appearance:none;width:13px;height:13px;border-radius:50%;
-  background:var(--accent);border:1px solid #000;cursor:pointer;
+  -webkit-appearance:none;width:16px;height:16px;border-radius:50%;
+  background:var(--accent);border:none;cursor:pointer;
+  box-shadow:inset 0 0 0 1px #00000055,0 1px 2px #0007;
+  transition:transform .12s ease,background-color .12s ease,box-shadow .12s ease;
+}
+input[type=range]::-webkit-slider-thumb:hover{
+  transform:scale(1.15);background:#fff;
+}
+input[type=range]::-webkit-slider-thumb:active{
+  background:var(--accent);
 }
 .num-input{
   width:52px;background:var(--panel3);border:1px solid var(--edge);
@@ -294,9 +317,9 @@ input[type=range]::-webkit-slider-thumb{
   background:var(--panel3);border:1px solid #0006;border-radius:4px;
   color:var(--text);padding:3px 8px;font-size:11px;
   white-space:nowrap;
-  transition:background-color var(--t),color var(--t),border-color var(--t);
+  transition:background-color var(--t),color var(--t),border-color var(--t),transform .12s ease;
 }
-.preset-chip:hover{background:var(--accent);color:#fff;border-color:#0008;}
+.preset-chip:hover{background:var(--accent);color:#fff;border-color:#0008;transform:translateY(-1px);}
 .preset-chip:active{transform:translateY(1px);}
 .preset-chip.add{background:none;border-style:dashed;color:var(--text-dim);}
 .preset-chip.add:hover{background:var(--panel3);color:var(--text);border-color:var(--accent);}
@@ -353,6 +376,10 @@ input[type=range]::-webkit-slider-thumb{
   cursor:ns-resize;touch-action:none;
   position:relative;
 }
+/* invisible wider hit zone for an easier grab; visible bar still 7px */
+.tl-resizer::before{
+  content:"";position:absolute;inset:-6px 0;z-index:1;
+}
 .tl-resizer::after{
   content:"";position:absolute;left:50%;top:50%;
   width:34px;height:2px;margin:-1px 0 0 -17px;
@@ -407,7 +434,7 @@ input[type=range]::-webkit-slider-thumb{
   height:22px;flex:0 0 22px;background:var(--panel2);
   border-top:1px solid var(--edge);
   display:flex;align-items:center;gap:14px;padding:0 10px;
-  color:var(--text-dim);font-size:11px;
+  color:var(--text-dim);font-size:12px;
 }
 /* the message takes the slack but must be allowed to shrink + ellipsize,
    otherwise a long message pushes the Pos / Zoom / size readouts off-screen */
@@ -415,13 +442,18 @@ input[type=range]::-webkit-slider-thumb{
   flex:1;min-width:0;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
-#statusbar > div:not(.st-msg){flex:0 0 auto;white-space:nowrap;}
+#statusbar > div:not(.st-msg){
+  flex:0 0 auto;white-space:nowrap;
+  border-left:1px solid var(--edge);padding-left:12px;
+}
 #statusbar b{color:var(--text);}
 
 /* ---------- Modal ---------- */
 #modal-root{position:fixed;inset:0;pointer-events:none;z-index:900;}
 .modal-bg{
-  position:absolute;inset:0;background:#000a;
+  position:absolute;inset:0;background:#000c;
+  -webkit-backdrop-filter:blur(4px);
+  backdrop-filter:blur(4px);
   display:flex;align-items:center;justify-content:center;
   pointer-events:auto;
 }
@@ -437,9 +469,19 @@ input[type=range]::-webkit-slider-thumb{
 .modal-head{
   background:var(--panel2);padding:10px 15px;font-weight:700;
   font-family:"Space Grotesk","Segoe UI",system-ui,sans-serif;
-  letter-spacing:-.01em;font-size:13px;color:var(--cream);
+  letter-spacing:-.015em;font-size:14px;color:var(--cream);
   border-bottom:1px solid var(--edge);
+  box-shadow:inset 0 -2px 0 var(--accent-lo);
+  display:flex;align-items:center;gap:10px;
 }
+.modal-head .modal-title{flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.modal-head .modal-close{
+  margin-left:auto;width:24px;height:24px;border-radius:4px;
+  color:var(--text-dim);
+}
+.modal-head .modal-close:hover{color:#fff;background:#fff2;}
+.modal-head .modal-close svg{width:14px;height:14px;}
 .modal-body{padding:14px;display:flex;flex-direction:column;gap:11px;}
 .modal-foot{
   padding:10px 14px;border-top:1px solid var(--edge);
@@ -474,10 +516,27 @@ input[type=range]::-webkit-slider-thumb{
 
 ::-webkit-scrollbar{width:10px;height:10px;}
 ::-webkit-scrollbar-track{background:var(--edge);}
-::-webkit-scrollbar-thumb{background:var(--panel3);border-radius:5px;border:2px solid var(--edge);}
-::-webkit-scrollbar-thumb:hover{background:#4a515e;}
+::-webkit-scrollbar-thumb{background:#454b56;border-radius:5px;border:2px solid var(--edge);min-height:28px;}
+::-webkit-scrollbar-thumb:hover{background:#566070;}
 
 .hidden{display:none!important;}
+
+/* ---------- Focus rings ---------- */
+/* Suppress the default blue browser ring everywhere we draw our own. */
+.tool-btn:focus,.icon-btn:focus,.btn:focus,
+.preset-chip:focus,.tl-btn:focus,.vb-btn:focus,
+.layer-item:focus,.swatch:focus{outline:none;}
+.tool-btn:focus-visible,
+.icon-btn:focus-visible,
+.btn:focus-visible,
+.preset-chip:focus-visible,
+.tl-btn:focus-visible,
+.vb-btn:focus-visible,
+.layer-item:focus-visible,
+.swatch:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+}
 
 /* ---------- Clean Canvas (distraction-free) ---------- */
 body.clean-view #sidebar,

@@ -81,8 +81,14 @@
     step(d) {
       this.stop();
       const p = this.app.project;
-      let f = (this.app.frame + d) % p.frameCount;
-      if (f < 0) f += p.frameCount;
+      let f = this.app.frame + d;
+      if (this.loopMode === 'loop') {
+        f = f % p.frameCount;
+        if (f < 0) f += p.frameCount;
+      } else {
+        if (f < 0) f = 0;
+        else if (f > p.frameCount - 1) f = p.frameCount - 1;
+      }
       this.app.setFrame(f);
     }
     gotoStart() { this.stop(); this.app.setFrame(0); }

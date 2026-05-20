@@ -170,6 +170,7 @@
 
       this._installKeys();
       this._installGuards();
+      this._installFpsWatch();
 
       this.tools.select('brush');
       this.emitAll();
@@ -428,6 +429,11 @@
       if (!fromPlayback && this.tools) this.tools.flush();
       this.frame = f;
       if (!fromPlayback) this._syncVideoLayers();
+      // When the user scrubs during playback, re-seek the audio so it stays
+      // in sync with the new frame instead of carrying on from the old position.
+      if (!fromPlayback && this.playback && this.playback.playing && this.audioBuffer) {
+        this.playAudioFrom(f);
+      }
       this.emit('framechange');
       this.emit('render');
     }
@@ -601,6 +607,12 @@
         for (const l of this.project.layers) l.exposure.splice(this.frame, 0, 0);
         this.project.frameCount++;
         for (const k of this.project.camera.keyframes) if (k.frame >= this.frame) k.frame++;
+        // Shift each layer's peg/transform keyframes the same way as camera keys.
+        for (const l of this.project.layers) {
+          if (l.transform && l.transform.keyframes) {
+            for (const k of l.transform.keyframes) if (k.frame >= this.frame) k.frame++;
+          }
+        }
       });
     }
     removeFrame() {
@@ -612,6 +624,14 @@
         this.project.camera.keyframes = this.project.camera.keyframes
           .filter(k => k.frame !== f)
           .map(k => k.frame > f ? Object.assign({}, k, { frame: k.frame - 1 }) : k);
+        // Mirror the camera-keyframe pattern for per-layer transform keyframes.
+        for (const l of this.project.layers) {
+          if (l.transform && l.transform.keyframes) {
+            l.transform.keyframes = l.transform.keyframes
+              .filter(k => k.frame !== f)
+              .map(k => k.frame > f ? Object.assign({}, k, { frame: k.frame - 1 }) : k);
+          }
+        }
       });
       this.setFrame(Math.min(f, this.project.frameCount - 1));
     }
@@ -660,6 +680,7 @@
         c.visible = layer.visible; c.locked = layer.locked;
         c.opacity = layer.opacity; c.color = layer.color;
         c.exposure = layer.exposure.slice(); c.nextNum = layer.nextNum;
+        c.transform = JSON.parse(JSON.stringify(layer.transform || { keyframes: [] }));
         if (layer.type === 'video' && layer.video) {
           c.video = {
             name: layer.video.name, src: layer.video.src, duration: layer.video.duration
@@ -1330,6 +1351,22 @@
       return map;
     }
     _installKeys() {
+      // Pointer-down anywhere while Space is held counts as a pan-drag, so on
+      // Space release we restore the prior tool instead of toggling playback.
+      window.addEventListener('pointerdown', () => {
+        if (this._spaceDown) this._spaceDragged = true;
+      }, true);
+      window.addEventListener('keyup', ev => {
+        if (ev.key !== ' ') return;
+        if (!this._spaceDown) return;
+        this._spaceDown = false;
+        const dragged = this._spaceDragged;
+        const prev = this._spacePrevTool;
+        this._spaceDragged = false;
+        this._spacePrevTool = null;
+        if (prev) this.tools.select(prev);
+        if (!dragged) this.playback.toggle();
+      });
       window.addEventListener('keydown', ev => {
         const t = ev.target;
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
@@ -1355,17 +1392,43 @@
           const cmd = KEY_COMMANDS.find(c => c.id === cmdId);
           if (cmd) {
             if (cmd.prevent) ev.preventDefault();
-            if (!(ev.repeat && cmd.noRepeat)) cmd.run(this);
+            if (ev.repeat && cmd.noRepeat) return;
+            // While auto-repeat fires, cap step-prev / step-next at the
+            // project frame rate; a single tap always passes through.
+            if (ev.repeat && (cmd.id === 'step-next' || cmd.id === 'step-prev')) {
+              const now = performance.now();
+              const minGap = 1000 / Math.max(1, this.project.fps);
+              if (this._lastStepKeyAt && now - this._lastStepKeyAt < minGap) return;
+              this._lastStepKeyAt = now;
+            }
+            cmd.run(this);
             return;
           }
         }
 
         // fixed keys -- play (Space), cancel, brush-size and zoom nudges
-        if (k === ' ') { ev.preventDefault(); if (!ev.repeat) this.playback.toggle(); return; }
+        // Space: hold to temporarily engage the Hand tool for panning; a quick
+        // tap (no pointer drag while held) still toggles playback on release.
+        if (k === ' ') {
+          ev.preventDefault();
+          if (!ev.repeat && !this._spaceDown) {
+            this._spaceDown = true;
+            this._spaceDragged = !!(this.tools && this.tools.dragging);
+            const cur = this.tools && this.tools.active ? this.tools.active.name : null;
+            if (cur && cur !== 'hand') {
+              this._spacePrevTool = cur;
+              this.tools.select('hand');
+            } else {
+              this._spacePrevTool = null;
+            }
+          }
+          return;
+        }
         if (k === 'escape') {
-          const an = this.tools.active.name;
-          if (an === 'select') this.tools.tools.select.cancel(this);
-          else if (an === 'lasso') this.tools.tools.lasso.cancel(this);
+          // delegate to whichever active tool exposes a cancel hook --
+          // covers select, lasso, and brush/pencil mid-stroke aborts
+          const t = this.tools.active;
+          if (t && typeof t.cancel === 'function') t.cancel(this);
           return;
         }
         if (k === '[' || k === ']') {
@@ -1381,6 +1444,23 @@
         }
         if (k === '=' || k === '+') { this.stage.zoomAt(innerWidth / 2, innerHeight / 2, 1.25); return; }
         if (k === '-' || k === '_') { this.stage.zoomAt(innerWidth / 2, innerHeight / 2, 0.8); return; }
+      });
+    }
+    // The project-settings dialog mutates project.fps in place and emits
+    // 'projectchange'; audioPeaks and per-video-layer videoFrames are both
+    // derived from fps, so refresh them whenever the rate changes.
+    _installFpsWatch() {
+      this._lastFps = this.project.fps;
+      this.on('projectchange', () => {
+        const fps = this.project.fps;
+        if (fps === this._lastFps) return;
+        this._lastFps = fps;
+        if (this.audioBuffer) this.audioPeaks = this._computePeaks(this.audioBuffer);
+        for (const l of this.project.layers) {
+          if (l.type === 'video' && l.video) {
+            l.videoFrames = Math.ceil((l.video.duration || 1) * fps);
+          }
+        }
       });
     }
     _installGuards() {

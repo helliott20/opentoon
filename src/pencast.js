@@ -207,8 +207,15 @@
         }
         case 'zoom': {
           const st = a.stage, r = st.canvas.getBoundingClientRect();
-          st.zoomAt(r.left + (msg.nx || 0.5) * st.cw,
-            r.top + (msg.ny || 0.5) * st.ch, msg.factor || 1);
+          if (msg.absolute && msg.absolute > 0) {
+            // jump to an exact zoom level (e.g. 100%) and re-centre the camera
+            const sx = r.left + st.cw / 2, sy = r.top + st.ch / 2;
+            const factor = msg.absolute / (st.view.zoom || 1);
+            st.zoomAt(sx, sy, factor);
+          } else {
+            st.zoomAt(r.left + (msg.nx || 0.5) * st.cw,
+              r.top + (msg.ny || 0.5) * st.ch, msg.factor || 1);
+          }
           break;
         }
         case 'pan': {

@@ -89,6 +89,22 @@
       if (this.vec) this._vUp(pt, app); else this._rUp(pt, app);
       this.t = null;
     }
+    // Esc mid-stroke: drop any pending RAFs, restore the cel to what it was
+    // before pointerDown, and reset state without pushing history.
+    cancel(app) {
+      if (!this.t) return;
+      if (this._compRAF) { cancelAnimationFrame(this._compRAF); this._compRAF = 0; }
+      if (this._emitRAF) { cancelAnimationFrame(this._emitRAF); this._emitRAF = 0; }
+      if (this._eraseRAF) { cancelAnimationFrame(this._eraseRAF); this._eraseRAF = 0; }
+      this._erasePending = null;
+      this._lastErasePt = null;
+      if (this.before) this.t.cel.restore(this.before);
+      this.t = null;
+      this.buf = null; this.base = null;
+      this.raw = null; this.sm = null; this.last = null; this.lastStamp = null;
+      this.changed = false;
+      app.emit('render');
+    }
 
     /* ---- raster ---- */
     _rDown(pt) {
@@ -111,7 +127,10 @@
     }
     _rUp(pt, app) {
       if (this._compRAF) { cancelAnimationFrame(this._compRAF); this._compRAF = 0; }
-      this._seg(this.last.x, this.last.y, this.last.p, pt.x, pt.y, pt.pressure);
+      // Commit lands on the smoothed cursor, not the raw pointer position, so
+      // the stroke does not visibly snap forward at release (matches vector
+      // and pencil tools).
+      this._seg(this.last.x, this.last.y, this.last.p, this.sm.x, this.sm.y, pt.pressure);
       this._rComposite();
       app.history.pushCelEdit(this.mode, this.t.cel, this.before);
       this.t.cel.dirty();
@@ -196,6 +215,7 @@
       const cel = this.t.cel;
       if (this.mode === 'eraser') {
         this.changed = false;
+        this._lastErasePt = null;
         this._erase(cel, pt.x, pt.y, app);
         return;
       }
@@ -242,9 +262,14 @@
         if (this.changed) { app.history.pushCelEdit('eraser', cel, this.before); app.emit('celchange'); }
         return;
       }
-      this.raw.push({ x: pt.x, y: pt.y, p: pt.pressure });
-      const tol = 0.5 + this.smooth * 2.5;
-      let pts = V().simplify(V().smoothPts(this.raw, Math.round(this.smooth * 10)), tol);
+      // Push the live-smoothed point as the final, so the committed geometry
+      // ends exactly where the wet-ink preview ended -- no visible "snap"
+      // forward at release. Skip the second smoothing pass: this.raw already
+      // carries the EMA-smoothed coordinates from _vMove, so a second smoothPts
+      // would tighten the curve away from what the user just saw.
+      this.raw.push({ x: this.sm.x, y: this.sm.y, p: pt.pressure });
+      const tol = 0.4 + this.smooth * 0.8;
+      let pts = V().simplify(this.raw, tol);
       if (pts.length < 2) pts = this.raw.slice(0, 2);
       // endpoint auto-connect
       const snap = app.settings.snapDist;
@@ -254,7 +279,12 @@
       const s1 = V().snapPoint(cel, pts[li].x, pts[li].y, snap);
       if (s1) { pts[li] = { x: s1.x, y: s1.y, p: pts[li].p }; }
       let closed = false;
-      if (pts.length > 3 && U.dist(pts[0].x, pts[0].y, pts[li].x, pts[li].y) < snap * 1.3) {
+      // Auto-close is opt-in. Without this guard a quick tick mark that
+      // happens to start and end within ~18 px is silently turned into a
+      // closed loop, which traps fill operations the artist never intended.
+      const autoClose = !!(app.settings && app.settings.autoClose);
+      if (autoClose && pts.length > 3 &&
+          U.dist(pts[0].x, pts[0].y, pts[li].x, pts[li].y) < snap * 1.3) {
         pts[li] = { x: pts[0].x, y: pts[0].y, p: pts[li].p };
         closed = true;
       }
@@ -282,15 +312,38 @@
     }
     _erase(cel, x, y, app) {
       const r = this.size / 2;
+      // Sample the segment from the previous erase point to the current one so
+      // a fast stroke does not leave gaps between widely-spaced pointer events.
+      // Same stamping pattern the brush uses (~r * 0.4 spacing).
+      let samples;
+      const last = this._lastErasePt;
+      if (last) {
+        const d = U.dist(last.x, last.y, x, y);
+        const step = Math.max(2, r * 0.4);
+        const n = Math.max(1, Math.ceil(d / step));
+        samples = [];
+        for (let i = 1; i <= n; i++) {
+          const t = i / n;
+          samples.push({ x: last.x + (x - last.x) * t, y: last.y + (y - last.y) * t });
+        }
+      } else {
+        samples = [{ x: x, y: y }];
+      }
+      this._lastErasePt = { x: x, y: y };
       let changed = false;
-      const next = [];
-      for (const st of cel.strokes) {
-        const res = V().eraseStroke(st, x, y, r);
-        if (res === null) next.push(st);
-        else { changed = true; for (const p of res) next.push(p); }
+      let strokes = cel.strokes;
+      for (const s of samples) {
+        const next = [];
+        let touched = false;
+        for (const st of strokes) {
+          const res = V().eraseStroke(st, s.x, s.y, r);
+          if (res === null) next.push(st);
+          else { touched = true; for (const p of res) next.push(p); }
+        }
+        if (touched) { strokes = next; changed = true; }
       }
       if (!changed) return;
-      cel.strokes = next;
+      cel.strokes = strokes;
       this.changed = true;
       // rebuild() re-renders every stroke. A tablet pen fires many coalesced
       // events per frame, so calling it per event makes the eraser lag.
@@ -311,6 +364,7 @@
         this._erasePending.app.emit('render');
         this._erasePending = null;
       }
+      this._lastErasePt = null;
     }
   }
 
@@ -357,11 +411,13 @@
     pointerUp(pt, e, app) {
       if (!this.t) return;
       if (this._rRAF) { cancelAnimationFrame(this._rRAF); this._rRAF = 0; }
-      this.raw.push({ x: pt.x, y: pt.y });
+      // Push the smoothed final point so commit lands exactly where the live
+      // preview ended (this.sm is the EMA-smoothed cursor from pointerMove).
+      this.raw.push({ x: this.sm.x, y: this.sm.y });
       const cel = this.t.cel;
       if (this.vec) {
-        const tol = 0.5 + this.smooth * 2.5;
-        let pts = V().simplify(V().smoothPts(this.raw, Math.round(this.smooth * 10)), tol);
+        const tol = 0.4 + this.smooth * 0.8;
+        let pts = V().simplify(this.raw, tol);
         if (pts.length < 2) pts = this.raw.slice(0, 2);
         const snap = app.settings.snapDist;
         const s0 = V().snapPoint(cel, pts[0].x, pts[0].y, snap);
@@ -370,7 +426,11 @@
         const s1 = V().snapPoint(cel, pts[li].x, pts[li].y, snap);
         if (s1) pts[li] = { x: s1.x, y: s1.y };
         let closed = false;
-        if (pts.length > 3 && U.dist(pts[0].x, pts[0].y, pts[li].x, pts[li].y) < snap * 1.3) {
+        // Same opt-in guard as PaintTool: auto-close traps tick strokes into
+        // unintended closed loops unless the user explicitly opts in.
+        const autoClose = !!(app.settings && app.settings.autoClose);
+        if (autoClose && pts.length > 3 &&
+            U.dist(pts[0].x, pts[0].y, pts[li].x, pts[li].y) < snap * 1.3) {
           pts[li] = { x: pts[0].x, y: pts[0].y }; closed = true;
         }
         const stroke = {
@@ -397,6 +457,17 @@
       app.history.pushCelEdit('pencil', cel, this.before);
       this.t = null;
       app.emit('render'); app.emit('celchange');
+    }
+    // Esc mid-stroke: restore the cel and drop the tool's transient state
+    // without pushing history.
+    cancel(app) {
+      if (!this.t) return;
+      if (this._rRAF) { cancelAnimationFrame(this._rRAF); this._rRAF = 0; }
+      if (this.before) this.t.cel.restore(this.before);
+      this.t = null;
+      this.buf = null; this.base = null;
+      this.raw = null; this.sm = null;
+      app.emit('render');
     }
     _render(app) {
       const cel = this.t.cel;
@@ -538,27 +609,86 @@
         const dr = d[i] - tr, dg = d[i + 1] - tg, db = d[i + 2] - tb, da = d[i + 3] - ta;
         return dr * dr + dg * dg + db * db + da * da <= thr;
       };
-      if (contig) {
-        const seen = new Uint8Array(w * h);
-        const stack = [x, y];
-        while (stack.length) {
-          const py = stack.pop(), px = stack.pop();
-          if (px < 0 || py < 0 || px >= w || py >= h) continue;
-          const p = py * w + px;
-          if (seen[p]) continue;
-          const i = p * 4;
-          if (!match(i)) continue;
-          seen[p] = 1;
-          d[i] = f.r; d[i + 1] = f.g; d[i + 2] = f.b; d[i + 3] = 255;
-          stack.push(px + 1, py, px - 1, py, px, py + 1, px, py - 1);
-        }
-      } else {
-        for (let p = 0, n = w * h; p < n; p++) {
-          const i = p * 4;
-          if (match(i)) { d[i] = f.r; d[i + 1] = f.g; d[i + 2] = f.b; d[i + 3] = 255; }
-        }
+      // Track which pixels were filled so we can dilate the region a couple
+      // of pixels into the surrounding anti-aliased line edge afterwards.
+      // Without this dilation a 1-2 px sliver of unfilled pixels is visible
+      // between the fill and the line, because the AA edge fails `match`.
+      //
+      // IMPORTANT: do NOT overwrite the alpha channel. Anti-aliased line art
+      // has fractional alpha along its edges; clobbering alpha to 255 turns a
+      // soft edge into a hard one. Only update RGB and let the original alpha
+      // define edge softness.
+      const filled = new Uint8Array(w * h);
+      // Non-contiguous flood would recolour every matching pixel anywhere on
+      // the layer (including disconnected regions the artist never clicked).
+      // That is almost never what the user wants, so the contiguous flood is
+      // the only supported path now -- the `contig` arg is preserved for
+      // call-site compatibility but ignored.
+      void contig;
+      const stack = [x, y];
+      while (stack.length) {
+        const py = stack.pop(), px = stack.pop();
+        if (px < 0 || py < 0 || px >= w || py >= h) continue;
+        const p = py * w + px;
+        if (filled[p]) continue;
+        const i = p * 4;
+        if (!match(i)) continue;
+        filled[p] = 1;
+        d[i] = f.r; d[i + 1] = f.g; d[i + 2] = f.b;
+        stack.push(px + 1, py, px - 1, py, px, py + 1, px, py - 1);
       }
       cel.ctx.putImageData(img, 0, 0);
+      // Dilate the filled mask by 2 px and paint that ring under the existing
+      // pixels (destination-over). The line art on top keeps its full alpha;
+      // only the gap pixels behind the AA edge gain the fill colour.
+      const expand = 2;
+      const ring = this._ringMask(filled, w, h, expand);
+      if (ring) {
+        const tmp = document.createElement('canvas');
+        tmp.width = w; tmp.height = h;
+        const tx = tmp.getContext('2d');
+        const ringImg = tx.createImageData(w, h);
+        const rd = ringImg.data;
+        for (let p = 0, n = w * h; p < n; p++) {
+          if (!ring[p]) continue;
+          const i = p * 4;
+          rd[i] = f.r; rd[i + 1] = f.g; rd[i + 2] = f.b; rd[i + 3] = 255;
+        }
+        tx.putImageData(ringImg, 0, 0);
+        const c = cel.ctx;
+        c.save();
+        c.globalCompositeOperation = 'destination-over';
+        c.drawImage(tmp, 0, 0);
+        c.restore();
+      }
+    }
+    // Build the dilation ring: pixels NOT in `mask` but within `n` pixels of
+    // one that is, using 4-connected dilation. Returns null if `n` is 0 or
+    // the mask is empty.
+    _ringMask(mask, w, h, n) {
+      let any = false;
+      for (let p = 0, len = w * h; p < len; p++) if (mask[p]) { any = true; break; }
+      if (!any || n <= 0) return null;
+      let cur = mask;
+      for (let pass = 0; pass < n; pass++) {
+        const next = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) {
+          const row = y * w;
+          for (let x = 0; x < w; x++) {
+            const i = row + x;
+            if (cur[i]) { next[i] = 1; continue; }
+            if ((x > 0 && cur[i - 1]) ||
+                (x < w - 1 && cur[i + 1]) ||
+                (y > 0 && cur[i - w]) ||
+                (y < h - 1 && cur[i + w])) next[i] = 1;
+          }
+        }
+        cur = next;
+      }
+      // ring = dilated - original
+      const ring = new Uint8Array(w * h);
+      for (let p = 0, len = w * h; p < len; p++) if (cur[p] && !mask[p]) ring[p] = 1;
+      return ring;
     }
   }
 
@@ -1037,12 +1167,27 @@
     onDeactivate(app) {
       this._commitRaster(app);
       this.vsel = []; this.vcel = null; this.poly = null; this.mode = 'idle';
+      this._stopAnts();
       app.emit('overlayrender');
     }
     // a frame / layer change drops the selection so it can't act on a hidden cel
     flush(app) {
       this._commitRaster(app);
       this.vsel = []; this.vcel = null;
+      this._stopAnts();
+    }
+    // marching-ants animation: emit overlayrender ~12fps while there's something
+    // to animate; auto-stops when nothing is selected.
+    _startAnts(app) {
+      if (this._antsTimer) return;
+      this._antsTimer = setInterval(() => {
+        if (this.mode === 'lasso' || this.vsel.length || this.raster)
+          app.emit('overlayrender');
+        else this._stopAnts();
+      }, 70);
+    }
+    _stopAnts() {
+      if (this._antsTimer) { clearInterval(this._antsTimer); this._antsTimer = null; }
     }
 
     pointerDown(pt, e, app) {
@@ -1059,6 +1204,11 @@
         this.vsel = [];
       } else if (this.layerKind === 'drawing') {
         if (this.raster && this._inRasterBounds(pt)) {
+          // First drag after a fresh lasso: actually lift the pixels off the
+          // cel now. Until this point the artist just had a selection
+          // outline -- they may only have wanted to select, not destructively
+          // cut.
+          if (!this.raster.lifted) this._liftRaster(app);
           this.mode = 'rmove';
           this.off = { x: pt.x - this.raster.x, y: pt.y - this.raster.y };
           return;
@@ -1071,12 +1221,19 @@
       }
       this.mode = 'lasso';
       this.poly = [{ x: pt.x, y: pt.y }];
+      this._startAnts(app);
       app.emit('overlayrender');
     }
     pointerMove(pt, e, app) {
       if (this.mode === 'lasso') {
         const last = this.poly[this.poly.length - 1];
-        if (U.dist(last.x, last.y, pt.x, pt.y) > 1.6) this.poly.push({ x: pt.x, y: pt.y });
+        // 1.6 was a project-space threshold; at 8x zoom that collapses many
+        // pen samples into one polygon vertex and the lasso looks jagged.
+        // Use a screen-space threshold (~1.6 screen px) instead so the loop
+        // stays smooth no matter the zoom level.
+        const zoom = (app.stage && app.stage.view && app.stage.view.zoom) || 1;
+        const thr = 1.6 / zoom;
+        if (U.dist(last.x, last.y, pt.x, pt.y) > thr) this.poly.push({ x: pt.x, y: pt.y });
         app.emit('overlayrender');
       } else if (this.mode === 'vmove') {
         const dx = pt.x - this.last.x, dy = pt.y - this.last.y;
@@ -1120,16 +1277,25 @@
       for (const p of pts) { x += p.x; y += p.y; }
       return { x: x / pts.length, y: y / pts.length };
     }
+    // A stroke is inside the lasso if any of its sample points is inside the
+    // polygon (a long horizontal stroke whose centroid sits outside the loop
+    // but whose body crosses through it would otherwise never be picked).
+    _strokeInLasso(st, poly) {
+      const pts = st.type === 'fill' ? st.contour : st.pts;
+      if (!pts || !pts.length) return false;
+      for (const p of pts) if (pointInPoly(p.x, p.y, poly)) return true;
+      return false;
+    }
     _lassoVector(app) {
       const cel = app.activeLayer().celAt(app.frame);
       if (!cel) { app.ui.status('Nothing on this frame to select'); return; }
       this.vcel = cel;
       const sel = [];
       for (const st of cel.strokes) {
-        const c = this._strokeCentroid(st);
-        if (c && pointInPoly(c.x, c.y, this.poly)) sel.push(st);
+        if (this._strokeInLasso(st, this.poly)) sel.push(st);
       }
       this.vsel = sel;
+      if (sel.length) this._startAnts(app);
       app.ui.status(sel.length
         ? 'Lassoed ' + sel.length + ' stroke' + (sel.length === 1 ? '' : 's') + ' — drag to move'
         : 'No strokes inside the lasso');
@@ -1148,39 +1314,63 @@
       x1 = U.clamp(Math.ceil(x1), 0, cel.w); y1 = U.clamp(Math.ceil(y1), 0, cel.h);
       const w = x1 - x0, h = y1 - y0;
       if (w < 2 || h < 2) return;
+      // Do NOT lift pixels yet. The user often just wants a marquee-style
+      // selection (e.g. to delete it). Lifting on close is destructive --
+      // every Esc-ed selection would otherwise leave a hole on the cel.
+      // Lifting is deferred to the first actual drag (see `_liftRaster`).
+      this.raster = {
+        canvas: null, lifted: false,
+        poly: this.poly.slice(),
+        x: x0, y: y0, w: w, h: h, cel: cel, before: null
+      };
+      this._startAnts(app);
+      app.ui.status('Lassoed a region — drag to move it, Del to remove, Esc to deselect');
+    }
+    // Lift pixels off the cel into a floating canvas. Called lazily the first
+    // time the user actually drags the lasso catch, so a quick lasso-and-Esc
+    // (or lasso-and-Del) never modifies the cel.
+    _liftRaster(app) {
+      const r = this.raster;
+      if (!r || r.lifted) return;
+      const cel = r.cel;
       const before = cel.snapshot();
+      const poly = r.poly;
+      const x0 = r.x, y0 = r.y, w = r.w, h = r.h;
       const trace = ctx => {
         ctx.beginPath();
-        ctx.moveTo(this.poly[0].x - x0, this.poly[0].y - y0);
-        for (let i = 1; i < this.poly.length; i++)
-          ctx.lineTo(this.poly[i].x - x0, this.poly[i].y - y0);
+        ctx.moveTo(poly[0].x - x0, poly[0].y - y0);
+        for (let i = 1; i < poly.length; i++)
+          ctx.lineTo(poly[i].x - x0, poly[i].y - y0);
         ctx.closePath();
       };
-      // copy the lassoed pixels into a floating canvas
       const fc = document.createElement('canvas');
       fc.width = w; fc.height = h;
       const fx = fc.getContext('2d');
       fx.save(); trace(fx); fx.clip();
       fx.drawImage(cel.canvas, -x0, -y0);
       fx.restore();
-      // erase the lassoed region from the cel
       const ctx = cel.ctx;
       ctx.save();
       ctx.beginPath();
-      ctx.moveTo(this.poly[0].x, this.poly[0].y);
-      for (let i = 1; i < this.poly.length; i++) ctx.lineTo(this.poly[i].x, this.poly[i].y);
+      ctx.moveTo(poly[0].x, poly[0].y);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
       ctx.closePath();
       ctx.clip();
       ctx.clearRect(0, 0, cel.w, cel.h);
       ctx.restore();
       cel.dirty();
-      this.raster = { canvas: fc, x: x0, y: y0, w: w, h: h, cel: cel, before: before };
-      app.ui.status('Lassoed a region — drag to move it, lasso again to drop it');
+      r.canvas = fc;
+      r.before = before;
+      r.lifted = true;
+      app.emit('render');
     }
     _commitRaster(app) {
       const r = this.raster;
       if (!r) return;
       this.raster = null;
+      // Nothing was actually lifted (user lassoed then bailed out) -- nothing
+      // to commit and no history entry to push.
+      if (!r.lifted || !r.canvas) return;
       r.cel.ctx.drawImage(r.canvas, r.x, r.y);
       r.cel.dirty();
       app.history.pushCelEdit('Move selection', r.cel, r.before);
@@ -1212,10 +1402,29 @@
         return true;
       }
       if (this.raster) {
-        const r = this.raster;     // region is already cleared from the cel
+        const r = this.raster;
         this.raster = null;
-        r.cel.dirty();
-        app.history.pushCelEdit('Delete selection', r.cel, r.before);
+        if (r.lifted) {
+          // Region was already cleared from the cel when lifted; just commit
+          // history so undo can restore it.
+          r.cel.dirty();
+          app.history.pushCelEdit('Delete selection', r.cel, r.before);
+        } else {
+          // Not yet lifted -- delete what's inside the lasso polygon now.
+          const cel = r.cel;
+          const before = cel.snapshot();
+          const ctx = cel.ctx;
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(r.poly[0].x, r.poly[0].y);
+          for (let i = 1; i < r.poly.length; i++) ctx.lineTo(r.poly[i].x, r.poly[i].y);
+          ctx.closePath();
+          ctx.clip();
+          ctx.clearRect(0, 0, cel.w, cel.h);
+          ctx.restore();
+          cel.dirty();
+          app.history.pushCelEdit('Delete selection', cel, before);
+        }
         app.emit('render'); app.emit('celchange');
         return true;
       }
@@ -1224,52 +1433,109 @@
     // Esc -> drop the selection, restoring lifted pixels.
     cancel(app) {
       if (this.raster) {
-        this.raster.cel.restore(this.raster.before);
+        // Only restore the cel if pixels were actually lifted from it. An
+        // un-lifted lasso never modified anything, so Esc is purely a
+        // deselect.
+        if (this.raster.lifted && this.raster.before) {
+          this.raster.cel.restore(this.raster.before);
+          app.emit('celchange');
+        }
         this.raster = null;
-        app.emit('render'); app.emit('celchange');
+        app.emit('render');
       }
       this.vsel = []; this.vcel = null;
       app.emit('overlayrender');
     }
     hasSelection() { return this.vsel.length > 0 || !!this.raster; }
 
+    // classic marching-ants outline: thick dark base + thin white dashed top
+    // with an offset that animates over time. Works on any background.
+    _ants(ctx, zoom, tracePath) {
+      const t = performance.now() / 60;
+      const dash = 6 / zoom, gap = 4 / zoom;
+      // dark backing — fully visible on light artwork
+      ctx.save();
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      ctx.lineWidth = 2.6 / zoom;
+      ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+      tracePath();
+      ctx.stroke();
+      // bright dashed top — visible on dark artwork; phase-offset so it marches
+      ctx.lineWidth = 1.6 / zoom;
+      ctx.setLineDash([dash, gap]);
+      ctx.lineDashOffset = -t;
+      ctx.strokeStyle = '#fff';
+      tracePath();
+      ctx.stroke();
+      ctx.restore();
+    }
     drawOverlay(ctx, app) {
       const zoom = app.stage.view.zoom;
       if (this.mode === 'lasso' && this.poly && this.poly.length) {
+        const poly = this.poly, n = poly.length;
+        const tracePath = () => {
+          ctx.beginPath();
+          ctx.moveTo(poly[0].x, poly[0].y);
+          for (let i = 1; i < n; i++) ctx.lineTo(poly[i].x, poly[i].y);
+          if (n > 2) ctx.closePath();
+        };
+        // translucent tint inside the loop so you can see what you're enclosing
+        if (n > 2) {
+          ctx.save();
+          tracePath();
+          ctx.fillStyle = 'rgba(74,159,212,0.18)';
+          ctx.fill('evenodd');
+          ctx.restore();
+        }
+        this._ants(ctx, zoom, tracePath);
+        // start-point pip — shows where the loop will close back to
+        const s = poly[0], r = 4 / zoom;
         ctx.save();
-        ctx.lineWidth = 1.4 / zoom;
-        ctx.setLineDash([5 / zoom, 4 / zoom]);
-        ctx.strokeStyle = '#fff';
-        ctx.beginPath();
-        ctx.moveTo(this.poly[0].x, this.poly[0].y);
-        for (let i = 1; i < this.poly.length; i++) ctx.lineTo(this.poly[i].x, this.poly[i].y);
-        if (this.poly.length > 2) ctx.closePath();
-        ctx.stroke();
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1.2 / zoom;
+        ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, 7); ctx.fill(); ctx.stroke();
         ctx.restore();
       }
       if (this.vsel && this.vsel.length) {
-        ctx.save();
-        ctx.strokeStyle = '#4a9fd4';
-        ctx.lineWidth = 1.4 / zoom;
-        ctx.setLineDash([4 / zoom, 3 / zoom]);
+        // bounding box around each selected stroke, with marching ants
+        let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
         for (const st of this.vsel) {
           const b = V().strokeBounds(st);
-          ctx.strokeRect(b.x, b.y, b.w, b.h);
+          x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y);
+          x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
         }
-        ctx.restore();
+        const pad = 4 / zoom;
+        const trace = () => {
+          ctx.beginPath();
+          ctx.rect(x0 - pad, y0 - pad, (x1 - x0) + pad * 2, (y1 - y0) + pad * 2);
+        };
+        this._ants(ctx, zoom, trace);
       }
       if (this.raster) {
         const r = this.raster;
-        ctx.save();
-        ctx.globalAlpha = 0.95;
-        ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(r.canvas, r.x, r.y);
-        ctx.globalAlpha = 1;
-        ctx.strokeStyle = '#4a9fd4';
-        ctx.lineWidth = 1.4 / zoom;
-        ctx.setLineDash([4 / zoom, 3 / zoom]);
-        ctx.strokeRect(r.x, r.y, r.w, r.h);
-        ctx.restore();
+        if (r.lifted && r.canvas) {
+          ctx.save();
+          ctx.globalAlpha = 0.95;
+          ctx.imageSmoothingEnabled = true;
+          ctx.drawImage(r.canvas, r.x, r.y);
+          ctx.restore();
+        }
+        // Outline: trace the actual polygon if pixels haven't been lifted
+        // yet (so the user sees what was lassoed), otherwise the bbox of the
+        // floating piece.
+        const trace = () => {
+          if (!r.lifted && r.poly) {
+            ctx.beginPath();
+            ctx.moveTo(r.poly[0].x, r.poly[0].y);
+            for (let i = 1; i < r.poly.length; i++) ctx.lineTo(r.poly[i].x, r.poly[i].y);
+            ctx.closePath();
+          } else {
+            ctx.beginPath();
+            ctx.rect(r.x, r.y, r.w, r.h);
+          }
+        };
+        this._ants(ctx, zoom, trace);
       }
     }
   }

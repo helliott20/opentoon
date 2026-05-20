@@ -32,6 +32,11 @@
       this.bmp = null;
       this.meta = { tool: 'brush', color: '#222222', brushFrac: 0.02, frame: 1, frameCount: 1, zoom: 100 };
       this.fit = { x: 0, y: 0, w: 0, h: 0 };
+      // local pen-window view -- magnifies / pans the streamed bitmap WITHOUT
+      // touching the main window's camera. Lets the artist zoom into a detail
+      // on the pen display while the producer / director still sees the
+      // full scene on the main monitor.
+      this.view = { scale: 1, x: 0, y: 0 };
       this.wet = [];                 // current stroke, in CSS canvas px
       this.stroking = false;
       this.awaitingCommit = false;   // a stroke ended; clear wet on next frame
@@ -101,14 +106,52 @@
       bar.appendChild(this.frameLabel);
       mkBtn('<span class="glyph">▶</span>', 'Next frame', () => this._cmd({ type: 'frame', dir: 1 }));
       sep();
-      mkBtn('<span class="glyph">⤢</span>', 'Fit to camera', () => this._cmd({ type: 'fit' }));
+      mkBtn(svg('<circle cx="11" cy="11" r="7"/><path d="M21 21l-5-5"/><path d="M8 11h6"/>'),
+        'Zoom out  (−)', () => this._zoomLocal(1 / 1.18));
+      this.zoomBtn = mkBtn('100%', 'Reset pen-window zoom  (0)',
+        () => this._resetView());
+      this.zoomBtn.classList.add('pzoom');
+      mkBtn(svg('<circle cx="11" cy="11" r="7"/><path d="M21 21l-5-5"/><path d="M8 11h6"/><path d="M11 8v6"/>'),
+        'Zoom in  (+)', () => this._zoomLocal(1.18));
+      mkBtn('<span class="glyph">⤢</span>', 'Fit to camera (main window)  (F)',
+        () => this._cmd({ type: 'fit' }));
 
       const spacer = document.createElement('div');
       spacer.className = 'pspacer'; bar.appendChild(spacer);
-      this.zoomLabel = document.createElement('div');
-      this.zoomLabel.className = 'pframe';
-      this.zoomLabel.textContent = '100%';
-      bar.appendChild(this.zoomLabel);
+      // pan mode toggle -- handy on a pen tablet that has no middle mouse
+      this.panBtn = mkBtn(svg('<path d="M12 3v18"/><path d="M3 12h18"/><path d="M7 8l-4 4 4 4"/><path d="M17 8l4 4-4 4"/><path d="M8 7l4-4 4 4"/><path d="M8 17l4 4 4-4"/>'),
+        'Pan (hold space, or tap to toggle)', () => this._togglePan());
+    }
+    // Local zoom -- adjusts this.view only, never sends to the main app.
+    _zoomLocal(factor, cx, cy) {
+      if (cx == null) cx = this.cssW / 2;
+      if (cy == null) cy = this.cssH / 2;
+      const v = this.view;
+      const ns = Math.max(0.05, Math.min(32, v.scale * factor));
+      if (ns === v.scale) return;
+      const s = ns / v.scale;
+      v.x = cx * (1 - s) + v.x * s;
+      v.y = cy * (1 - s) + v.y * s;
+      v.scale = ns;
+      this._updateZoomLabel();
+      this.draw();
+    }
+    _panLocal(dx, dy) {
+      this.view.x += dx; this.view.y += dy;
+      this.draw();
+    }
+    _resetView() {
+      this.view = { scale: 1, x: 0, y: 0 };
+      this._updateZoomLabel();
+      this.draw();
+    }
+    _updateZoomLabel() {
+      if (this.zoomBtn) this.zoomBtn.textContent = Math.round(this.view.scale * 100) + '%';
+    }
+    _togglePan() {
+      this.panLock = !this.panLock;
+      this.panBtn.classList.toggle('active', this.panLock);
+      this.canvas.style.cursor = this.panLock ? 'grab' : '';
     }
 
     /* ---------------- sizing ---------------- */
@@ -156,7 +199,9 @@
         this.colorInput.value = meta.color;
       this.colorWrap.style.background = meta.color || '#222222';
       this.frameLabel.textContent = (meta.frame || 1) + ' / ' + (meta.frameCount || 1);
-      this.zoomLabel.textContent = (meta.zoom || 100) + '%';
+      // zoomBtn now shows the pen window's *local* view percent -- main
+      // window's camera zoom is irrelevant to the pen display, so we ignore
+      // meta.zoom here. _updateZoomLabel keeps it in sync with this.view.
     }
 
     /* ---------------- draw ---------------- */
@@ -167,9 +212,14 @@
       c.fillStyle = '#0c0d10';
       c.fillRect(0, 0, this.cssW, this.cssH);
       if (this.bmp) {
-        c.imageSmoothingEnabled = true;
+        const v = this.view;
+        c.save();
+        // local view: translate then scale, on top of the fit-to-window rect
+        c.translate(v.x, v.y); c.scale(v.scale, v.scale);
+        c.imageSmoothingEnabled = v.scale < 3;
         c.imageSmoothingQuality = 'high';
         c.drawImage(this.bmp, this.fit.x, this.fit.y, this.fit.w, this.fit.h);
+        c.restore();
       }
       this._drawWet();
     }
@@ -180,7 +230,10 @@
       const tool = this.meta.tool;
       if (tool !== 'brush' && tool !== 'pencil' && tool !== 'eraser') return;
       const c = this.ctx;
-      const dia = Math.max(1.5, (this.meta.brushFrac || 0.02) * this.fit.w * 2);
+      // brush radius scales with the local view so the wet-ink preview
+      // matches the diameter the artist will actually see after commit
+      const dia = Math.max(1.5,
+        (this.meta.brushFrac || 0.02) * this.fit.w * 2 * (this.view.scale || 1));
       c.save();
       c.lineJoin = 'round'; c.lineCap = 'round';
       c.lineWidth = dia;
@@ -198,10 +251,18 @@
     _installInput() {
       const cv = this.canvas;
       const rect = () => cv.getBoundingClientRect();
-      const norm = (clientX, clientY, r) => ({
-        nx: (clientX - r.left - this.fit.x) / (this.fit.w || 1),
-        ny: (clientY - r.top - this.fit.y) / (this.fit.h || 1)
-      });
+      // Map a window-CSS-px coord back through the local view to a 0..1
+      // fraction over the streamed bitmap, so input always lands on the
+      // correct project pixel regardless of how the artist has zoomed.
+      const norm = (clientX, clientY, r) => {
+        const v = this.view;
+        const ox = (clientX - r.left - v.x) / v.scale;
+        const oy = (clientY - r.top - v.y) / v.scale;
+        return {
+          nx: (ox - this.fit.x) / (this.fit.w || 1),
+          ny: (oy - this.fit.y) / (this.fit.h || 1)
+        };
+      };
       const isPenEraser = e =>
         e.pointerType === 'pen' && (((e.buttons & 32) !== 0) || e.button === 5);
       const mods = e => ({
@@ -210,13 +271,64 @@
         button: e.button, buttons: e.buttons,
         penEraser: isPenEraser(e)
       });
+      // Track every live pointer by id, so we can switch into a 2-finger
+      // pinch + pan gesture when a second touch arrives -- a must on a
+      // Cintiq-class tablet that has no mouse wheel.
+      this.pointers = new Map();
+      this.gesture = null;        // { dist, midX, midY }
+
+      const cancelStroke = () => {
+        if (!this.stroking) return;
+        this.stroking = false;
+        this.awaitingCommit = false;
+        this.wet = [];
+        if (PEN) PEN.sendInput({ type: 'cancel' });
+        this.draw();
+      };
+      const beginGesture = () => {
+        cancelStroke();
+        const list = Array.from(this.pointers.values());
+        const [a, b] = list;
+        this.gesture = {
+          dist: Math.hypot(b.x - a.x, b.y - a.y),
+          midX: (a.x + b.x) / 2,
+          midY: (a.y + b.y) / 2
+        };
+      };
+      const updateGesture = e => {
+        if (!this.gesture || this.pointers.size < 2) return;
+        const list = Array.from(this.pointers.values());
+        const [a, b] = list;
+        const nd = Math.hypot(b.x - a.x, b.y - a.y);
+        const nmx = (a.x + b.x) / 2, nmy = (a.y + b.y) / 2;
+        const g = this.gesture;
+        if (g.dist > 1 && nd > 1) {
+          const factor = nd / g.dist;
+          if (Math.abs(factor - 1) > 0.005) this._zoomLocal(factor, nmx, nmy);
+        }
+        const dx = nmx - g.midX, dy = nmy - g.midY;
+        if (dx || dy) this._panLocal(dx, dy);
+        g.dist = nd; g.midX = nmx; g.midY = nmy;
+      };
 
       cv.addEventListener('pointerdown', e => {
         if (!this.bmp) return;
         try { cv.setPointerCapture(e.pointerId); } catch (_) {}
         const r = rect();
-        // middle / right button pans the canvas, just like the main window
-        if (e.button === 1 || e.button === 2) {
+        // remember every pointer so multi-touch gestures can react
+        this.pointers.set(e.pointerId, {
+          x: e.clientX - r.left, y: e.clientY - r.top, type: e.pointerType
+        });
+        if (this.pointers.size >= 2) { beginGesture(); return; }
+        // middle / right button pans the canvas (mouse / pen barrel button)
+        if (e.button === 1 || e.button === 2 || this.panLock) {
+          this.panning = { x: e.clientX, y: e.clientY };
+          this.canvas.style.cursor = 'grabbing';
+          return;
+        }
+        // single-touch (finger) by itself is treated as a tentative drag --
+        // start panning. A second finger upgrades it to pinch + pan.
+        if (e.pointerType === 'touch') {
           this.panning = { x: e.clientX, y: e.clientY };
           return;
         }
@@ -234,12 +346,16 @@
       cv.addEventListener('pointermove', e => {
         if (!this.bmp) return;
         const r = rect();
+        if (this.pointers.has(e.pointerId)) {
+          const p = this.pointers.get(e.pointerId);
+          p.x = e.clientX - r.left; p.y = e.clientY - r.top;
+        }
+        if (this.gesture && this.pointers.size >= 2) {
+          updateGesture(e);
+          return;
+        }
         if (this.panning) {
-          this._cmd({
-            type: 'pan',
-            dnx: (e.clientX - this.panning.x) / (this.fit.w || 1),
-            dny: (e.clientY - this.panning.y) / (this.fit.h || 1)
-          });
+          this._panLocal(e.clientX - this.panning.x, e.clientY - this.panning.y);
           this.panning = { x: e.clientX, y: e.clientY };
           return;
         }
@@ -267,7 +383,21 @@
       });
 
       const end = e => {
-        if (this.panning) { this.panning = null; return; }
+        if (this.pointers.has(e.pointerId)) this.pointers.delete(e.pointerId);
+        if (this.gesture) {
+          // dropping a second finger ends the pinch / pan immediately so the
+          // remaining finger doesn't suddenly pan from far away
+          if (this.pointers.size < 2) {
+            this.gesture = null;
+            this.panning = null;
+            return;
+          }
+        }
+        if (this.panning) {
+          this.panning = null;
+          this.canvas.style.cursor = this.panLock ? 'grab' : '';
+          return;
+        }
         if (!this.stroking) return;
         this.stroking = false;
         this.awaitingCommit = true;
@@ -279,18 +409,22 @@
       };
       cv.addEventListener('pointerup', end);
       cv.addEventListener('pointercancel', end);
-      cv.addEventListener('pointerleave', () => {
+      cv.addEventListener('pointerleave', e => {
+        if (this.pointers.has(e.pointerId)) this.pointers.delete(e.pointerId);
         if (this.stroking) return;
         if (PEN) PEN.sendInput({ type: 'leave' });
       });
       cv.addEventListener('contextmenu', e => e.preventDefault());
+      // wheel zoom: Ctrl gives a precision step, plain wheel is coarser. Both
+      // are centred on the cursor, so the artist can dial in without losing
+      // their place. Track-pad pinch reaches us as Ctrl+wheel automatically.
       cv.addEventListener('wheel', e => {
         e.preventDefault();
-        const n = norm(e.clientX, e.clientY, rect());
-        this._cmd({
-          type: 'zoom', nx: n.nx, ny: n.ny,
-          factor: e.deltaY < 0 ? 1.12 : 1 / 1.12
-        });
+        const r = rect();
+        const fine = e.ctrlKey || e.metaKey;
+        const step = fine ? 1.05 : 1.15;
+        const factor = e.deltaY < 0 ? step : 1 / step;
+        this._zoomLocal(factor, e.clientX - r.left, e.clientY - r.top);
       }, { passive: false });
     }
 
@@ -310,6 +444,19 @@
         else if (k === 'f') this._cmd({ type: 'fit' });
         else if (k === ',') this._cmd({ type: 'frame', dir: -1 });
         else if (k === '.') this._cmd({ type: 'frame', dir: 1 });
+        else if (k === '+' || k === '=') this._zoomLocal(1.18);
+        else if (k === '-' || k === '_') this._zoomLocal(1 / 1.18);
+        else if (k === '0') this._resetView();
+        else if (k === ' ') {
+          // hold space for ad-hoc pan -- standard across drawing apps
+          if (!this._spaceHeld) { this._spaceHeld = true; this._togglePan(); }
+          ev.preventDefault();
+        }
+      });
+      window.addEventListener('keyup', ev => {
+        if (ev.key === ' ' && this._spaceHeld) {
+          this._spaceHeld = false; this._togglePan();
+        }
       });
     }
   }
