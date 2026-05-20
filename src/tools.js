@@ -1816,22 +1816,24 @@
     }
     hasSelection() { return this.vsel.length > 0 || !!this.raster; }
 
-    // classic marching-ants outline: thick dark base + thin white dashed top
-    // with an offset that animates over time. Works on any background.
+    // Photoshop-style marching ants: two interleaved dashed strokes of equal
+    // dash/gap length, one black and one white offset by exactly one dash
+    // length so they form alternating black/white ticks. Crisp at any zoom
+    // and readable on any background without a filled halo.
     _ants(ctx, zoom, tracePath) {
-      const t = performance.now() / 60;
-      const dash = 6 / zoom, gap = 4 / zoom;
-      // dark backing — fully visible on light artwork
+      const t = performance.now() / 80;
+      const dash = 5 / zoom;
       ctx.save();
-      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-      ctx.lineWidth = 2.6 / zoom;
-      ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+      ctx.lineJoin = 'miter'; ctx.lineCap = 'butt';
+      ctx.lineWidth = 1.25 / zoom;
+      ctx.setLineDash([dash, dash]);
+      // black ticks
+      ctx.lineDashOffset = -t;
+      ctx.strokeStyle = '#000';
       tracePath();
       ctx.stroke();
-      // bright dashed top — visible on dark artwork; phase-offset so it marches
-      ctx.lineWidth = 1.6 / zoom;
-      ctx.setLineDash([dash, gap]);
-      ctx.lineDashOffset = -t;
+      // white ticks, offset by one dash so they fill the gaps in the black row
+      ctx.lineDashOffset = -t + dash;
       ctx.strokeStyle = '#fff';
       tracePath();
       ctx.stroke();
@@ -1851,14 +1853,6 @@
           ctx.moveTo(poly[0].x, poly[0].y);
           for (let i = 1; i < n; i++) ctx.lineTo(poly[i].x, poly[i].y);
         };
-        // translucent tint inside the loop so you can see what you're enclosing
-        if (n > 2) {
-          ctx.save();
-          tracePath();
-          ctx.fillStyle = 'rgba(74,159,212,0.18)';
-          ctx.fill('evenodd');
-          ctx.restore();
-        }
         this._ants(ctx, zoom, tracePath);
         // start-point pip — shows where the loop will close back to
         const s = poly[0], r = 4 / zoom;
