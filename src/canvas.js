@@ -169,6 +169,10 @@
       this.render();
     }
     panBy(dx, dy) {
+      // Reject non-finite deltas defensively — a bogus screen delta would
+      // otherwise NaN view.x / view.y permanently and leave the canvas
+      // un-pannable until the app is reloaded.
+      if (!isFinite(dx) || !isFinite(dy)) return;
       const d = this._unrotateDelta(dx, dy);
       this.view.x += d.dx;
       this.view.y += d.dy;
@@ -483,6 +487,11 @@
           pt.pressure = (ce.pointerType === 'pen')
             ? this.app.mapPressure(ce.pressure || 0.5) : 1;
           pt.shift = e.shiftKey; pt.alt = e.altKey; pt.ctrl = e.ctrlKey;
+          // Screen-space coords are needed by tools that operate on the
+          // viewport (HandTool's pan delta, ZoomTool's anchor). Without
+          // these, HandTool.pointerMove would compute NaN deltas and
+          // corrupt view.x / view.y, leaving the canvas un-pannable.
+          pt.sx = ce.clientX; pt.sy = ce.clientY;
           this.app.tools.pointerMove(pt, e);
         }
         this.cursorPt = pt;
