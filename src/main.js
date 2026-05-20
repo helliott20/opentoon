@@ -113,7 +113,12 @@
     { id: 'frame-extend', label: 'Extend exposure', cat: 'Animation', def: 'shift+f', noRepeat: 1, run: a => a.extendExposure() },
     { id: 'frame-duplicate', label: 'Duplicate drawing', cat: 'Animation', def: 'ctrl+d', prevent: 1, noRepeat: 1, run: a => a.duplicateDrawing() },
     { id: 'layer-new', label: 'New layer', cat: 'Animation', def: 'ctrl+shift+n', prevent: 1, noRepeat: 1, run: a => a.addLayer() },
-    { id: 'clear', label: 'Clear drawing', cat: 'Animation', def: 'delete', prevent: 1, run: a => a.clearDrawing() },
+    { id: 'clear', label: 'Clear drawing', cat: 'Animation', def: 'delete', prevent: 1, run: a => {
+        // When multiple layers are selected in the panel, Del deletes them all
+        // rather than clearing the current drawing.
+        if (a.selectedLayers && a.selectedLayers.size > 1) { a.deleteSelectedLayers(); return; }
+        a.clearDrawing();
+      } },
     { id: 'fit', label: 'Fit to camera', cat: 'View', def: 'shift+\\', run: a => a.stage.fitToCamera() },
     { id: 'flip-h', label: 'Flip view horizontally', cat: 'View', def: 'shift+m', run: a => a.toggleFlipH() },
     { id: 'clean-view', label: 'Clean canvas (hide panels)', cat: 'View', def: 'tab', prevent: 1, noRepeat: 1, run: a => a.toggleCleanView() }
@@ -176,6 +181,10 @@
       this.collapsedPanels = []; // ids of sidebar panels collapsed to their header
       this.brushPresets = DEFAULT_BRUSHES.map(b => Object.assign({}, b));
       this.paletteLibrary = [];  // saved named palettes {name, colors:[hex]}
+      // Multi-layer selection set. The "active" layer (this._activeLayer) is
+      // always implicitly part of the set; this Set tracks additional layers
+      // that share batch ops (delete, visibility/lock toggle, drag-reorder).
+      this.selectedLayers = new Set();
 
       this.history = new OT.History(60);
       this.history.on('change', () => { this.dirty = true; });
@@ -439,14 +448,94 @@
       return this._activeLayer;
     }
     selectLayer(layer) {
-      if (!layer || layer === this._activeLayer) {
-        if (layer) { this._activeLayer = layer; }
+      if (!layer) return;
+      // A plain selectLayer call clears any multi-selection and makes `layer`
+      // the only selected layer. Branching paths (ctrl/shift click) go
+      // through toggleLayerSelection / selectLayerRange instead.
+      if (layer === this._activeLayer) {
+        if (this.selectedLayers.size > 1 || !this.selectedLayers.has(layer)) {
+          this.selectedLayers.clear();
+          this.selectedLayers.add(layer);
+          this.emit('layerselect');
+          this.emit('render');
+        }
         return;
       }
       if (this.tools) this.tools.flush();
       this._activeLayer = layer;
+      this.selectedLayers.clear();
+      this.selectedLayers.add(layer);
       this.emit('layerselect');
       this.emit('render');
+    }
+    // Ctrl/Cmd-click: toggle `layer` in/out of the multi-selection set.
+    // The active layer (the one whose cel is being drawn into) doesn't change
+    // unless we remove it from the set — then it shifts to the most-recently
+    // added remaining selected layer.
+    toggleLayerSelection(layer) {
+      if (!layer) return;
+      if (!this.selectedLayers.size && this._activeLayer)
+        this.selectedLayers.add(this._activeLayer);
+      if (this.selectedLayers.has(layer)) {
+        if (this.selectedLayers.size <= 1) return;   // keep at least one selected
+        this.selectedLayers.delete(layer);
+        if (this._activeLayer === layer) {
+          // pick another selected layer to become active
+          let next = null;
+          for (const l of this.selectedLayers) next = l;   // last in insertion order
+          if (next) {
+            if (this.tools) this.tools.flush();
+            this._activeLayer = next;
+          }
+        }
+      } else {
+        this.selectedLayers.add(layer);
+      }
+      this.emit('layerselect');
+      this.emit('render');
+    }
+    // Shift-click: select a contiguous range from the current active layer
+    // to `toLayer`. The clicked layer becomes the new active layer.
+    selectLayerRange(fromLayer, toLayer) {
+      const L = this.project.layers;
+      if (!toLayer) return;
+      const anchor = fromLayer && L.indexOf(fromLayer) >= 0 ? fromLayer : this._activeLayer;
+      const i0 = L.indexOf(anchor);
+      const i1 = L.indexOf(toLayer);
+      if (i1 < 0) return;
+      const lo = Math.min(i0 < 0 ? i1 : i0, i1);
+      const hi = Math.max(i0 < 0 ? i1 : i0, i1);
+      this.selectedLayers.clear();
+      for (let i = lo; i <= hi; i++) this.selectedLayers.add(L[i]);
+      if (this._activeLayer !== toLayer) {
+        if (this.tools) this.tools.flush();
+        this._activeLayer = toLayer;
+      }
+      this.emit('layerselect');
+      this.emit('render');
+    }
+    clearLayerSelection() {
+      this.selectedLayers.clear();
+      if (this._activeLayer) this.selectedLayers.add(this._activeLayer);
+      this.emit('layerselect');
+    }
+    // Delete every layer currently in the multi-selection set. Keeps at least
+    // one layer in the project (matches deleteLayer's existing guard).
+    deleteSelectedLayers() {
+      const layers = Array.from(this.selectedLayers);
+      if (!layers.length) {
+        if (this._activeLayer) return this.deleteLayer(this._activeLayer);
+        return;
+      }
+      if (this.project.layers.length - layers.length < 1) {
+        this.ui.status('At least one layer is required'); return;
+      }
+      this.doStruct('Delete layers', () => {
+        for (const layer of layers) this.project.removeLayer(layer);
+        this._activeLayer = this.project.layers[this.project.layers.length - 1];
+        this.selectedLayers.clear();
+        if (this._activeLayer) this.selectedLayers.add(this._activeLayer);
+      });
     }
     setFrame(f, fromPlayback) {
       f = U.clamp(f | 0, 0, this.project.frameCount - 1);
@@ -506,6 +595,12 @@
         l.cels = Object.assign({}, pl.cels);
       }
       this._activeLayer = p.layers.find(l => l.id === s.activeId) || p.layers[p.layers.length - 1];
+      // Drop selection entries for layers that no longer exist after this restore.
+      const live = new Set(p.layers);
+      for (const l of Array.from(this.selectedLayers))
+        if (!live.has(l)) this.selectedLayers.delete(l);
+      if (this._activeLayer && !this.selectedLayers.size)
+        this.selectedLayers.add(this._activeLayer);
       this.frame = U.clamp(s.frame, 0, p.frameCount - 1);
       this.emitAll();
     }
@@ -1170,6 +1265,8 @@
       this.palette = new OT.Palette();
       this.frame = 0;
       this._activeLayer = this.project.layers[this.project.layers.length - 1];
+      this.selectedLayers.clear();
+      if (this._activeLayer) this.selectedLayers.add(this._activeLayer);
       this.history.clear();
       this.dirty = false;
       this.projectPath = null;
@@ -1188,6 +1285,8 @@
       if (data.palette) this.palette = OT.Palette.load(data.palette);
       this.frame = 0;
       this._activeLayer = this.project.layers[this.project.layers.length - 1];
+      this.selectedLayers.clear();
+      if (this._activeLayer) this.selectedLayers.add(this._activeLayer);
       this.history.clear();
       this.dirty = false;
       this.projectPath = null;

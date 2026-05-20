@@ -8,6 +8,7 @@
     back: '<path d="M15 5l-9 7 9 7z"/>',
     play: '<path d="M8 4l12 8-12 8z"/>',
     pause: '<path d="M8 5v14M16 5v14"/>',
+    stop: '<rect x="6" y="6" width="12" height="12" rx="1"/>',
     fwd: '<path d="M9 5l9 7-9 7z"/>',
     end: '<path d="M17 5v14"/><path d="M6 5l9 7-9 7z"/>',
     loop: '<path d="M3 11a7 7 0 0 1 12-5l3 2"/><path d="M21 13a7 7 0 0 1-12 5l-3-2"/><path d="M18 4v4h-4M6 20v-4h4"/>',
@@ -32,10 +33,20 @@
       this.cellW = 15; this.rowH = 26; this.headerH = 24;
       this.endPad = 18;   // grab zone past the last frame for the length handle
       this.showThumbs = false;
+      // multi-selection of exposure runs (Ctrl-click). Each entry is
+      // { layer, num, start, end }. Cleared on layer change, tool change,
+      // or a fresh non-Ctrl click outside any selected run.
+      this.selectedRuns = [];
       this._build();
       ['framechange', 'projectchange', 'layerschange', 'celchange',
-        'playbackstate', 'onionchange', 'layerselect']
+        'playbackstate', 'onionchange']
         .forEach(ev => app.on(ev, () => this.render()));
+      // layer/tool change clears the multi-selection (suppressed while
+      // the timeline itself is mutating selection via Ctrl-click).
+      app.on('layerselect', () => {
+        if (!this._selBusy) this.selectedRuns = [];
+        this.render();
+      });
       if (app.timelineHeight) this.setHeight(app.timelineHeight);
     }
 
@@ -82,6 +93,7 @@
       tb.appendChild(this._btn('Previous frame (,)', ICON.back, () => app.playback.step(-1)));
       this.playBtn = this._btn('Play / Stop (Enter)', ICON.play, () => app.playback.toggle());
       tb.appendChild(this.playBtn);
+      tb.appendChild(this._btn('Stop (Esc)', ICON.stop, () => app.playback.stop()));
       tb.appendChild(this._btn('Next frame (.)', ICON.fwd, () => app.playback.step(1)));
       tb.appendChild(this._btn('Go to end (End)', ICON.end, () => app.playback.gotoEnd()));
       this.loopBtn = this._btn('Loop mode', ICON.loop, () => {
@@ -190,6 +202,22 @@
       while (e < fc - 1 && (layer.exposure[e + 1] || 0) === num) e++;
       return { num: num, start: s, end: e };
     }
+    // True if {layer, num, start, end} is already in the selection set.
+    _isRunSelected(layer, run) {
+      if (!run) return false;
+      return this.selectedRuns.some(r =>
+        r.layer === layer && r.num === run.num &&
+        r.start === run.start && r.end === run.end);
+    }
+    // Remove a matching entry from selectedRuns (returns true if removed).
+    _removeFromSelection(layer, run) {
+      const i = this.selectedRuns.findIndex(r =>
+        r.layer === layer && r.num === run.num &&
+        r.start === run.start && r.end === run.end);
+      if (i < 0) return false;
+      this.selectedRuns.splice(i, 1);
+      return true;
+    }
 
     _installGridInput() {
       const g = this.grid;
@@ -208,9 +236,19 @@
           e.preventDefault();
           if (y > this.headerH) {
             const ly = this.rowToLayer(Math.floor((y - this.headerH) / this.rowH));
-            if (ly) app.selectLayer(ly);
+            const run = ly ? this._runAt(ly, f) : null;
+            // Right-click outside any selected run clears the multi-selection.
+            if (!run || !this._isRunSelected(ly, run)) {
+              this.selectedRuns = [];
+            }
+            if (ly) {
+              this._selBusy = true;
+              app.selectLayer(ly);
+              this._selBusy = false;
+            }
           }
           this._context(e);
+          this.render();
           return;
         }
         if (y <= this.headerH) {
@@ -229,8 +267,36 @@
           this._mode = 'scrub'; app.setFrame(f); return;
         }
         const layer = this.rowToLayer(Math.floor((y - this.headerH) / this.rowH));
-        if (layer) app.selectLayer(layer);
         const run = layer ? this._runAt(layer, f) : null;
+        const ctrl = !!(e.ctrlKey || e.metaKey);
+        // Multi-select / single-select bookkeeping. selectLayer fires
+        // 'layerselect', which would normally clear selectedRuns -- guard
+        // with _selBusy so our own click can mutate the set.
+        this._selBusy = true;
+        if (layer) app.selectLayer(layer);
+        if (run) {
+          if (ctrl) {
+            // toggle this run in the multi-selection set
+            if (!this._removeFromSelection(layer, run)) {
+              this.selectedRuns.push({
+                layer: layer, num: run.num, start: run.start, end: run.end
+              });
+            }
+          } else if (!this._isRunSelected(layer, run)) {
+            // plain click outside the existing selection -- reset and pick
+            // just this run so a drag moves only it
+            this.selectedRuns = [
+              { layer: layer, num: run.num, start: run.start, end: run.end }
+            ];
+          }
+          // else: plain click inside an already-selected run -- keep the
+          // existing set so the drag moves all of them
+        } else if (!ctrl) {
+          // plain click on an empty cell clears the multi-selection
+          this.selectedRuns = [];
+        }
+        this._selBusy = false;
+
         if (run && !layer.locked) {
           // About to move / resize an exposure run -- stop playback so the
           // edit isn't chased by the playhead.
@@ -238,16 +304,27 @@
           const edge = (run.end + 1) * this.cellW;
           // a generous 9 px grab zone past the run's right edge -- on a small
           // cellW the original 5 px was effectively invisible to mouse / pen
+          // Snapshot per-layer baselines for every selected run so we can
+          // apply the same delta to all of them in _applyMultiDrag.
+          const draggedSelected = this._isRunSelected(layer, run);
+          const bases = new Map();
+          if (draggedSelected) {
+            for (const sr of this.selectedRuns) {
+              if (!bases.has(sr.layer)) bases.set(sr.layer, sr.layer.exposure.slice());
+            }
+          }
           this._celDrag = {
             layer: layer, num: run.num, runStart: run.start, runEnd: run.end,
             startFrame: f, mode: (x > edge - 9) ? 'resize' : 'move',
-            base: layer.exposure.slice(), before: app._structSnapshot(), moved: false
+            base: layer.exposure.slice(), before: app._structSnapshot(), moved: false,
+            multi: draggedSelected, bases: bases
           };
           app.setFrame(f);
         } else {
           if (app.playback && app.playback.playing) app.playback.stop();
           this._mode = 'scrub'; app.setFrame(f);
         }
+        this.render();
       });
 
       g.addEventListener('pointermove', e => {
@@ -265,7 +342,10 @@
           return;
         }
         const f = frameAt(x);
-        if (this._celDrag) this._applyCelDrag(f);
+        if (this._celDrag) {
+          if (this._celDrag.multi) this._applyMultiDrag(f - this._celDrag.startFrame);
+          else this._applyCelDrag(f);
+        }
         else if (this._mode === 'scrub') app.setFrame(f);
         else {
           const y = e.clientY - r.top;
@@ -310,7 +390,29 @@
 
       const end = () => {
         if (this._celDrag) {
-          if (this._celDrag.moved) app._commitStruct('Edit exposure', this._celDrag.before);
+          if (this._celDrag.moved) {
+            app._commitStruct('Edit exposure', this._celDrag.before);
+            // Refresh selectedRuns to their new on-screen positions so a
+            // follow-up drag uses the updated locations as the baseline.
+            this.selectedRuns = this.selectedRuns.map(sr => {
+              const cur = this._runAt(sr.layer, Math.min(
+                sr.start + (Math.max(0, sr.start) - sr.start),
+                app.project.frameCount - 1
+              ));
+              // Find the run that now contains sr.num near where we put it.
+              // Scan the layer for a contiguous run of sr.num to be robust.
+              const exp = sr.layer.exposure;
+              let s = -1, e2 = -1;
+              for (let f = 0; f < exp.length; f++) {
+                if (exp[f] === sr.num) {
+                  if (s < 0) s = f;
+                  e2 = f;
+                } else if (s >= 0) break;
+              }
+              if (s < 0) return sr;
+              return { layer: sr.layer, num: sr.num, start: s, end: e2 };
+            });
+          }
           this._celDrag = null;
         }
         if (this._fcDrag) {
@@ -357,6 +459,56 @@
         for (let f = ne + 1; f <= d.runEnd; f++) if (exp[f] === d.num) exp[f] = 0;
       }
       d.layer.exposure = exp;
+      if (delta !== 0) d.moved = true;
+      app.emit('render');
+      this.render();
+    }
+
+    // Apply the same frame-delta to every run in selectedRuns. Each layer's
+    // baseline exposure was snapshotted at pointerdown so we can re-derive
+    // the result on every move without compounding offsets.
+    _applyMultiDrag(delta) {
+      const d = this._celDrag, app = this.app, p = app.project;
+      // start every affected layer from its baseline, clearing runs we own
+      const working = new Map();
+      d.bases.forEach((base, layer) => working.set(layer, base.slice()));
+      // clear the original positions of every selected run on its baseline
+      for (const sr of this.selectedRuns) {
+        const exp = working.get(sr.layer);
+        if (!exp) continue;
+        for (let f = sr.start; f <= sr.end; f++) {
+          if ((d.bases.get(sr.layer)[f] || 0) === sr.num) exp[f] = 0;
+        }
+      }
+      // now stamp each run at its new position. Resize mode extends only the
+      // dragged run's end; move mode shifts all selected runs by delta.
+      if (d.mode === 'resize') {
+        // resize behaves the same as single drag -- only the dragged run is
+        // resized, other selected runs are left in place
+        for (const sr of this.selectedRuns) {
+          const exp = working.get(sr.layer);
+          if (!exp) continue;
+          if (sr.layer === d.layer && sr.num === d.num &&
+              sr.start === d.runStart && sr.end === d.runEnd) {
+            const ne = Math.max(sr.start, sr.end + delta);
+            if (ne >= p.frameCount) p.frameCount = ne + 1;
+            for (let f = sr.start; f <= ne; f++) exp[f] = sr.num;
+          } else {
+            for (let f = sr.start; f <= sr.end; f++) exp[f] = sr.num;
+          }
+        }
+      } else {
+        for (const sr of this.selectedRuns) {
+          const exp = working.get(sr.layer);
+          if (!exp) continue;
+          const len = sr.end - sr.start;
+          const ns = Math.max(0, sr.start + delta), ne = ns + len;
+          if (ne >= p.frameCount) p.frameCount = ne + 1;
+          for (let f = ns; f <= ne; f++) exp[f] = sr.num;
+        }
+      }
+      // commit working buffers back onto the layers
+      working.forEach((exp, layer) => { layer.exposure = exp; });
       if (delta !== 0) d.moved = true;
       app.emit('render');
       this.render();
@@ -430,8 +582,85 @@
         row.dataset.layerId = layer.id;
         this._installNameDnD(row, layer);
         row.addEventListener('click', () => app.selectLayer(layer));
+        row.addEventListener('contextmenu', ev => {
+          ev.preventDefault();
+          this._nameContext(ev, layer);
+        });
         this.namesInner.appendChild(row);
       }
+    }
+
+    // Context menu for a layer-names row. Mirrors the layer panel's menu in
+    // ui.js but is tailored for the timeline (rename, hide/show, lock/unlock).
+    _nameContext(ev, layer) {
+      const app = this.app;
+      app.ui.contextMenu(ev.clientX, ev.clientY, [
+        { label: 'Rename', fn: () => this._renameLayer(layer) },
+        { label: 'Duplicate layer', fn: () => app.duplicateLayer(layer) },
+        { label: 'Delete layer', fn: () => app.deleteLayer(layer) },
+        { sep: 1 },
+        { label: layer.visible ? 'Hide' : 'Show', fn: () => {
+            layer.visible = !layer.visible;
+            app.emit('layerschange'); app.emit('render');
+          } },
+        { label: layer.locked ? 'Unlock' : 'Lock', fn: () => {
+            layer.locked = !layer.locked;
+            app.emit('layerschange');
+          } }
+      ]);
+    }
+
+    // Inline rename for a names-row layer. Replaces the row's name <div> with
+    // a text input. Commits on blur / Enter, cancels on Esc.
+    _renameLayer(layer) {
+      const app = this.app;
+      // find the row currently displaying this layer
+      const row = this.namesInner.querySelector(
+        '.tl-name-row[data-layer-id="' + layer.id + '"]'
+      );
+      const nameDiv = row && row.querySelector('.nm');
+      if (!nameDiv) {
+        // fallback: prompt-based rename if the row isn't on screen
+        const next = window.prompt('Rename layer', layer.name);
+        if (next != null && next !== '' && next !== layer.name) {
+          layer.name = next;
+          app.emit('layerschange');
+        }
+        return;
+      }
+      const input = U.el('input', {
+        class: 'lname', type: 'text', value: layer.name
+      });
+      Object.assign(input.style, {
+        flex: '1', minWidth: '0', font: 'inherit',
+        background: '#0006', color: 'inherit',
+        border: '1px solid #4a9fd4', borderRadius: '2px',
+        padding: '0 4px', margin: '0'
+      });
+      nameDiv.replaceWith(input);
+      input.focus();
+      input.select();
+      let done = false;
+      const commit = () => {
+        if (done) return;
+        done = true;
+        const v = (input.value || '').trim();
+        if (v && v !== layer.name) {
+          layer.name = v;
+          app.emit('layerschange');
+        } else {
+          this.render();
+        }
+      };
+      const cancel = () => { if (done) return; done = true; this.render(); };
+      input.addEventListener('blur', commit);
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+        else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+        e.stopPropagation();
+      });
+      input.addEventListener('click', e => e.stopPropagation());
+      input.addEventListener('pointerdown', e => e.stopPropagation());
     }
 
     /* Drag-to-reorder for the timeline names column. Mirrors the panel's
@@ -607,22 +836,29 @@
           const isActive = layer === app.activeLayer();
           const cel = layer.cels[num];
           if (this.showThumbs && cel) {
+            // Render the thumbnail at the project's aspect ratio, left-aligned
+            // in the cel block. The remainder of a held run is filled with the
+            // layer's tint colour so a single drawing held across many frames
+            // reads as "drawing N, held for ..." -- the same shape stretched
+            // horizontally (Harmony / TVPaint style) without distorting the
+            // artwork.
             c.save();
             this._roundRect(c, bx, by, bw, bh, 3);
-            c.fillStyle = '#c6cbd2';
+            // base fill: the layer tint, so the held area has a clear colour
+            c.fillStyle = this._alpha(layer.color, isActive ? 0.45 : 0.32);
             c.fill();
             c.clip();
-            // request the thumb at the actual displayed width so timeline-zoom
-            // doesn't upscale a tiny 84 px source into a blurry mess. Round to
-            // 64-px steps so the per-cel cache still hits across small zoom
-            // deltas. Cap at 384 px to stay memory-frugal for very wide runs.
+            // thumb dims: full block height, project aspect ratio, clipped to
+            // the block width when the run is narrower than one frame's worth
+            // of aspect-correct thumb width
+            const thumbW = Math.min(bw, Math.round(bh * p.width / p.height));
             const dpr = Math.min(window.devicePixelRatio || 1, 2);
-            const tw = Math.min(384, Math.max(64, Math.ceil(bw * dpr / 64) * 64));
-            const tth = Math.max(8, Math.round(tw * p.height / p.width));
-            const th = cel.getThumb(tw, tth);
+            const srcW = Math.min(384, Math.max(64, Math.ceil(thumbW * dpr / 64) * 64));
+            const srcH = Math.max(8, Math.round(srcW * p.height / p.width));
+            const th = cel.getThumb(srcW, srcH);
             c.imageSmoothingEnabled = true;
             c.imageSmoothingQuality = 'high';
-            c.drawImage(th, bx, by, bw, bh);
+            c.drawImage(th, bx, by, thumbW, bh);
             c.restore();
             c.lineWidth = 1.5;
             c.strokeStyle = this._alpha(layer.color, isActive ? 1 : 0.7);
@@ -654,6 +890,15 @@
             c.fillStyle = '#0009';
             c.font = '9px Segoe UI'; c.textAlign = 'left';
             c.fillText(String(num), f * cw + cw / 2 + 5, y + rh / 2);
+          }
+          // multi-selection accent outline
+          if (this._isRunSelected(layer, { num: num, start: f, end: e })) {
+            c.save();
+            c.strokeStyle = '#4a9fd4';
+            c.lineWidth = 2;
+            this._roundRect(c, bx, by, bw, bh, 3);
+            c.stroke();
+            c.restore();
           }
           f = e + 1;
         }

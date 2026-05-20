@@ -451,11 +451,35 @@
     _refreshLayers() {
       if (!this.layerBody) return;
       const a = this.app, L = a.project.layers;
+      // The active layer is implicitly in the multi-set; if the user hasn't
+      // ctrl/shift-clicked anything else, selSet === {active} and rendering
+      // looks identical to single-selection mode.
+      const active = a.activeLayer();
+      const selSet = a.selectedLayers;
+      // Prune stale refs (layers deleted by other ops); the active layer is
+      // always implicitly included by the `|| isActive` check below.
+      const present = new Set(L);
+      for (const l of Array.from(selSet)) if (!present.has(l)) selSet.delete(l);
       this.layerBody.innerHTML = '';
       for (let i = L.length - 1; i >= 0; i--) {
         const layer = L[i];
-        const sel = layer === a.activeLayer();
-        const item = el('div', { class: 'layer-item' + (sel ? ' sel' : '') });
+        const isActive = layer === active;
+        const inSet = selSet.has(layer) || isActive;
+        const item = el('div', {
+          class: 'layer-item' + (inSet ? ' sel' : '') + (inSet && !isActive ? ' multi-sel' : '')
+        });
+        // For non-active multi-selected layers, give them a clearly visible
+        // accent outline so the user can see the selection set at a glance.
+        if (inSet && !isActive) {
+          item.style.outline = '1px solid var(--accent)';
+          item.style.outlineOffset = '-1px';
+        }
+
+        // Eye / lock toggles operate on every selected layer if there's a
+        // multi-set AND this row is part of it; otherwise just on this row.
+        const batch = (selSet.size > 1 && selSet.has(layer))
+          ? Array.from(selSet)
+          : [layer];
 
         const eye = el('button', {
           class: 'icon-btn ' + (layer.visible ? 'on' : 'off'),
@@ -465,7 +489,9 @@
             : '<path d="M4 4l16 16"/><path d="M2 12s4-7 10-7c2 0 3.6.6 5 1.4M22 12s-4 7-10 7c-2 0-3.7-.6-5-1.5"/>')
         });
         eye.addEventListener('click', e => {
-          e.stopPropagation(); layer.visible = !layer.visible;
+          e.stopPropagation();
+          const v = !layer.visible;
+          for (const l of batch) l.visible = v;
           a.emit('layerschange'); a.emit('render');
         });
 
@@ -477,7 +503,10 @@
             : '<rect x="5" y="11" width="14" height="9" rx="1.5"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>')
         });
         lock.addEventListener('click', e => {
-          e.stopPropagation(); layer.locked = !layer.locked; a.emit('layerschange');
+          e.stopPropagation();
+          const v = !layer.locked;
+          for (const l of batch) l.locked = v;
+          a.emit('layerschange');
         });
 
         const thumb = el('canvas', { class: 'layer-thumb' });
@@ -506,7 +535,14 @@
         item.setAttribute('draggable', 'true');
         item.dataset.layerId = layer.id;
         this._installLayerDnD(item, layer, 'layer-item');
-        item.addEventListener('click', () => a.selectLayer(layer));
+        item.addEventListener('click', e => {
+          // ctrl/cmd+click toggles `layer` in/out of the multi-selection set;
+          // shift+click selects a contiguous range from active to `layer`;
+          // plain click clears the set and selects just `layer` (legacy).
+          if (e.ctrlKey || e.metaKey) a.toggleLayerSelection(layer);
+          else if (e.shiftKey) a.selectLayerRange(a.activeLayer(), layer);
+          else a.selectLayer(layer);
+        });
         item.addEventListener('contextmenu', e => {
           e.preventDefault();
           this.contextMenu(e.clientX, e.clientY, [
@@ -520,7 +556,10 @@
         });
         this.layerBody.appendChild(item);
 
-        if (sel) {
+        // Show the opacity slider only for the active layer (the single one
+        // currently being drawn into). Multi-selected non-active layers don't
+        // get their own slider — opacity stays a per-layer prop, not batched.
+        if (isActive) {
           const op = this._slider(0, 1, 0.01, layer.opacity, v => {
             layer.opacity = v; a.emit('render');
           });
@@ -570,24 +609,46 @@
         e.preventDefault();
         const srcId = (e.dataTransfer && e.dataTransfer.getData('text/plain')) || '';
         clearMarks();
-        if (!srcId || srcId === layer.id) return;
+        if (!srcId) return;
         const L = a.project.layers;
         const src = L.find(l => l.id === srcId);
         if (!src) return;
         const r = row.getBoundingClientRect();
         const above = e.clientY < r.top + r.height / 2;
-        const srcIdx = L.indexOf(src);
+        // If the dragged source is part of a >1 multi-selection, move all
+        // selected layers together preserving their relative order. Otherwise
+        // fall back to the single-layer drag behaviour.
+        const selSet = a.selectedLayers;
+        const multi = (selSet && selSet.size > 1 && selSet.has(src))
+          ? L.filter(l => selSet.has(l))   // preserves project-order
+          : [src];
+        if (multi.includes(layer) && multi.length > 1) return;   // dropping onto self
+        if (multi.length === 1 && src === layer) return;
         let tgtIdx = L.indexOf(layer);
-        if (srcIdx < 0 || tgtIdx < 0) return;
+        if (tgtIdx < 0) return;
         // "above" visually -> higher index in L (top = front-most)
         let insert = above ? tgtIdx + 1 : tgtIdx;
-        if (srcIdx < insert) insert--;
-        if (insert === srcIdx) return;   // no-op
         const apply = () => {
-          L.splice(srcIdx, 1);
-          L.splice(insert, 0, src);
+          // Remove all moved layers first, recompute insertion index accounting
+          // for removals before it, then splice them back together.
+          let removedBefore = 0;
+          for (const m of multi) {
+            const i = L.indexOf(m);
+            if (i < 0) continue;
+            if (i < insert) removedBefore++;
+            L.splice(i, 1);
+          }
+          insert -= removedBefore;
+          if (insert < 0) insert = 0;
+          if (insert > L.length) insert = L.length;
+          L.splice(insert, 0, ...multi);
         };
-        if (typeof a.doStruct === 'function') a.doStruct('Reorder layer', apply);
+        // No-op detection: if everything's already contiguous and ends at the
+        // target slot, skip the history entry.
+        const srcIdx = L.indexOf(src);
+        if (multi.length === 1 && srcIdx === insert - (srcIdx < insert ? 1 : 0)) return;
+        if (typeof a.doStruct === 'function')
+          a.doStruct(multi.length > 1 ? 'Reorder layers' : 'Reorder layer', apply);
         else { apply(); a.emit('layerschange'); a.emit('render'); }
       });
     }

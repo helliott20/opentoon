@@ -202,6 +202,11 @@ function setupUpdates() {
   }
   updater = autoUpdater;
   autoUpdater.autoDownload = true;
+  // When an update has finished downloading, electron-updater will run the
+  // installer the next time the app quits -- silently, with no installer
+  // wizard -- and relaunch the new version. No more modal dialog asking the
+  // artist to choose Restart / Later.
+  autoUpdater.autoInstallOnAppQuit = true;
   // forward the update lifecycle to the renderer so the About dialog can show it
   autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking'));
   autoUpdater.on('update-available', info =>
@@ -210,15 +215,10 @@ function setupUpdates() {
   autoUpdater.on('download-progress', p =>
     sendUpdateStatus('downloading', { percent: Math.round((p && p.percent) || 0) }));
   autoUpdater.on('update-downloaded', info => {
+    // No modal dialog. The renderer can surface a non-modal status if it
+    // wants ("Update v1.0.x ready -- will install next time you quit"), and
+    // the existing 'Install now' control via the IPC below still works.
     sendUpdateStatus('downloaded', { version: info && info.version });
-    dialog.showMessageBox(win, {
-      type: 'info',
-      title: 'Update ready',
-      message: 'OpenToon ' + (info && info.version ? info.version : '') +
-        ' has been downloaded. Restart now to install it?',
-      buttons: ['Restart', 'Later'],
-      defaultId: 0
-    }).then(r => { if (r.response === 0) autoUpdater.quitAndInstall(); });
   });
   autoUpdater.on('error', err => {
     sendUpdateStatus('error', { message: err && err.message });
@@ -239,7 +239,10 @@ function setupIpc() {
     catch (e) { return { state: 'error', message: e && e.message }; }
   });
   ipcMain.on('opentoon:quit-install', () => {
-    if (updater) { try { updater.quitAndInstall(); } catch (e) { /* ignore */ } }
+    // isSilent=true, isForceRunAfter=true: pass /S to the NSIS installer so
+    // no wizard appears, then relaunch the app on its own. Matches the
+    // "silent install" flow the user expects from a desktop production tool.
+    if (updater) { try { updater.quitAndInstall(true, true); } catch (e) { /* ignore */ } }
   });
 
   /* ---- project file IO ---- */

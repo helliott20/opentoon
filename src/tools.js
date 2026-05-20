@@ -60,6 +60,32 @@
     return c;
   }
 
+  // Free-transform handle math, shared between SelectTool and LassoTool.
+  // The selection object `s` carries { cx, cy, sw, sh, scaleX, scaleY, rot }.
+  // `selWorld` maps a local (centred-on-cx,cy) offset to world space; `selLocal`
+  // inverts that; `selAnchor` returns the 8 corner/edge anchor points; and
+  // `selRotHandleWorld` is the position of the rotation knob above the top edge.
+  function selAnchor(idx, sw, sh) {
+    const xs = [-sw / 2, 0, sw / 2, sw / 2, sw / 2, 0, -sw / 2, -sw / 2];
+    const ys = [-sh / 2, -sh / 2, -sh / 2, 0, sh / 2, sh / 2, sh / 2, 0];
+    return { x: xs[idx], y: ys[idx] };
+  }
+  function selWorld(s, ix, iy) {
+    const c = Math.cos(s.rot), sn = Math.sin(s.rot);
+    const x = ix * s.scaleX, y = iy * s.scaleY;
+    return { x: s.cx + x * c - y * sn, y: s.cy + x * sn + y * c };
+  }
+  function selLocal(s, wx, wy) {
+    const c = Math.cos(-s.rot), sn = Math.sin(-s.rot);
+    const dx = wx - s.cx, dy = wy - s.cy;
+    return { x: (dx * c - dy * sn) / s.scaleX, y: (dx * sn + dy * c) / s.scaleY };
+  }
+  function selRotHandleWorld(s, zoom) {
+    const a = selAnchor(1, s.sw, s.sh);
+    const off = 26 / zoom / Math.abs(s.scaleY || 1);
+    return selWorld(s, a.x, a.y - off);
+  }
+
   // Lazy-pointer / rope smoothing: the smoothed point `sm` trails the raw
   // cursor `pt` by a fixed maxLag distance regardless of pen speed.
   // sm only moves when the pen drags it beyond maxLag, so jitter inside the
@@ -152,10 +178,17 @@
       this.color = app.color;
       this.smooth = app.settings.smoothing;
       this.before = t.cel.snapshot();
+      // Shift-constrain: lock the stroke to a straight line from pointer-down
+      // to the current pointer. Re-read e.shiftKey on every move so the user
+      // can toggle the constraint mid-stroke. startPt is the anchor.
+      this.straight = !!(e && e.shiftKey);
+      this.startPt = { x: pt.x, y: pt.y, p: pt.pressure };
       if (this.vec) this._vDown(pt, app); else this._rDown(pt, app);
     }
     pointerMove(pt, e, app) {
       if (!this.t) return;
+      // Re-read shift on every move so it can be toggled mid-stroke.
+      this.straight = !!(e && e.shiftKey);
       if (this.vec) this._vMove(pt, app); else this._rMove(pt, app);
     }
     pointerUp(pt, e, app) {
@@ -193,6 +226,22 @@
       this._rComposite();
     }
     _rMove(pt, app) {
+      if (this.straight) {
+        // Lock the stamp to the cursor and rebuild the segment from startPt
+        // each move so the buf only carries one straight line. Clearing buf
+        // is critical -- otherwise the freehand path stamped before Shift
+        // was held remains baked into the dab buffer.
+        this.sm.x = pt.x; this.sm.y = pt.y;
+        const bx = this.bctx;
+        bx.setTransform(1, 0, 0, 1, 0, 0);
+        bx.clearRect(0, 0, this.buf.width, this.buf.height);
+        this._dot(this.startPt.x, this.startPt.y, this.startPt.p);
+        this._seg(this.startPt.x, this.startPt.y, this.startPt.p,
+                  pt.x, pt.y, pt.pressure);
+        this.last = { x: pt.x, y: pt.y, p: pt.pressure };
+        this._scheduleComposite();
+        return;
+      }
       // Lazy-pointer / rope smoothing: the smoothed point trails the cursor by
       // a fixed maxLag in project pixels. Identical smoothing strength at any
       // speed -- slow strokes get the same shaping as fast ones, which is the
@@ -204,10 +253,21 @@
     }
     _rUp(pt, app) {
       if (this._compRAF) { cancelAnimationFrame(this._compRAF); this._compRAF = 0; }
-      // Commit lands on the smoothed cursor, not the raw pointer position, so
-      // the stroke does not visibly snap forward at release (matches vector
-      // and pencil tools).
-      this._seg(this.last.x, this.last.y, this.last.p, this.sm.x, this.sm.y, pt.pressure);
+      if (this.straight) {
+        // Final straight commit: rebuild the buf one last time so the
+        // committed segment ends exactly under the release pointer.
+        const bx = this.bctx;
+        bx.setTransform(1, 0, 0, 1, 0, 0);
+        bx.clearRect(0, 0, this.buf.width, this.buf.height);
+        this._dot(this.startPt.x, this.startPt.y, this.startPt.p);
+        this._seg(this.startPt.x, this.startPt.y, this.startPt.p,
+                  pt.x, pt.y, pt.pressure);
+      } else {
+        // Commit lands on the smoothed cursor, not the raw pointer position, so
+        // the stroke does not visibly snap forward at release (matches vector
+        // and pencil tools).
+        this._seg(this.last.x, this.last.y, this.last.p, this.sm.x, this.sm.y, pt.pressure);
+      }
       this._rComposite();
       app.history.pushCelEdit(this.mode, this.t.cel, this.before);
       this.t.cel.dirty();
@@ -318,7 +378,51 @@
     }
     _vMove(pt, app) {
       const cel = this.t.cel;
-      if (this.mode === 'eraser') { this._erase(cel, pt.x, pt.y, app); return; }
+      if (this.mode === 'eraser') {
+        if (this.straight) {
+          // Straight-line erase: revert prior erasure on this stroke, then
+          // sample along start->current at radius/0.4 spacing. This is the
+          // same dab spacing the eraser already uses internally.
+          cel.restore(this.before);
+          this._lastErasePt = null;
+          // _erase will sample from _lastErasePt (start, set just below) to
+          // (pt.x, pt.y) at the right step automatically. Prime it.
+          this._lastErasePt = { x: this.startPt.x, y: this.startPt.y };
+          this._erase(cel, pt.x, pt.y, app);
+          return;
+        }
+        this._erase(cel, pt.x, pt.y, app);
+        return;
+      }
+      if (this.straight) {
+        // Replace raw with exactly two points so the committed stroke is a
+        // straight line. Re-stamping every move would bake every intermediate
+        // segment into cel.ctx; instead clear the cel back to its committed
+        // state via rebuild() and paint just the start->current dab band.
+        this.sm.x = pt.x; this.sm.y = pt.y;
+        this.raw = [
+          { x: this.startPt.x, y: this.startPt.y, p: this.startPt.p },
+          { x: pt.x, y: pt.y, p: pt.pressure }
+        ];
+        cel.rebuild();
+        const c = cel.ctx;
+        c.fillStyle = this.color;
+        const a = this.startPt, b = { x: pt.x, y: pt.y, p: pt.pressure };
+        c.beginPath(); c.arc(a.x, a.y, this._r(a.p), 0, 7); c.fill();
+        const d = U.dist(a.x, a.y, b.x, b.y);
+        const r0 = this._r(a.p), r1 = this._r(b.p);
+        const n = Math.max(1, Math.ceil(d / Math.max(0.5, Math.min(r0, r1) * 0.4)));
+        for (let i = 1; i <= n; i++) {
+          const t = i / n;
+          c.beginPath();
+          c.arc(U.lerp(a.x, b.x, t), U.lerp(a.y, b.y, t), U.lerp(r0, r1, t), 0, 7);
+          c.fill();
+        }
+        this.lastStamp = b;
+        cel.dirty();
+        this._rafEmit(app);
+        return;
+      }
       // Lazy-pointer rope smoothing (see _rMove). Consistent at any speed.
       lazyAdvance(this.sm, pt, this.smooth);
       this.raw.push({ x: this.sm.x, y: this.sm.y, p: pt.pressure });
@@ -347,12 +451,22 @@
         if (this.changed) { app.history.pushCelEdit('eraser', cel, this.before); app.emit('celchange'); }
         return;
       }
-      // Push the live-smoothed point as the final, so the committed geometry
-      // ends exactly where the wet-ink preview ended -- no visible "snap"
-      // forward at release. Skip the second smoothing pass: this.raw already
-      // carries the EMA-smoothed coordinates from _vMove, so a second smoothPts
-      // would tighten the curve away from what the user just saw.
-      this.raw.push({ x: this.sm.x, y: this.sm.y, p: pt.pressure });
+      if (this.straight) {
+        // raw is already [startPt, endPt] from the last straight _vMove;
+        // overwrite the end point one more time so the commit lands exactly
+        // under the release pointer even if no move event arrived between.
+        this.raw = [
+          { x: this.startPt.x, y: this.startPt.y, p: this.startPt.p },
+          { x: pt.x, y: pt.y, p: pt.pressure }
+        ];
+      } else {
+        // Push the live-smoothed point as the final, so the committed geometry
+        // ends exactly where the wet-ink preview ended -- no visible "snap"
+        // forward at release. Skip the second smoothing pass: this.raw already
+        // carries the EMA-smoothed coordinates from _vMove, so a second smoothPts
+        // would tighten the curve away from what the user just saw.
+        this.raw.push({ x: this.sm.x, y: this.sm.y, p: pt.pressure });
+      }
       const tol = 0.4 + this.smooth * 0.8;
       let pts = V().simplify(this.raw, tol);
       if (pts.length < 2) pts = this.raw.slice(0, 2);
@@ -465,6 +579,10 @@
       this.before = t.cel.snapshot();
       this.sm = { x: pt.x, y: pt.y };
       this.raw = [{ x: pt.x, y: pt.y }];
+      // Shift-constrain: lock the stroke to a straight line from this.startPt.
+      // Re-read e.shiftKey on every move so the user can toggle mid-stroke.
+      this.straight = !!(e && e.shiftKey);
+      this.startPt = { x: pt.x, y: pt.y, p: pt.pressure };
       if (this.vec) this.base = canvasCopy(t.cel);
       else {
         this.buf = document.createElement('canvas');
@@ -475,6 +593,19 @@
     }
     pointerMove(pt, e, app) {
       if (!this.t) return;
+      this.straight = !!(e && e.shiftKey);
+      if (this.straight) {
+        // Lock smoothed cursor to the raw pointer and replace raw with just
+        // two points so the rendered polyline is the straight start->current
+        // segment. _render uses this.raw as-is, so this is enough.
+        this.sm.x = pt.x; this.sm.y = pt.y;
+        this.raw = [
+          { x: this.startPt.x, y: this.startPt.y },
+          { x: pt.x, y: pt.y }
+        ];
+        this._schedule(app);
+        return;
+      }
       // Lazy-pointer rope smoothing (see PaintTool._rMove for rationale).
       lazyAdvance(this.sm, pt, this.smooth);
       this.raw.push({ x: this.sm.x, y: this.sm.y });
@@ -492,9 +623,19 @@
     pointerUp(pt, e, app) {
       if (!this.t) return;
       if (this._rRAF) { cancelAnimationFrame(this._rRAF); this._rRAF = 0; }
-      // Push the smoothed final point so commit lands exactly where the live
-      // preview ended (this.sm is the EMA-smoothed cursor from pointerMove).
-      this.raw.push({ x: this.sm.x, y: this.sm.y });
+      if (this.straight) {
+        // Force raw to exactly [startPt, releasePt] so the committed polyline
+        // is a single straight segment, regardless of how many move events
+        // arrived between Shift-down and pointerUp.
+        this.raw = [
+          { x: this.startPt.x, y: this.startPt.y },
+          { x: pt.x, y: pt.y }
+        ];
+      } else {
+        // Push the smoothed final point so commit lands exactly where the live
+        // preview ended (this.sm is the EMA-smoothed cursor from pointerMove).
+        this.raw.push({ x: this.sm.x, y: this.sm.y });
+      }
       const cel = this.t.cel;
       if (this.vec) {
         const tol = 0.4 + this.smooth * 0.8;
@@ -1284,20 +1425,57 @@
         }
         this.vsel = [];
       } else if (this.layerKind === 'drawing') {
-        if (this.raster && this._inRasterBounds(pt, app)) {
-          // First drag after a fresh lasso: actually lift the pixels off the
-          // cel now. Until this point the artist just had a selection
-          // outline -- they may only have wanted to select, not destructively
-          // cut.
-          if (!this.raster.lifted) this._liftRaster(app);
-          this.mode = 'rmove';
-          // record the drag offset in cel-local coords so rotation/scale
-          // of the layer doesn't fight the cursor while dragging
-          const local = layerLocal(pt, this.raster.layer, this.raster.frame, app);
-          this.off = { x: local.x - this.raster.x, y: local.y - this.raster.y };
-          return;
+        if (this.raster) {
+          const r = this.raster;
+          const local = layerLocal(pt, r.layer, r.frame, app);
+          // First drag on an unlifted selection: lift now so handles + bbox
+          // are available
+          if (!r.lifted) {
+            // unlifted: check if click was inside the polygon bbox
+            if (local.x >= r.x && local.x <= r.x + r.w &&
+                local.y >= r.y && local.y <= r.y + r.h) {
+              this._liftRaster(app);
+            } else {
+              this._commitRaster(app);   // click outside -- drop selection
+            }
+          }
+          // After (possible) lift, check transform handles
+          if (this.raster && this.raster.lifted) {
+            const rl = this.raster;
+            const zoom = app.stage.view.zoom;
+            const thr = 9 / zoom;
+            // rotation knob
+            const rh = selRotHandleWorld(rl, zoom);
+            if (U.dist(local.x, local.y, rh.x, rh.y) < thr) {
+              this.mode = 'rrotate';
+              this.startRot = rl.rot;
+              this.startAng = Math.atan2(local.y - rl.cy, local.x - rl.cx);
+              return;
+            }
+            // 8 scale handles
+            for (let i = 0; i < 8; i++) {
+              const a = selAnchor(i, rl.sw, rl.sh);
+              const w = selWorld(rl, a.x, a.y);
+              if (U.dist(local.x, local.y, w.x, w.y) < thr) {
+                this.mode = 'rscale';
+                this.hIdx = i;
+                const opp = selAnchor((i + 4) % 8, rl.sw, rl.sh);
+                this.fixed = selWorld(rl, opp.x, opp.y);
+                this.oppA = opp; this.hA = a;
+                return;
+              }
+            }
+            // inside the transformed bbox -- translate
+            const loc = selLocal(rl, local.x, local.y);
+            if (Math.abs(loc.x) <= rl.sw / 2 && Math.abs(loc.y) <= rl.sh / 2) {
+              this.mode = 'rmove';
+              this.moveOff = { x: local.x - rl.cx, y: local.y - rl.cy };
+              return;
+            }
+            // clicked outside the floating piece -- commit and start a new lasso
+            this._commitRaster(app);
+          }
         }
-        this._commitRaster(app);   // a new loop drops any floating piece
       } else {
         app.ui.status('The lasso works on drawing layers');
         this.mode = 'idle';
@@ -1337,12 +1515,43 @@
         this._scheduleVMove(app);
         app.emit('overlayrender');
       } else if (this.mode === 'rmove') {
-        // move the floating piece in cel-local space so it tracks the cursor
-        // when the layer has a rotation/scale transform
-        const layer = app.activeLayer();
-        const local = layerLocal(pt, layer, app.frame, app);
-        this.raster.x = local.x - this.off.x;
-        this.raster.y = local.y - this.off.y;
+        // translate the lifted piece in cel-local space (so the layer's own
+        // rotation/scale doesn't fight the cursor)
+        const r = this.raster;
+        const local = layerLocal(pt, r.layer, r.frame, app);
+        r.cx = local.x - this.moveOff.x;
+        r.cy = local.y - this.moveOff.y;
+        app.emit('render'); app.emit('overlayrender');
+      } else if (this.mode === 'rrotate') {
+        const r = this.raster;
+        const local = layerLocal(pt, r.layer, r.frame, app);
+        const ang = Math.atan2(local.y - r.cy, local.x - r.cx);
+        r.rot = this.startRot + (ang - this.startAng);
+        if (e && e.shiftKey) r.rot = Math.round(r.rot / (Math.PI / 12)) * (Math.PI / 12);
+        app.emit('render'); app.emit('overlayrender');
+      } else if (this.mode === 'rscale') {
+        // Drag a scale handle: keep the opposite corner fixed, derive new
+        // scale factors by projecting the cursor into the selection's local
+        // frame. Shift-drag = uniform scale (preserve aspect ratio).
+        const r = this.raster;
+        const local = layerLocal(pt, r.layer, r.frame, app);
+        const dxA = this.hA.x - this.oppA.x, dyA = this.hA.y - this.oppA.y;
+        const c = Math.cos(-r.rot), sn = Math.sin(-r.rot);
+        const vx = (local.x - this.fixed.x) * c - (local.y - this.fixed.y) * sn;
+        const vy = (local.x - this.fixed.x) * sn + (local.y - this.fixed.y) * c;
+        let nsx = dxA !== 0 ? vx / dxA : r.scaleX;
+        let nsy = dyA !== 0 ? vy / dyA : r.scaleY;
+        if (e && e.shiftKey && dxA !== 0 && dyA !== 0) {
+          const m = Math.max(Math.abs(nsx), Math.abs(nsy));
+          nsx = Math.sign(nsx) * m; nsy = Math.sign(nsy) * m;
+        }
+        if (Math.abs(nsx) < 0.01) nsx = 0.01 * Math.sign(nsx || 1);
+        if (Math.abs(nsy) < 0.01) nsy = 0.01 * Math.sign(nsy || 1);
+        r.scaleX = nsx; r.scaleY = nsy;
+        const rc = Math.cos(r.rot), rs = Math.sin(r.rot);
+        const ox = -this.oppA.x * nsx, oy = -this.oppA.y * nsy;
+        r.cx = this.fixed.x + ox * rc - oy * rs;
+        r.cy = this.fixed.y + ox * rs + oy * rc;
         app.emit('render'); app.emit('overlayrender');
       }
     }
@@ -1371,6 +1580,9 @@
           app.emit('celchange');
         }
       }
+      // rmove / rrotate / rscale leave the raster selection alive so the
+      // artist can chain transformations -- they only commit on click-outside,
+      // tool change, or Enter/Esc.
       this.mode = 'idle';
       app.emit('render'); app.emit('overlayrender');
     }
@@ -1483,6 +1695,13 @@
       r.canvas = fc;
       r.before = before;
       r.lifted = true;
+      // Initialise free-transform state on the lifted piece so the user
+      // can scale / rotate / move it via handles. cx/cy is the centre,
+      // sw/sh are the canvas-pixel dimensions, scaleX/scaleY and rot
+      // accumulate as the user drags handles.
+      r.sw = w; r.sh = h;
+      r.cx = x0 + w / 2; r.cy = y0 + h / 2;
+      r.scaleX = 1; r.scaleY = 1; r.rot = 0;
       app.emit('render');
     }
     _commitRaster(app) {
@@ -1492,9 +1711,22 @@
       // Nothing was actually lifted (user lassoed then bailed out) -- nothing
       // to commit and no history entry to push.
       if (!r.lifted || !r.canvas) return;
-      r.cel.ctx.drawImage(r.canvas, r.x, r.y);
+      const ctx = r.cel.ctx;
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
+      // apply the accumulated transform (translate + rotate + scale) when
+      // baking the floating piece back into the cel, so squash/stretch/
+      // rotate edits persist
+      ctx.translate(r.cx, r.cy);
+      ctx.rotate(r.rot || 0);
+      ctx.scale(r.scaleX || 1, r.scaleY || 1);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(r.canvas, -r.sw / 2, -r.sh / 2);
+      ctx.restore();
       r.cel.dirty();
-      app.history.pushCelEdit('Move selection', r.cel, r.before);
+      app.history.pushCelEdit('Transform selection', r.cel, r.before);
       app.emit('render'); app.emit('celchange');
     }
     _inVBounds(pt, app) {
@@ -1514,10 +1746,15 @@
     _inRasterBounds(pt, app) {
       const r = this.raster;
       if (!r) return false;
-      // raster bounds are in cel-local space
       const local = app && r.layer
         ? layerLocal(pt, r.layer, r.frame, app)
         : pt;
+      if (r.lifted) {
+        // transformed bbox: project into the selection's local frame
+        const loc = selLocal(r, local.x, local.y);
+        return Math.abs(loc.x) <= r.sw / 2 && Math.abs(loc.y) <= r.sh / 2;
+      }
+      // unlifted: still the original polygon bbox
       return local.x >= r.x && local.x <= r.x + r.w &&
              local.y >= r.y && local.y <= r.y + r.h;
     }
@@ -1659,26 +1896,59 @@
         ctx.save();
         applyLayerXform(ctx, r.layer || app.activeLayer(), r.frame != null ? r.frame : app.frame, app);
         if (r.lifted && r.canvas) {
+          // Draw the floating piece through the accumulated transform so
+          // the user sees the squash / stretch / rotate in real time.
+          ctx.save();
           ctx.globalAlpha = 0.95;
           ctx.imageSmoothingEnabled = true;
-          ctx.drawImage(r.canvas, r.x, r.y);
-          ctx.globalAlpha = 1;
+          ctx.translate(r.cx, r.cy);
+          ctx.rotate(r.rot || 0);
+          ctx.scale(r.scaleX || 1, r.scaleY || 1);
+          ctx.drawImage(r.canvas, -r.sw / 2, -r.sh / 2);
+          ctx.restore();
         }
-        // Outline: trace the actual polygon if pixels haven't been lifted
-        // yet (so the user sees what was lassoed), otherwise the bbox of the
-        // floating piece.
-        const trace = () => {
-          if (!r.lifted && r.poly) {
+        if (r.lifted) {
+          // Transformed bbox outline + 8 scale handles + rotation knob.
+          const corners = [0, 2, 4, 6].map(i => {
+            const a = selAnchor(i, r.sw, r.sh);
+            return selWorld(r, a.x, a.y);
+          });
+          const trace = () => {
+            ctx.beginPath();
+            ctx.moveTo(corners[0].x, corners[0].y);
+            for (let i = 1; i < 4; i++) ctx.lineTo(corners[i].x, corners[i].y);
+            ctx.closePath();
+          };
+          this._ants(ctx, zoom, trace);
+          // rotation knob + connecting stem
+          const tc = selWorld(r, 0, -r.sh / 2);
+          const rh = selRotHandleWorld(r, zoom);
+          ctx.save();
+          ctx.lineWidth = 1.4 / zoom;
+          ctx.strokeStyle = '#4a9fd4';
+          ctx.beginPath(); ctx.moveTo(tc.x, tc.y); ctx.lineTo(rh.x, rh.y); ctx.stroke();
+          // 8 square handles
+          const hs = 4 / zoom;
+          ctx.fillStyle = '#fff';
+          for (let i = 0; i < 8; i++) {
+            const a = selAnchor(i, r.sw, r.sh);
+            const w = selWorld(r, a.x, a.y);
+            ctx.beginPath(); ctx.rect(w.x - hs, w.y - hs, hs * 2, hs * 2);
+            ctx.fill(); ctx.stroke();
+          }
+          // rotation knob (circle)
+          ctx.beginPath(); ctx.arc(rh.x, rh.y, hs, 0, 7); ctx.fill(); ctx.stroke();
+          ctx.restore();
+        } else if (r.poly) {
+          // unlifted: still showing the lassoed polygon outline
+          const trace = () => {
             ctx.beginPath();
             ctx.moveTo(r.poly[0].x, r.poly[0].y);
             for (let i = 1; i < r.poly.length; i++) ctx.lineTo(r.poly[i].x, r.poly[i].y);
             ctx.closePath();
-          } else {
-            ctx.beginPath();
-            ctx.rect(r.x, r.y, r.w, r.h);
-          }
-        };
-        this._ants(ctx, zoom, trace);
+          };
+          this._ants(ctx, zoom, trace);
+        }
         ctx.restore();
       }
     }
