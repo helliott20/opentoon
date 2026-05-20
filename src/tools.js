@@ -1384,18 +1384,22 @@
       this.poly = null;        // the loop being drawn
       this.vsel = [];          // selected vector strokes
       this.vcel = null;
+      this.vt = null;          // vector free-transform state (cx/cy/sw/sh/scaleX/scaleY/rot + orig snapshot)
       this.raster = null;      // a lifted floating pixel piece
     }
     onDeactivate(app) {
       this._commitRaster(app);
-      this.vsel = []; this.vcel = null; this.poly = null; this.mode = 'idle';
+      this._commitVector(app);
+      this.vsel = []; this.vcel = null; this.vt = null;
+      this.poly = null; this.mode = 'idle';
       this._stopAnts();
       app.emit('overlayrender');
     }
     // a frame / layer change drops the selection so it can't act on a hidden cel
     flush(app) {
       this._commitRaster(app);
-      this.vsel = []; this.vcel = null;
+      this._commitVector(app);
+      this.vsel = []; this.vcel = null; this.vt = null;
       this._stopAnts();
     }
     // marching-ants animation: emit overlayrender ~12fps while there's something
@@ -1416,14 +1420,44 @@
       const layer = app.activeLayer();
       this.layerKind = layer ? layer.type : null;
       if (this.layerKind === 'vector') {
-        if (this.vsel.length && this.vcel && this._inVBounds(pt, app)) {
-          this.mode = 'vmove';
-          this.before = this.vcel.snapshot();
-          this.last = { x: pt.x, y: pt.y };
-          this.moved = false;
-          return;
+        if (this.vt && this.vsel.length && this.vcel) {
+          const v = this.vt;
+          const local = layerLocal(pt, v.layer || layer, v.frame != null ? v.frame : app.frame, app);
+          const zoom = app.stage.view.zoom;
+          const thr = 11 / zoom;
+          // Rotation knob (sits outside the bbox so check it first)
+          const rh = selRotHandleWorld(v, zoom);
+          if (U.dist(local.x, local.y, rh.x, rh.y) < thr) {
+            this.mode = 'vrotate';
+            this.startRot = v.rot;
+            this.startAng = Math.atan2(local.y - v.cy, local.x - v.cx);
+            return;
+          }
+          // 8 scale handles
+          for (let i = 0; i < 8; i++) {
+            const a = selAnchor(i, v.sw, v.sh);
+            const w = selWorld(v, a.x, a.y);
+            if (U.dist(local.x, local.y, w.x, w.y) < thr) {
+              this.mode = 'vscale';
+              this.hIdx = i;
+              const opp = selAnchor((i + 4) % 8, v.sw, v.sh);
+              this.fixed = selWorld(v, opp.x, opp.y);
+              this.oppA = opp; this.hA = a;
+              return;
+            }
+          }
+          // Inside the transformed bbox — drag to translate.
+          const loc = selLocal(v, local.x, local.y);
+          if (Math.abs(loc.x) <= v.sw / 2 && Math.abs(loc.y) <= v.sh / 2) {
+            this.mode = 'vmove';
+            this.moveOff = { x: local.x - v.cx, y: local.y - v.cy };
+            return;
+          }
+          // Clicked off the selection — commit any in-flight transform and
+          // fall through to start a fresh lasso loop.
+          this._commitVector(app);
         }
-        this.vsel = [];
+        this.vsel = []; this.vcel = null; this.vt = null;
       } else if (this.layerKind === 'drawing') {
         if (this.raster) {
           const r = this.raster;
@@ -1490,23 +1524,42 @@
         const thr = 1.0 / zoom;
         if (U.dist(last.x, last.y, pt.x, pt.y) > thr) this.poly.push({ x: pt.x, y: pt.y });
         app.emit('overlayrender');
-      } else if (this.mode === 'vmove') {
-        const dx = pt.x - this.last.x, dy = pt.y - this.last.y;
-        this.last = { x: pt.x, y: pt.y };
-        if (dx || dy) this.moved = true;
-        // delta is in project-space; convert to cel-local if the layer
-        // has a rotation/scale transform so strokes move with the cursor
-        // rather than at a confusing offset
-        const layer = app.activeLayer();
-        const ld = layerLocalDelta(dx, dy, layer, app.frame);
-        for (const st of this.vsel) {
-          if (st.type === 'fill')
-            st.contour = st.contour.map(p => ({ x: p.x + ld.dx, y: p.y + ld.dy }));
-          else
-            st.pts = st.pts.map(p => ({ x: p.x + ld.dx, y: p.y + ld.dy, p: p.p }));
+      } else if (this.mode === 'vmove' || this.mode === 'vrotate' || this.mode === 'vscale') {
+        // Vector free-transform: vt.cx/cy/scaleX/scaleY/rot accumulate; every
+        // frame we re-derive each stroke's points from the original snapshot
+        // through the current transform. This avoids compounding rounding
+        // errors across many small moves.
+        const v = this.vt;
+        if (!v) return;
+        const local = layerLocal(pt, v.layer || app.activeLayer(),
+          v.frame != null ? v.frame : app.frame, app);
+        if (this.mode === 'vmove') {
+          v.cx = local.x - this.moveOff.x;
+          v.cy = local.y - this.moveOff.y;
+        } else if (this.mode === 'vrotate') {
+          const ang = Math.atan2(local.y - v.cy, local.x - v.cx);
+          v.rot = this.startRot + (ang - this.startAng);
+          if (e && e.shiftKey) v.rot = Math.round(v.rot / (Math.PI / 12)) * (Math.PI / 12);
+        } else if (this.mode === 'vscale') {
+          const dxA = this.hA.x - this.oppA.x, dyA = this.hA.y - this.oppA.y;
+          const c = Math.cos(-v.rot), sn = Math.sin(-v.rot);
+          const vx = (local.x - this.fixed.x) * c - (local.y - this.fixed.y) * sn;
+          const vy = (local.x - this.fixed.x) * sn + (local.y - this.fixed.y) * c;
+          let nsx = dxA !== 0 ? vx / dxA : v.scaleX;
+          let nsy = dyA !== 0 ? vy / dyA : v.scaleY;
+          if (e && e.shiftKey && dxA !== 0 && dyA !== 0) {
+            const m = Math.max(Math.abs(nsx), Math.abs(nsy));
+            nsx = Math.sign(nsx) * m; nsy = Math.sign(nsy) * m;
+          }
+          if (Math.abs(nsx) < 0.01) nsx = 0.01 * Math.sign(nsx || 1);
+          if (Math.abs(nsy) < 0.01) nsy = 0.01 * Math.sign(nsy || 1);
+          v.scaleX = nsx; v.scaleY = nsy;
+          const rc = Math.cos(v.rot), rs = Math.sin(v.rot);
+          const ox = -this.oppA.x * nsx, oy = -this.oppA.y * nsy;
+          v.cx = this.fixed.x + ox * rc - oy * rs;
+          v.cy = this.fixed.y + ox * rs + oy * rc;
         }
-        // RAF-debounce the heavy rebuild + render. Without this, a vector cel
-        // with many strokes lags noticeably while dragging a selection.
+        this._applyVTransform();
         this._scheduleVMove(app);
         app.emit('overlayrender');
       } else if (this.mode === 'rmove') {
@@ -1572,18 +1625,57 @@
           else this._lassoRaster(app);
         }
         this.poly = null;
-      } else if (this.mode === 'vmove') {
+      } else if (this.mode === 'vmove' || this.mode === 'vrotate' || this.mode === 'vscale') {
+        // Make sure the final transform is rendered (the RAF debounce may
+        // otherwise drop the last frame before pointerUp).
         this._flushVMove(app);
-        if (this.moved) {
-          app.history.pushCelEdit('Move strokes', this.vcel, this.before);
-          app.emit('celchange');
-        }
       }
-      // rmove / rrotate / rscale leave the raster selection alive so the
-      // artist can chain transformations -- they only commit on click-outside,
-      // tool change, or Enter/Esc.
+      // vmove / vrotate / vscale and rmove / rrotate / rscale leave the
+      // selection alive so the artist can chain transformations -- they only
+      // commit on click-outside, tool change, or Enter/Esc.
       this.mode = 'idle';
       app.emit('render'); app.emit('overlayrender');
+    }
+
+    // Re-derive every selected stroke's points from the original snapshot
+    // through vt's accumulated transform (cx, cy, scaleX, scaleY, rot around
+    // the original centre). Called on every move so the strokes follow the
+    // bbox under squash / stretch / rotate without compounding precision loss.
+    _applyVTransform() {
+      const v = this.vt;
+      if (!v) return;
+      const c = Math.cos(v.rot), sn = Math.sin(v.rot);
+      const fwd = (px, py) => {
+        const lx = (px - v.origCx) * v.scaleX;
+        const ly = (py - v.origCy) * v.scaleY;
+        return { x: v.cx + lx * c - ly * sn, y: v.cy + lx * sn + ly * c };
+      };
+      for (const o of v.orig) {
+        const st = o.stroke;
+        if (st.type === 'fill') {
+          st.contour = o.contour.map(p => {
+            const r = fwd(p.x, p.y); return { x: r.x, y: r.y };
+          });
+        } else {
+          st.pts = o.pts.map(p => {
+            const r = fwd(p.x, p.y); return { x: r.x, y: r.y, p: p.p };
+          });
+        }
+      }
+    }
+    // Bake the current transform as a single history entry, then drop the
+    // transform state. The stroke points are already mutated in-place by
+    // _applyVTransform, so committing just means snapshotting for undo.
+    _commitVector(app) {
+      const v = this.vt;
+      if (!v) return;
+      this.vt = null;
+      const changed = !(v.scaleX === 1 && v.scaleY === 1 && v.rot === 0
+        && v.cx === v.origCx && v.cy === v.origCy);
+      if (!changed) return;
+      if (v.cel) v.cel.rebuild();
+      if (v.before) app.history.pushCelEdit('Transform selection', v.cel, v.before);
+      app.emit('render'); app.emit('celchange');
     }
 
     _strokeCentroid(st) {
@@ -1606,7 +1698,6 @@
       const layer = app.activeLayer();
       const cel = layer.celAt(app.frame);
       if (!cel) { app.ui.status('Nothing on this frame to select'); return; }
-      this.vcel = cel;
       // convert the project-space polygon into cel-local space so it lines
       // up with the strokes (whose points are stored cel-local) on a layer
       // that has a transform applied
@@ -1616,10 +1707,38 @@
         if (this._strokeInLasso(st, localPoly)) sel.push(st);
       }
       this.vsel = sel;
-      if (sel.length) this._startAnts(app);
-      app.ui.status(sel.length
-        ? 'Lassoed ' + sel.length + ' stroke' + (sel.length === 1 ? '' : 's') + ' — drag to move'
-        : 'No strokes inside the lasso');
+      this.vcel = cel;
+      if (!sel.length) {
+        this.vt = null;
+        app.ui.status('No strokes inside the lasso');
+        return;
+      }
+      // Build the combined bbox of all selected strokes, then snapshot each
+      // stroke's points so future transforms can be re-derived from the
+      // original (no compounding error across many small drags).
+      let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+      for (const st of sel) {
+        const b = V().strokeBounds(st);
+        x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y);
+        x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
+      }
+      const w = Math.max(1, x1 - x0), h = Math.max(1, y1 - y0);
+      this.vt = {
+        cel, layer, frame: app.frame,
+        strokes: sel.slice(),
+        orig: sel.map(st => st.type === 'fill'
+          ? { stroke: st, contour: st.contour.map(p => ({ x: p.x, y: p.y })) }
+          : { stroke: st, pts: st.pts.map(p => ({ x: p.x, y: p.y, p: p.p })) }
+        ),
+        origCx: x0 + w / 2, origCy: y0 + h / 2,
+        cx: x0 + w / 2, cy: y0 + h / 2,
+        sw: w, sh: h,
+        scaleX: 1, scaleY: 1, rot: 0,
+        before: cel.snapshot()
+      };
+      this._startAnts(app);
+      app.ui.status('Lassoed ' + sel.length + ' stroke' + (sel.length === 1 ? '' : 's')
+        + ' — drag inside to move, corners to scale, top knob to rotate');
     }
     _lassoRaster(app) {
       const layer = app.activeLayer();
@@ -1769,9 +1888,11 @@
     // Del key -> remove the lasso catch.
     deleteLasso(app) {
       if (this.vsel.length && this.vcel) {
-        const before = this.vcel.snapshot();
+        // Use the pre-transform snapshot if one exists, so Del after a
+        // partial transform also undoes the transform in one step.
+        const before = (this.vt && this.vt.before) ? this.vt.before : this.vcel.snapshot();
         this.vcel.strokes = this.vcel.strokes.filter(s => this.vsel.indexOf(s) < 0);
-        this.vsel = [];
+        this.vsel = []; this.vt = null;
         this.vcel.rebuild();
         app.history.pushCelEdit('Delete strokes', this.vcel, before);
         app.emit('render'); app.emit('celchange');
@@ -1806,7 +1927,7 @@
       }
       return false;
     }
-    // Esc -> drop the selection, restoring lifted pixels.
+    // Esc -> drop the selection, restoring any in-flight transform.
     cancel(app) {
       if (this.raster) {
         // Only restore the cel if pixels were actually lifted from it. An
@@ -1819,7 +1940,12 @@
         this.raster = null;
         app.emit('render');
       }
-      this.vsel = []; this.vcel = null;
+      if (this.vt && this.vt.cel && this.vt.before) {
+        // Roll back any in-flight scale / rotate / move on a vector lasso.
+        this.vt.cel.restore(this.vt.before);
+        app.emit('celchange'); app.emit('render');
+      }
+      this.vsel = []; this.vcel = null; this.vt = null;
       app.emit('overlayrender');
     }
     hasSelection() { return this.vsel.length > 0 || !!this.raster; }
@@ -1912,24 +2038,26 @@
         ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, 7); ctx.fill(); ctx.stroke();
         ctx.restore();
       }
-      if (this.vsel && this.vsel.length) {
-        // bounding box around each selected stroke, with marching ants.
-        // Strokes are stored in cel-local coords; apply the layer's
-        // transform so the bbox visually wraps the rendered artwork.
-        let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
-        for (const st of this.vsel) {
-          const b = V().strokeBounds(st);
-          x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y);
-          x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
-        }
-        const pad = 4 / zoom;
+      if (this.vt && this.vsel && this.vsel.length) {
+        // Combined-bbox marching ants + 8 scale handles + rotation knob,
+        // drawn through the active layer's transform so the overlay visually
+        // wraps the rendered artwork even on rotated / scaled layers.
+        const v = this.vt;
+        ctx.save();
+        applyLayerXform(ctx, v.layer || app.activeLayer(),
+          v.frame != null ? v.frame : app.frame, app);
+        const corners = [0, 2, 4, 6].map(i => {
+          const a = selAnchor(i, v.sw, v.sh);
+          return selWorld(v, a.x, a.y);
+        });
         const trace = () => {
           ctx.beginPath();
-          ctx.rect(x0 - pad, y0 - pad, (x1 - x0) + pad * 2, (y1 - y0) + pad * 2);
+          ctx.moveTo(corners[0].x, corners[0].y);
+          for (let i = 1; i < 4; i++) ctx.lineTo(corners[i].x, corners[i].y);
+          ctx.closePath();
         };
-        ctx.save();
-        applyLayerXform(ctx, app.activeLayer(), app.frame, app);
         this._ants(ctx, zoom, trace);
+        this._drawTransformHandles(ctx, v, zoom);
         ctx.restore();
       }
       if (this.raster) {
