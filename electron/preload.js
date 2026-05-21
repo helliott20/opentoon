@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld('OpenToonDesktop', {
     autosaveWrite: (data) => ipcRenderer.invoke('opentoon:autosave-write', data),
     autosaveRead: () => ipcRenderer.invoke('opentoon:autosave-read'),
     autosaveClear: () => ipcRenderer.invoke('opentoon:autosave-clear'),
-    pendingFile: () => ipcRenderer.invoke('opentoon:pending-file')
+    pendingFile: () => ipcRenderer.invoke('opentoon:pending-file'),
+    statFile: (file) => ipcRenderer.invoke('opentoon:stat-file', file)
   }
 });

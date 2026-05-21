@@ -268,16 +268,30 @@
       this.ui.status('Welcome to OpenToon Studio - press B to start drawing');
     }
 
-    // On launch: open a double-clicked .otoon if there is one, else offer
-    // to restore the autosave. Also listen for files opened while running.
+    // On launch: open a double-clicked .otoon if there is one; otherwise
+    // show the OpenToon start screen (recent / new / open / templates /
+    // restore-autosave). The default project is already loaded behind the
+    // overlay, so dismissing the launcher leaves a usable blank scene.
     _initialOpen() {
       const d = window.OpenToonDesktop;
       if (d && d.onOpenFile) d.onOpenFile(p => this._openPath(p));
       if (d && d.fs && d.fs.pendingFile) {
         d.fs.pendingFile()
-          .then(p => { if (p) this._openPath(p); else this._offerAutosave(); })
-          .catch(() => this._offerAutosave());
+          .then(p => { if (p) this._openPath(p); else this._showLauncher(); })
+          .catch(() => this._showLauncher());
       } else {
+        this._showLauncher();
+      }
+    }
+
+    _showLauncher() {
+      if (!OT.Launcher) { this._offerAutosave(); return; }
+      try {
+        this._launcher = new OT.Launcher(this);
+        const p = this._launcher.show();
+        if (p && p.catch) p.catch(() => this._offerAutosave());
+      } catch (e) {
+        // Don't let a launcher failure block the app from booting.
         this._offerAutosave();
       }
     }

@@ -289,6 +289,14 @@ function setupIpc() {
     return true;
   });
 
+  /* ---- file stat for the start screen (last-opened timestamp on cards) ---- */
+  ipcMain.handle('opentoon:stat-file', (_e, file) => {
+    try {
+      const s = fs.statSync(file);
+      return { ok: true, mtimeMs: s.mtimeMs, size: s.size };
+    } catch (e) { return { ok: false, error: e && e.message }; }
+  });
+
   /* ---- file the app was launched to open (double-click a .otoon) ---- */
   ipcMain.handle('opentoon:pending-file', () => {
     const f = pendingOpenFile;
