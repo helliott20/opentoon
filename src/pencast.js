@@ -127,13 +127,34 @@
     _meta() {
       const a = this.app, st = a.stage, t = a.tools.active;
       const rad = (t && t.cursorRadius ? (t.cursorRadius(a) || 0) : 0) * st.view.zoom;
+      // Selection summary so the pen-window action HUD can echo what's
+      // selected on the main screen and offer Free Transform / Reset.
+      let selName = '', selCount = 0, selIsGroup = false, selHasXform = false, selColor = '';
+      const sel = a.selectedLayers;
+      const setIds = sel && sel.size ? new Set(Array.from(sel).map(l => l.id)) : new Set();
+      let targets = [];
+      if (sel && sel.size > 1) {
+        targets = a.project.layers.filter(l => sel.has(l) && !setIds.has(l.parentId));
+      } else if (a.activeLayer && a.activeLayer()) {
+        targets = [a.activeLayer()];
+      }
+      if (targets.length === 1) {
+        selName = targets[0].name || '';
+        selIsGroup = targets[0].type === 'group';
+        selColor = targets[0].color || '';
+      } else if (targets.length > 1) {
+        selColor = targets[0].color || '';
+      }
+      selCount = targets.length;
+      selHasXform = targets.some(t => t.transform && t.transform.keyframes && t.transform.keyframes.length);
       return {
         tool: t ? t.name : 'brush',
         color: a.color,
         brushFrac: st.cw ? rad / st.cw : 0.02,
         frame: a.frame + 1,
         frameCount: a.project.frameCount,
-        zoom: Math.round(st.view.zoom * 100)
+        zoom: Math.round(st.view.zoom * 100),
+        sel: { name: selName, count: selCount, group: selIsGroup, hasXform: selHasXform, color: selColor }
       };
     }
 
@@ -237,6 +258,26 @@
           break;
         }
         case 'flip': a.toggleFlipH(); break;
+        case 'free-transform':
+          if (typeof a.freeTransform === 'function') a.freeTransform();
+          break;
+        case 'reset-transform': {
+          const sel = a.selectedLayers;
+          const setIds = sel && sel.size ? new Set(Array.from(sel).map(l => l.id)) : new Set();
+          let targets = [];
+          if (sel && sel.size > 1) {
+            targets = a.project.layers.filter(l => sel.has(l) && !setIds.has(l.parentId));
+          } else if (a.activeLayer && a.activeLayer()) {
+            targets = [a.activeLayer()];
+          }
+          const dirty = targets.filter(t => t.transform && t.transform.keyframes && t.transform.keyframes.length);
+          if (!dirty.length) { a.ui.status('No transform to reset'); break; }
+          a.doStruct(dirty.length > 1 ? 'Reset transforms' : 'Reset transform', () => {
+            for (const t of dirty) t.transform.keyframes = [];
+          });
+          a.emit('layerschange'); a.emit('render');
+          break;
+        }
         case 'pen-size':
           // pen window reports its CSS size + DPR so the stream can be
           // encoded at exactly the resolution it will be displayed at

@@ -39,6 +39,9 @@
       this.wctx = this.wetCanvas ? this.wetCanvas.getContext('2d') : null;
       this.bar = document.getElementById('bar');
       this.hint = document.getElementById('hint');
+      // The selection chip is appended to #bar inside _buildBar — same
+      // pattern as the main window's viewbar chip.
+      this.actions = null;
       this.bmp = null;
       this.meta = { tool: 'brush', color: '#222222', brushFrac: 0.02, frame: 1, frameCount: 1, zoom: 100 };
       this.fit = { x: 0, y: 0, w: 0, h: 0 };
@@ -134,6 +137,15 @@
       // pan mode toggle -- handy on a pen tablet that has no middle mouse
       this.panBtn = mkBtn(svg('<path d="M12 3v18"/><path d="M3 12h18"/><path d="M7 8l-4 4 4 4"/><path d="M17 8l4 4-4 4"/><path d="M8 7l4-4 4 4"/><path d="M8 17l4 4 4-4"/>'),
         'Pan (hold space, or tap to toggle)', () => this._togglePan());
+
+      // Selection chip — sits inside the toolbar; popover descends below
+      // on hover (or tap on tablets). Built once; contents refresh as
+      // meta.sel arrives from the main window.
+      this.actions = document.createElement('div');
+      this.actions.id = 'penActions';
+      this.actions.className = 'pen-actions hidden';
+      this.actions.tabIndex = 0;
+      bar.appendChild(this.actions);
     }
     // Local zoom -- adjusts this.view only, never sends to the main app.
     _zoomLocal(factor, cx, cy) {
@@ -233,9 +245,60 @@
         this.colorInput.value = meta.color;
       this.colorWrap.style.background = meta.color || '#222222';
       this.frameLabel.textContent = (meta.frame || 1) + ' / ' + (meta.frameCount || 1);
+      this._refreshActions(meta.sel || {});
       // zoomBtn now shows the pen window's *local* view percent -- main
       // window's camera zoom is irrelevant to the pen display, so we ignore
       // meta.zoom here. _updateZoomLabel keeps it in sync with this.view.
+    }
+    // Mirror of the main window's viewbar chip. The chip itself sits in
+    // the pen window's #bar; the popover descends below on hover or tap.
+    _refreshActions(sel) {
+      const el = this.actions;
+      if (!el) return;
+      if (!sel || !sel.count) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+      el.classList.remove('hidden');
+      el.innerHTML = '';
+      const pin = document.createElement('div');
+      pin.className = 'pa-pin';
+      const dot = document.createElement('span');
+      dot.className = 'pa-dot';
+      dot.style.background = sel.color || '#3d9be0';
+      pin.appendChild(dot);
+      const name = document.createElement('span');
+      name.className = 'pa-chip-name';
+      name.textContent = sel.count > 1
+        ? (sel.count + ' layers')
+        : ((sel.group ? '📁 ' : '') + (sel.name || 'Layer'));
+      pin.appendChild(name);
+      const ico = document.createElement('span');
+      ico.className = 'pa-pin-icon';
+      ico.innerHTML = svg('<path d="M4 4l4 4M16 4l-4 4M4 20l4-4M16 20l-4-4M3 12h6M15 12h6M12 3v6M12 15v6"/>');
+      pin.appendChild(ico);
+      el.appendChild(pin);
+      // popover descends below the chip
+      const pop = document.createElement('div'); pop.className = 'pa-popover';
+      const tx = document.createElement('button');
+      tx.className = 'pa-btn pa-primary'; tx.title = 'Free Transform';
+      tx.innerHTML = svg('<path d="M4 4l4 4M16 4l-4 4M4 20l4-4M16 20l-4-4M3 12h6M15 12h6M12 3v6M12 15v6"/>')
+        + '<span>Transform</span>';
+      tx.addEventListener('click', () => { this._cmd({ type: 'free-transform' }); tx.blur(); el.classList.remove('open'); });
+      pop.appendChild(tx);
+      if (sel.hasXform) {
+        const rs = document.createElement('button');
+        rs.className = 'pa-btn pa-reset'; rs.title = 'Reset transform';
+        rs.innerHTML = svg('<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/>')
+          + '<span>Reset</span>';
+        rs.addEventListener('click', () => { this._cmd({ type: 'reset-transform' }); rs.blur(); el.classList.remove('open'); });
+        pop.appendChild(rs);
+      }
+      el.appendChild(pop);
+      // Tablet: tap to toggle, since hover is unreliable on touch/stylus.
+      pin.addEventListener('pointerdown', (ev) => {
+        if (ev.pointerType === 'touch' || ev.pointerType === 'pen') {
+          el.classList.toggle('open');
+          ev.preventDefault();
+        }
+      });
     }
 
     /* ---------------- draw ---------------- */

@@ -145,6 +145,258 @@ textarea:focus{
 }
 #canvas,#overlay{position:absolute;top:0;left:0;touch-action:none;}
 #overlay{pointer-events:none;}
+/* Lasso transform-mode toolbar — floats just above the active selection in
+   screen-space, with mode toggle pills + commit/cancel. */
+.lasso-tb{
+  position:absolute;display:flex;align-items:center;gap:1px;
+  background:linear-gradient(180deg,#262932 0%,#1c1f25 100%);
+  border:1px solid #3d414a;border-radius:8px;
+  padding:3px;
+  box-shadow:0 8px 24px rgba(0,0,0,0.55),0 1px 0 rgba(255,255,255,0.04) inset,0 0 0 1px rgba(0,0,0,0.4);
+  z-index:60;pointer-events:auto;
+  font:600 11px/1 "Space Grotesk","Segoe UI",system-ui,sans-serif;
+  letter-spacing:0.01em;
+  color:#d6d9de;user-select:none;
+  transform:translate(-50%,-100%);
+  white-space:nowrap;
+  /* Subtle fade-in so it doesn't pop in jarringly */
+  animation:lassoTbIn 0.12s ease;
+}
+@keyframes lassoTbIn{
+  from{opacity:0;transform:translate(-50%,calc(-100% + 4px));}
+  to  {opacity:1;transform:translate(-50%,-100%);}
+}
+.lasso-tb.hidden{display:none;}
+.lasso-tb button{
+  background:transparent;border:0;color:#9aa3b0;
+  padding:6px 11px;cursor:pointer;font:inherit;border-radius:5px;
+  transition:background-color 100ms,color 100ms,box-shadow 100ms;
+}
+.lasso-tb button:hover{background:#353a44;color:#fff;}
+.lasso-tb button:active{transform:translateY(0.5px);}
+.lasso-tb button.active{
+  background:linear-gradient(180deg,#4ba8e0,#3c8cc4);
+  color:#fff;
+  box-shadow:0 0 0 1px rgba(0,0,0,0.4),inset 0 1px 0 rgba(255,255,255,0.22);
+}
+.lasso-tb button.active:hover{background:linear-gradient(180deg,#5cb4e7,#4297cc);}
+.lasso-tb button[data-mode="commit"]{color:#7dd391;}
+.lasso-tb button[data-mode="commit"]:hover{background:rgba(125,211,145,0.16);color:#a4e9b3;}
+.lasso-tb button[data-mode="cancel"]{color:#dd7160;}
+.lasso-tb button[data-mode="cancel"]:hover{background:rgba(221,113,96,0.16);color:#f08977;}
+.lasso-tb-sep{
+  width:1px;height:18px;background:#3a3d45;margin:0 4px;display:inline-block;
+}
+/* Little notch arrow at the bottom of the toolbar pointing to the bbox top */
+.lasso-tb::after{
+  content:"";position:absolute;left:50%;bottom:-5px;
+  width:9px;height:9px;background:inherit;
+  border-right:1px solid #3d414a;border-bottom:1px solid #3d414a;
+  transform:translateX(-50%) rotate(45deg);
+  z-index:-1;
+}
+/* ---------- Viewbar selection chip — "instrument readout" ----------
+   Lives centred in #viewbar between zoom controls and view-toggles.
+   The chip itself IS the Free Transform action — clicking it fires
+   app.freeTransform() — so the inline "Transform · T" CTA needs to
+   read as clickable at a glance. Visual language: a thin accent-tinted
+   hairline + faint inner glow, two readable segments (left = layer
+   context, right = action), separated by a subtle divider. Hover lifts
+   the chip a hair and reveals a small popover with Reset (when there
+   are keyframes to clear). */
+.ca-chip{
+  position:relative;
+  display:flex;align-items:stretch;
+  height:22px;
+  background:linear-gradient(180deg,#222831 0%,#1a1d23 100%);
+  border:1px solid #00000088;
+  border-radius:99px;
+  box-shadow:
+    inset 0 1px 0 #ffffff12,
+    inset 0 0 0 1px #4ba8e012,
+    0 1px 0 #0006,
+    0 0 0 1px transparent;
+  color:var(--text);
+  font-size:11px;
+  cursor:pointer;outline:none;user-select:none;
+  transition:transform var(--t),box-shadow var(--t),border-color var(--t);
+}
+.ca-chip.hidden{display:none;}
+.ca-chip:hover,.ca-chip:focus-visible{
+  transform:translateY(-1px);
+  border-color:#000a;
+  box-shadow:
+    inset 0 1px 0 #ffffff18,
+    inset 0 0 0 1px #4ba8e028,
+    0 2px 0 #0008,
+    0 6px 14px #0008,
+    0 0 0 1px var(--accent-glow);
+}
+.ca-chip:active{transform:translateY(0);box-shadow:inset 0 1px 2px #0008;}
+/* Armed state — fundamentally different look so there's no ambiguity
+   whether the transform is engaged. Whole chip flips to a solid accent
+   fill, white text, soft outer halo. The dot brightens to pure white. */
+.ca-chip.is-active{
+  background:linear-gradient(180deg,#4ba8e0 0%,#2f7fb8 100%) !important;
+  border:1px solid #ffffffaa !important;
+  color:#fff !important;
+  box-shadow:
+    inset 0 1px 0 #ffffff60,
+    0 0 0 3px #4ba8e0aa,
+    0 0 24px #4ba8e0,
+    0 4px 16px #0009 !important;
+  transform:translateY(-1px) scale(1.03) !important;
+}
+.ca-chip.is-active::after{
+  /* live indicator pip on the leading edge — a small pulsing dot says
+     "this is running right now" without needing words */
+  content:"";position:absolute;left:-3px;top:50%;
+  width:6px;height:6px;border-radius:50%;
+  background:#fff;
+  box-shadow:0 0 0 2px #4ba8e0,0 0 8px #fff;
+  transform:translateY(-50%);
+  animation:caLiveDot 1.1s ease-in-out infinite;
+}
+.ca-chip.is-active .ca-dot,
+.ca-chip.is-active .ca-dot-stack .ca-dot{
+  background:#fff !important;
+  box-shadow:0 0 0 1px #1c5d8e,inset 0 1px 0 #ffffff60;
+}
+.ca-chip.is-active .ca-cta{
+  background:transparent;
+  color:#fff;
+}
+.ca-chip.is-active .ca-cta-icon svg{
+  transform:rotate(45deg);
+  stroke:#fff;
+}
+.ca-chip.is-active .ca-kbd{
+  color:#fff;
+  border-color:#ffffff60;
+  background:#ffffff20;
+}
+.ca-chip.is-active:hover{
+  background:linear-gradient(180deg,#5fb4e6 0%,#3989c0 100%);
+  box-shadow:
+    inset 0 1px 0 #ffffff50,
+    0 3px 0 #0008,
+    0 10px 26px #4ba8e080,
+    0 0 0 2px #4ba8e050;
+}
+@keyframes caLiveDot{
+  0%,100%{opacity:1;transform:translateY(-50%) scale(1);}
+  50%{opacity:0.5;transform:translateY(-50%) scale(1.4);}
+}
+.ca-chip::before{
+  /* Wider invisible hit zone so the popover stays open while the cursor
+     drifts between the chip and the popover above. */
+  content:"";position:absolute;left:-12px;right:-12px;top:-20px;bottom:-6px;
+}
+
+/* subject dot — small colour-coded indicator that there IS a target.
+   No name on purpose: the layer panel already shows what's selected,
+   showing it twice creates stale-label bugs and adds visual noise. */
+.ca-chip > .ca-dot,
+.ca-chip > .ca-dot-stack{
+  margin:0 0 0 10px;
+  align-self:center;
+}
+.ca-chip .ca-dot{
+  display:inline-block;width:8px;height:8px;border-radius:50%;
+  box-shadow:0 0 0 1px #0008,inset 0 1px 0 #ffffff20;
+}
+.ca-chip .ca-dot.ca-dot-group{
+  /* folder dot reads as a "stack" so it visually differs from a leaf */
+  border-radius:2px;
+  box-shadow:0 0 0 1px #0008,inset 0 1px 0 #ffffff20,2px 2px 0 -1px #4ba8e055;
+}
+.ca-chip .ca-dot-stack{display:inline-flex;align-items:center;}
+.ca-chip .ca-dot-stack .ca-dot{margin-left:-3px;}
+.ca-chip .ca-dot-stack .ca-dot:first-child{margin-left:0;}
+
+/* the Transform CTA — the chip is essentially this button */
+.ca-chip .ca-cta{
+  display:flex;align-items:center;gap:6px;
+  padding:0 12px 0 10px;
+  background:linear-gradient(180deg,#4ba8e024 0%,#4ba8e010 100%);
+  color:var(--accent);
+  font-family:"Space Grotesk","Segoe UI",system-ui,sans-serif;
+  font-weight:700;letter-spacing:.04em;text-transform:uppercase;font-size:10px;
+  border-top-right-radius:99px;border-bottom-right-radius:99px;
+  position:relative;
+  margin-left:8px;
+}
+/* When there's no dot (no target) the CTA hugs the chip's left edge. */
+.ca-chip > .ca-cta:first-child{margin-left:0;border-radius:99px;padding-left:12px;}
+.ca-chip:hover .ca-cta,
+.ca-chip:focus-visible .ca-cta{
+  background:linear-gradient(180deg,#4ba8e040 0%,#4ba8e020 100%);
+  color:#cce8fa;
+}
+.ca-chip .ca-cta-icon{display:inline-flex;align-items:center;}
+.ca-chip .ca-cta-icon svg{
+  width:13px;height:13px;
+  transition:transform .25s cubic-bezier(.2,.85,.3,1);
+}
+.ca-chip:hover .ca-cta-icon svg,
+.ca-chip:focus-visible .ca-cta-icon svg{transform:rotate(45deg);}
+.ca-chip .ca-cta-text{
+  /* keep visible at all times — that's the whole point of "obvious" */
+}
+.ca-chip .ca-kbd{
+  font-family:"JetBrains Mono",monospace;
+  font-size:9.5px;letter-spacing:0;
+  color:var(--text-dim);
+  background:#0009;border:1px solid #00000080;border-radius:3px;
+  padding:1px 4px;
+  margin-left:1px;
+  font-weight:400;
+}
+.ca-chip:hover .ca-kbd,
+.ca-chip:focus-visible .ca-kbd{color:var(--accent);border-color:#4ba8e055;}
+
+/* Hover popover — rises up from the chip with secondary actions */
+.ca-chip .ca-popover{
+  position:absolute;left:50%;bottom:calc(100% + 9px);
+  transform:translate(-50%,6px);
+  display:flex;align-items:center;gap:6px;
+  background:linear-gradient(180deg,#262a32f5 0%,#1c1f25f5 100%);
+  border:1px solid #08090c;border-radius:99px;
+  padding:5px 7px;
+  color:var(--text);
+  box-shadow:0 12px 28px #000b,0 2px 6px #0008,inset 0 1px 0 #ffffff0d;
+  z-index:60;
+  opacity:0;pointer-events:none;
+  transition:opacity .14s ease, transform .2s cubic-bezier(.18,.9,.26,1.1);
+  backdrop-filter:blur(6px);
+}
+.ca-chip:hover .ca-popover,
+.ca-chip:focus-within .ca-popover,
+.ca-chip:focus-visible .ca-popover{
+  opacity:1;transform:translate(-50%,0);pointer-events:auto;
+}
+.ca-chip .ca-popover::after{
+  /* tiny caret pointing down at the chip */
+  content:"";position:absolute;left:50%;bottom:-5px;
+  width:8px;height:8px;
+  background:#1c1f25;
+  border-right:1px solid #08090c;border-bottom:1px solid #08090c;
+  transform:translateX(-50%) rotate(45deg);
+}
+.ca-chip .ca-btn{
+  display:inline-flex;align-items:center;gap:5px;
+  background:transparent;border:1px solid transparent;color:var(--text);
+  padding:4px 10px;border-radius:99px;
+  font-size:11.5px;font-weight:600;letter-spacing:.01em;
+  transition:background-color var(--t),border-color var(--t),color var(--t),transform var(--t);
+  cursor:pointer;white-space:nowrap;
+}
+.ca-chip .ca-btn svg{width:13px;height:13px;}
+.ca-chip .ca-btn:hover{background:#ffffff10;color:var(--cream);}
+.ca-chip .ca-btn:active{transform:translateY(1px);}
+.ca-chip .ca-reset{color:var(--text-dim);}
+.ca-chip .ca-reset:hover{color:var(--hot);}
+
 #viewbar{
   height:26px;flex:0 0 26px;background:var(--panel);
   border-top:1px solid var(--edge);
@@ -160,6 +412,199 @@ textarea:focus{
 #viewbar .vb-btn:active{transform:translateY(1px);}
 #viewbar .vb-btn.on{background:var(--accent);color:#fff;border-color:#0008;}
 #viewbar .sp{flex:1;}
+
+/* ---------- Onion-skin split button + popover ---------- */
+#viewbar .vb-split{
+  display:inline-flex;align-items:stretch;
+  border-radius:4px;isolation:isolate;
+}
+#viewbar .vb-split .vb-btn{border-radius:0;}
+#viewbar .vb-split .vb-split-main{
+  border-top-left-radius:4px;border-bottom-left-radius:4px;
+  border-right:1px solid #00000050;
+}
+#viewbar .vb-split .vb-split-chev{
+  padding:2px 5px;font-size:9px;color:var(--text-dim);
+  border-top-right-radius:4px;border-bottom-right-radius:4px;
+  border-left:none;
+}
+#viewbar .vb-split .vb-split-chev:hover{color:var(--text);background:var(--panel3);}
+#viewbar .vb-split .vb-split-main.on{
+  background:var(--accent);color:#fff;border-color:#0008;
+}
+#viewbar .vb-split .vb-split-chev.on{
+  background:var(--accent-lo);color:#fff;border-color:#0008;
+}
+#viewbar .vb-split:has(.vb-split-main.on) .vb-split-main{
+  border-right-color:#00000080;
+}
+
+.onion-pop{
+  position:fixed;z-index:600;
+  min-width:282px;max-width:320px;
+  background:linear-gradient(180deg,#262a32 0%,#1c1f25 100%);
+  border:1px solid #08090c;
+  border-radius:8px;
+  box-shadow:0 16px 40px #000c, 0 3px 10px #0009, inset 0 1px 0 #ffffff0d;
+  padding:11px 13px 12px;
+  color:var(--text);
+  font:11px/1.4 "Segoe UI",Roboto,system-ui,sans-serif;
+  opacity:0;transform:translateY(6px) scale(.985);
+  transition:opacity .14s ease, transform .16s cubic-bezier(.18,.9,.26,1.1);
+  pointer-events:none;
+}
+.onion-pop.open{opacity:1;transform:none;pointer-events:auto;}
+.onion-pop::after{
+  content:"";position:absolute;
+  bottom:-7px;left:var(--caret-x,50%);
+  width:12px;height:12px;
+  background:#1c1f25;
+  border-right:1px solid #08090c;border-bottom:1px solid #08090c;
+  transform:translateX(-50%) rotate(45deg);
+}
+.onion-pop.flip::after{
+  bottom:auto;top:-7px;
+  border:none;border-left:1px solid #08090c;border-top:1px solid #08090c;
+  background:#262a32;
+}
+.onion-pop.is-off .onion-stack-wrap,
+.onion-pop.is-off .onion-row{opacity:.45;filter:saturate(.5);}
+
+.onion-pop-head{
+  display:flex;align-items:center;justify-content:space-between;
+  padding-bottom:9px;
+  border-bottom:1px solid #00000060;
+  margin-bottom:10px;
+}
+.onion-pop-title{
+  font-family:"Space Grotesk","Segoe UI",system-ui,sans-serif;
+  font-weight:700;font-size:10.5px;letter-spacing:.18em;
+  color:var(--cream);
+}
+
+/* iOS-style toggle */
+.onion-switch{
+  position:relative;width:34px;height:18px;
+  background:#11141a;border:1px solid #00000080;border-radius:99px;
+  padding:0;transition:background-color var(--t),border-color var(--t);
+}
+.onion-switch:hover{border-color:#000a;}
+.onion-switch-thumb{
+  position:absolute;left:1px;top:1px;
+  width:14px;height:14px;border-radius:99px;
+  background:#5b6371;
+  transition:left .16s cubic-bezier(.18,.9,.26,1.1),background-color var(--t);
+  box-shadow:0 1px 3px #0009;
+}
+.onion-switch.on{background:var(--accent);border-color:#0008;}
+.onion-switch.on .onion-switch-thumb{left:17px;background:#fff;}
+
+/* Frame-stack preview — the "physical" metaphor of onion-skinning */
+.onion-stack-wrap{
+  display:grid;grid-template-columns:48px 1fr 48px;
+  align-items:center;gap:10px;
+  margin:2px 0 11px;
+}
+.onion-stack-label{
+  font-family:"JetBrains Mono",monospace;
+  font-size:10px;color:var(--text-dim);
+}
+.onion-stack-label.left{text-align:right;}
+.onion-stack-label.right{text-align:left;}
+.onion-stack{
+  display:flex;align-items:flex-end;justify-content:center;gap:3px;
+  height:26px;min-height:26px;
+}
+.onion-stack-f{
+  display:block;width:9px;height:17px;
+  border-radius:2px;
+  border:1px solid #00000060;
+  background:#444;
+  transition:opacity .12s ease,background-color .12s ease;
+}
+.onion-stack-f.current{
+  height:24px;width:13px;
+  background:var(--cream);
+  border-color:#0008;
+  box-shadow:0 0 0 1px #ffffff20,0 1px 2px #0008;
+  opacity:1;
+}
+
+/* Rows */
+.onion-row{
+  display:grid;grid-template-columns:60px 1fr auto;
+  align-items:center;gap:10px;
+  padding:6px 0;
+}
+.onion-row + .onion-row{border-top:1px solid #ffffff08;}
+.onion-row-lbl{
+  font-family:"Space Grotesk","Segoe UI",system-ui,sans-serif;
+  font-weight:700;font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--text-dim);
+}
+
+/* Stepper */
+.onion-stepper{
+  display:flex;align-items:center;
+  background:#13161b;border:1px solid #00000080;border-radius:5px;
+  padding:1px;
+  box-shadow:inset 0 1px 0 #ffffff06;
+}
+.onion-step{
+  background:transparent;border:none;color:var(--text);
+  width:22px;height:22px;font-size:14px;line-height:1;
+  border-radius:3px;
+  transition:background-color var(--t),color var(--t);
+}
+.onion-step:hover{background:var(--panel3);color:var(--cream);}
+.onion-step:active{transform:translateY(1px);}
+.onion-step-val{
+  flex:1;text-align:center;
+  font-family:"JetBrains Mono",monospace;
+  font-size:12px;color:var(--cream);
+  min-width:24px;
+}
+.mono{font-family:"JetBrains Mono",monospace;}
+
+/* Swatch */
+.onion-swatch{
+  position:relative;display:block;cursor:pointer;
+  width:26px;height:22px;
+}
+.onion-swatch-chip{
+  position:absolute;inset:0;
+  border-radius:4px;
+  border:1px solid #00000080;
+  box-shadow:inset 0 1px 0 #ffffff14,0 1px 2px #0008;
+  transition:transform var(--t),box-shadow var(--t);
+}
+.onion-swatch:hover .onion-swatch-chip{transform:scale(1.06);box-shadow:inset 0 1px 0 #ffffff20,0 2px 6px #000a;}
+.onion-swatch input{
+  position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer;
+}
+
+/* Strength slider */
+.onion-row-fade{grid-template-columns:60px 1fr 38px;}
+.onion-fade{
+  -webkit-appearance:none;appearance:none;
+  width:100%;height:4px;
+  background:linear-gradient(90deg,#0a0c0f 0%,var(--accent-lo) 100%);
+  border-radius:99px;outline:none;
+}
+.onion-fade::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;
+  width:14px;height:14px;border-radius:99px;
+  background:#fff;border:1px solid #00000080;
+  box-shadow:0 1px 3px #000a;cursor:pointer;
+}
+.onion-fade::-moz-range-thumb{
+  width:14px;height:14px;border-radius:99px;
+  background:#fff;border:1px solid #00000080;
+  box-shadow:0 1px 3px #000a;cursor:pointer;
+}
+.onion-fade-val{
+  font-size:10px;color:var(--text-dim);text-align:right;
+}
 
 /* ---------- Sidebar ---------- */
 #sidebar-resizer{
@@ -328,13 +773,30 @@ input[type=range]::-webkit-slider-thumb:active{
 .layer-item{
   display:flex;align-items:center;gap:5px;
   background:var(--panel2);border:1px solid #0005;border-radius:4px;
-  padding:4px 5px;margin-bottom:4px;
+  padding:4px 8px 4px 5px;margin-bottom:4px;
+  overflow:hidden;                       /* clip tags inside the rounded edge */
   transition:background-color var(--t),border-color var(--t),box-shadow var(--t);
 }
+.layer-item .ltype{margin-right:1px;}    /* one-pixel breathing room from the rounded corner */
 .layer-item:hover{background:var(--panel3);}
 .layer-item.sel{
   background:var(--panel3);border-color:var(--accent);
   box-shadow:inset 2px 0 0 var(--accent);
+}
+/* Multi-selection cue — tinted bg + accent rail on every member of the
+   set, with a stronger "primary in set" variant for the active layer so
+   the active row reads as part of the group rather than the lone
+   single-selected gray block. */
+.layer-item.multi-sel{
+  background:#4a9fd418;
+  border-color:#4a9fd455;
+  box-shadow:inset 2px 0 0 var(--accent);
+}
+.layer-item.multi-sel.primary-in-set,
+.layer-item.sel.multi-sel{
+  background:#4a9fd230;
+  border-color:var(--accent);
+  box-shadow:inset 3px 0 0 var(--accent),0 0 0 1px var(--accent-glow);
 }
 .layer-item .lname{
   flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
@@ -418,12 +880,79 @@ input[type=range]::-webkit-slider-thumb:active{
   font-size:10px;text-transform:uppercase;letter-spacing:.5px;
 }
 .tl-names-list{flex:1;overflow:hidden;}
+.tl-names-resizer{
+  width:5px;flex:0 0 5px;
+  background:var(--panel2);
+  border-right:1px solid var(--edge);
+  cursor:ew-resize;touch-action:none;position:relative;
+  transition:background-color var(--t);
+}
+.tl-names-resizer::before{
+  content:"";position:absolute;inset:0 -5px;z-index:1;
+}
+.tl-names-resizer:hover,.tl-names-resizer.dragging{background:var(--accent);}
 .tl-grid-wrap{flex:1;overflow:auto;position:relative;}
 .tl-name-row{
   height:26px;display:flex;align-items:center;gap:5px;padding:0 6px;
   border-bottom:1px solid var(--line);
 }
 .tl-name-row.sel{background:var(--panel3);}
+.tl-name-row.multi-sel{
+  background:#4a9fd418;
+  box-shadow:inset 2px 0 0 var(--accent);
+}
+.tl-name-row.multi-sel.primary-in-set,
+.tl-name-row.sel.multi-sel{
+  background:#4a9fd230;
+  box-shadow:inset 3px 0 0 var(--accent);
+}
+.tl-name-row.is-group{
+  background:#c8a04a14;
+  font-weight:600;letter-spacing:.02em;
+}
+.tl-name-row.is-group.sel{background:#c8a04a26;}
+.tl-chev,.layer-chev{
+  width:16px;height:18px;padding:0;
+  background:transparent;border:none;color:var(--text-dim);
+  display:flex;align-items:center;justify-content:center;
+  transition:transform .15s ease,color var(--t);
+  cursor:pointer;
+}
+.tl-chev svg,.layer-chev svg{width:10px;height:10px;}
+.tl-chev:hover,.layer-chev:hover{color:var(--text);}
+.tl-chev.open,.layer-chev.open{transform:rotate(90deg);}
+.tl-chev-spacer{width:16px;height:18px;flex:0 0 16px;}
+.layer-item.is-group{
+  background:#c8a04a14;
+}
+.layer-item.is-group.sel{background:#c8a04a2c;}
+.layer-thumb-group{
+  width:30px;height:22px;flex:0 0 30px;
+  display:flex;align-items:center;justify-content:center;
+  border-radius:2px;color:#000a;
+  background:#c8a04a !important;
+  background-image:none !important;
+  box-shadow:inset 0 1px 0 #ffffff20,0 1px 1px #0006;
+  border:1px solid var(--edge);
+}
+.layer-thumb-group svg{width:14px;height:14px;}
+/* Shift-hover preview — striped accent-tint indicating the would-be
+   shift-click range. Stronger emphasis on the hovered endpoint. */
+.layer-item.range-preview,
+.tl-name-row.range-preview{
+  background:repeating-linear-gradient(
+    -45deg,
+    #4a9fd414 0px,
+    #4a9fd414 6px,
+    #4a9fd422 6px,
+    #4a9fd422 12px
+  );
+}
+.layer-item.range-preview-end,
+.tl-name-row.range-preview-end{
+  box-shadow:inset 2px 0 0 var(--accent),inset 0 0 0 1px #4a9fd455;
+  background:#4a9fd428;
+}
 .tl-name-row .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .tl-name-row .dot{width:8px;height:8px;border-radius:50%;}
 

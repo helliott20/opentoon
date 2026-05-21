@@ -68,6 +68,81 @@
     font-family:"Space Grotesk","Segoe UI",system-ui,sans-serif;
     font-weight:700;font-size:18px;color:#7d838f;letter-spacing:-.01em;
   }
+  /* ---- selection chip inside the top toolbar (mirrors main viewbar) ----
+     The chip itself lives in #bar so it doesn't cover the canvas. On
+     hover (or tap on tablets), a popover descends below it with the
+     Free Transform / Reset actions. */
+  .pen-actions{
+    position:relative;
+    display:flex;align-items:center;gap:6px;
+    padding:2px 9px;height:30px;
+    background:#272b32;border:1px solid #00000055;border-radius:99px;
+    color:#7d838f;font-size:11px;
+    transition:background-color .12s ease,color .12s ease,border-color .12s ease;
+    cursor:default;
+    user-select:none;
+  }
+  .pen-actions.hidden{display:none;}
+  .pen-actions:hover,.pen-actions:focus-within,.pen-actions.open{
+    background:#343942;color:#f7f1e5;
+  }
+  .pen-actions::before{
+    /* invisible hit zone so the popover stays open while the cursor
+       drifts between chip and popover below */
+    content:"";position:absolute;left:-10px;right:-10px;top:-6px;bottom:-16px;
+  }
+  .pen-actions .pa-pin{display:flex;align-items:center;gap:6px;}
+  .pen-actions .pa-pin-icon{display:inline-flex;align-items:center;opacity:.75;}
+  .pen-actions .pa-pin-icon svg{width:12px;height:12px;}
+  .pen-actions .pa-dot{
+    display:inline-block;width:8px;height:8px;border-radius:50%;
+    box-shadow:0 0 0 1px #0008,inset 0 1px 0 #ffffff20;
+  }
+  .pen-actions .pa-chip-name{
+    font-family:"Space Grotesk","Segoe UI",system-ui,sans-serif;
+    font-weight:600;max-width:140px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  /* popover descends BELOW the chip (toolbar is at top of window) */
+  .pen-actions .pa-popover{
+    position:absolute;left:50%;top:calc(100% + 10px);
+    transform:translate(-50%,-6px);
+    display:flex;align-items:center;gap:6px;
+    background:linear-gradient(180deg,#262a32f2 0%,#1c1f25f2 100%);
+    border:1px solid #08090c;border-radius:999px;
+    padding:5px 7px;color:#cdd2d9;
+    box-shadow:0 10px 26px #000b,0 2px 6px #0008,inset 0 1px 0 #ffffff0d;
+    z-index:6;opacity:0;pointer-events:none;
+    transition:opacity .14s ease, transform .2s cubic-bezier(.18,.9,.26,1.1);
+    backdrop-filter:blur(6px);
+  }
+  .pen-actions:hover .pa-popover,
+  .pen-actions:focus-within .pa-popover,
+  .pen-actions.open .pa-popover{
+    opacity:1;transform:translate(-50%,0);pointer-events:auto;
+  }
+  .pen-actions .pa-popover::after{
+    /* caret pointing up at the chip */
+    content:"";position:absolute;left:50%;top:-5px;
+    width:8px;height:8px;background:#262a32;
+    border-left:1px solid #08090c;border-top:1px solid #08090c;
+    transform:translateX(-50%) rotate(45deg);
+  }
+  .pen-actions .pa-btn{
+    display:inline-flex;align-items:center;gap:5px;
+    background:transparent;border:1px solid transparent;color:#cdd2d9;
+    padding:4px 10px;border-radius:99px;font-size:11.5px;font-weight:600;
+    cursor:pointer;white-space:nowrap;
+    transition:background-color .12s ease,color .12s ease;
+  }
+  .pen-actions .pa-btn svg{width:14px;height:14px;}
+  .pen-actions .pa-btn:hover{background:#ffffff10;color:#f7f1e5;}
+  .pen-actions .pa-primary{
+    background:#4ba8e0;color:#fff;border-color:#0008;
+    box-shadow:0 1px 0 #ffffff20 inset, 0 1px 3px #0007;
+  }
+  .pen-actions .pa-primary:hover{background:#5dbbf0;color:#fff;}
+  .pen-actions .pa-reset:hover{color:#dd5038;}
 </style>
 </head>
 <body>

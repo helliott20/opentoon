@@ -191,7 +191,14 @@ window.OT = window.OT || {};
       this.exposure = [];        // frameIndex -> cel num (0 = empty)
       this.nextNum = 1;
       this.transform = { keyframes: [] };  // {frame,x,y,sx,sy,rot}
+      // Folder support: parentId points to the containing 'group' layer (or
+      // null = top level). Group layers themselves carry _collapsed for the
+      // chevron toggle. Groups have no cels/exposure — they're purely
+      // organisational nodes in the layer stack.
+      this.parentId = null;
+      this._collapsed = false;
     }
+    isGroup() { return this.type === 'group'; }
     // Interpolated layer transform at a frame (cut-out / peg animation).
     transformAt(f) {
       const ID = { x: 0, y: 0, sx: 1, sy: 1, rot: 0 };

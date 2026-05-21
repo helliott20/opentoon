@@ -50,14 +50,21 @@
       if (app.timelineHeight) this.setHeight(app.timelineHeight);
     }
 
-    /* rows are displayed top = front-most layer */
+    /* rows are displayed top = front-most layer. With folder support,
+       a row only exists for layers that aren't hidden under a collapsed
+       group — see app.visibleLayers(). */
+    _visRows() {
+      // Recomputed on each call; cheap O(N). Avoids stale caches when
+      // a group is expanded/collapsed mid-render.
+      return this.app.visibleLayers();
+    }
     rowToLayer(r) {
-      const L = this.app.project.layers;
-      return L[L.length - 1 - r];
+      const V = this._visRows();
+      return V[V.length - 1 - r];
     }
     layerToRow(layer) {
-      const L = this.app.project.layers;
-      return L.length - 1 - L.indexOf(layer);
+      const V = this._visRows();
+      return V.length - 1 - V.indexOf(layer);
     }
 
     _btn(title, icon, fn) {
@@ -117,10 +124,16 @@
       tb.appendChild(this._btn('Add 12 frames', ICON.addframe, () => {
         app.project.frameCount += 12; app.emit('projectchange');
       }));
-      this.onionBtn = this._btn('Onion skin', ICON.onion, () => {
+      this.onionBtn = this._btn('Onion skin  (right-click for settings)', ICON.onion, () => {
         app.onion.on = !app.onion.on;
         this.onionBtn.classList.toggle('on', app.onion.on);
         app.emit('onionchange'); app.emit('render');
+      });
+      this.onionBtn.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (app.ui && typeof app.ui._toggleOnionPop === 'function') {
+          app.ui._toggleOnionPop(this.onionBtn);
+        }
       });
       tb.appendChild(this.onionBtn);
       this.thumbBtn = this._btn('Show drawing thumbnails', ICON.thumbs, () => {
@@ -139,13 +152,22 @@
       const body = U.el('div', { class: 'tl-body' });
       this.root.appendChild(body);
 
-      const names = U.el('div', { class: 'tl-names' });
-      names.appendChild(U.el('div', { class: 'tl-names-head' }, ['Layers']));
+      this.names = U.el('div', { class: 'tl-names' });
+      this.names.appendChild(U.el('div', { class: 'tl-names-head' }, ['Layers']));
       this.namesList = U.el('div', { class: 'tl-names-list' });
       this.namesInner = U.el('div');
       this.namesList.appendChild(this.namesInner);
-      names.appendChild(this.namesList);
-      body.appendChild(names);
+      this.names.appendChild(this.namesList);
+      body.appendChild(this.names);
+      this._applyNamesWidth(this.app.tlNamesWidth || 150);
+
+      // Drag-handle between the layer-names column and the grid. Lets the
+      // user widen the column when layer names get long.
+      this.namesResizer = U.el('div', {
+        class: 'tl-names-resizer', title: 'Drag to resize the layer-names column'
+      });
+      body.appendChild(this.namesResizer);
+      this._installNamesResizer();
 
       this.gridWrap = U.el('div', { class: 'tl-grid-wrap' });
       this.grid = U.el('canvas');
@@ -156,6 +178,7 @@
       this.gridWrap.addEventListener('scroll', () => {
         this.namesInner.style.transform = 'translateY(' + (-this.gridWrap.scrollTop) + 'px)';
       });
+      this._installShiftHoverPreview(this.namesInner, '.tl-name-row');
       this._installGridInput();
     }
 
@@ -546,24 +569,62 @@
     }
 
     _renderNames() {
-      const app = this.app, L = app.project.layers;
+      const app = this.app;
+      const L = app.visibleLayers();
+      const selSet = app.selectedLayers;
+      const active = app.activeLayer();
       this.namesInner.innerHTML = '';
       for (let r = 0; r < L.length; r++) {
         const layer = this.rowToLayer(r);
+        const isActive = layer === active;
+        const isGroup = layer.type === 'group';
+        const inSet = selSet.has(layer) || isActive;
+        // When the multi-set has more than one member, every selected row
+        // gets the .multi-sel cue (so the active layer doesn't visually
+        // disappear from the set). The active layer additionally gets .sel
+        // and the .primary-in-set variant.
+        const isMulti = inSet && selSet.size > 1;
         const row = U.el('div', {
-          class: 'tl-name-row' + (layer === app.activeLayer() ? ' sel' : '')
+          class: 'tl-name-row'
+            + (isActive ? ' sel' : '')
+            + (isMulti ? ' multi-sel' : '')
+            + (isMulti && isActive ? ' primary-in-set' : '')
+            + (isGroup ? ' is-group' : '')
         });
         row.style.height = this.rowH + 'px';
+        const depth = app.layerDepth(layer);
+        if (depth) row.style.paddingLeft = (6 + depth * 12) + 'px';
+        // Eye / lock batch over the multi-set when this row is part of it.
+        const batch = (selSet.size > 1 && selSet.has(layer)) ? Array.from(selSet) : [layer];
+        // Folder chevron — toggles collapsed state. Drawing layers get a
+        // tiny spacer of equal width so the dot/name still align.
+        if (isGroup) {
+          const chev = U.el('button', {
+            class: 'tl-chev' + (layer._collapsed ? '' : ' open'),
+            title: layer._collapsed ? 'Expand folder' : 'Collapse folder',
+            html: U.svg('<path d="M9 6l6 6-6 6"/>')
+          });
+          chev.addEventListener('click', ev => {
+            ev.stopPropagation();
+            app.toggleGroupCollapsed(layer);
+            app.emit('render');
+          });
+          row.appendChild(chev);
+        } else {
+          row.appendChild(U.el('div', { class: 'tl-chev-spacer' }));
+        }
         row.appendChild(U.el('div', { class: 'dot', style: { background: layer.color } }));
         row.appendChild(U.el('div', { class: 'nm', text: layer.name }));
-        // Visibility (eye) and lock toggles -- dim, 12 px inline SVGs that
-        // don't trigger the row's selectLayer handler.
         row.appendChild(this._layerIconBtn(
           layer.visible ? 'eye' : 'eyeoff',
           layer.visible ? 'Hide layer' : 'Show layer',
           ev => {
             ev.stopPropagation();
-            layer.visible = !layer.visible;
+            const v = !layer.visible;
+            for (const l of batch) {
+              if (l.type === 'group') app.setGroupVisible(l, v);
+              else l.visible = v;
+            }
             app.emit('layerschange');
             app.emit('render');
           }
@@ -573,7 +634,11 @@
           layer.locked ? 'Unlock layer' : 'Lock layer',
           ev => {
             ev.stopPropagation();
-            layer.locked = !layer.locked;
+            const v = !layer.locked;
+            for (const l of batch) {
+              if (l.type === 'group') app.setGroupLocked(l, v);
+              else l.locked = v;
+            }
             app.emit('layerschange');
           }
         ));
@@ -581,7 +646,11 @@
         row.setAttribute('draggable', 'true');
         row.dataset.layerId = layer.id;
         this._installNameDnD(row, layer);
-        row.addEventListener('click', () => app.selectLayer(layer));
+        row.addEventListener('click', (ev) => {
+          if (ev.ctrlKey || ev.metaKey) app.toggleLayerSelection(layer);
+          else if (ev.shiftKey) app.selectLayerRange(app.activeLayer(), layer);
+          else app.selectLayer(layer);
+        });
         row.addEventListener('contextmenu', ev => {
           ev.preventDefault();
           this._nameContext(ev, layer);
@@ -594,20 +663,46 @@
     // ui.js but is tailored for the timeline (rename, hide/show, lock/unlock).
     _nameContext(ev, layer) {
       const app = this.app;
-      app.ui.contextMenu(ev.clientX, ev.clientY, [
-        { label: 'Rename', fn: () => this._renameLayer(layer) },
-        { label: 'Duplicate layer', fn: () => app.duplicateLayer(layer) },
-        { label: 'Delete layer', fn: () => app.deleteLayer(layer) },
-        { sep: 1 },
-        { label: layer.visible ? 'Hide' : 'Show', fn: () => {
-            layer.visible = !layer.visible;
-            app.emit('layerschange'); app.emit('render');
-          } },
-        { label: layer.locked ? 'Unlock' : 'Lock', fn: () => {
-            layer.locked = !layer.locked;
-            app.emit('layerschange');
-          } }
-      ]);
+      const isGroup = layer.type === 'group';
+      const multi = app.selectedLayers && app.selectedLayers.size > 1;
+      const items = [];
+      items.push({ label: 'Rename', fn: () => this._renameLayer(layer) });
+      if (!isGroup) items.push({ label: 'Duplicate layer', fn: () => app.duplicateLayer(layer) });
+      items.push({
+        label: multi && app.selectedLayers.has(layer) ? 'Delete selected layers' : 'Delete layer',
+        fn: () => { if (multi && app.selectedLayers.has(layer)) app.deleteSelectedLayers();
+                    else if (isGroup) app.ungroupLayer(layer);
+                    else app.deleteLayer(layer); }
+      });
+      items.push({ sep: 1 });
+      items.push({ label: layer.visible ? 'Hide' : 'Show', fn: () => {
+        if (isGroup) app.setGroupVisible(layer, !layer.visible);
+        else { layer.visible = !layer.visible; app.emit('layerschange'); app.emit('render'); }
+      }});
+      items.push({ label: layer.locked ? 'Unlock' : 'Lock', fn: () => {
+        if (isGroup) app.setGroupLocked(layer, !layer.locked);
+        else { layer.locked = !layer.locked; app.emit('layerschange'); }
+      }});
+      items.push({ sep: 1 });
+      if (multi && app.selectedLayers.has(layer)) {
+        items.push({ label: 'Group selected (Ctrl+G)', fn: () => app.groupSelectedLayers() });
+      } else if (!isGroup) {
+        items.push({ label: 'New folder', fn: () => app.groupSelectedLayers() });
+      }
+      if (isGroup) {
+        items.push({ label: layer._collapsed ? 'Expand folder' : 'Collapse folder',
+                     fn: () => { app.toggleGroupCollapsed(layer); app.emit('render'); } });
+        items.push({ label: 'Ungroup', fn: () => app.ungroupLayer(layer) });
+      }
+      items.push({ sep: 1 });
+      items.push({
+        label: 'Free transform (T)' + (isGroup ? ' — whole folder' : ''),
+        fn: () => { app.selectLayer(layer); app.freeTransform(); }
+      });
+      if (layer.transform && layer.transform.keyframes && layer.transform.keyframes.length) {
+        items.push({ label: 'Reset transform', fn: () => app.resetLayerTransform(layer) });
+      }
+      app.ui.contextMenu(ev.clientX, ev.clientY, items);
     }
 
     // Inline rename for a names-row layer. Replaces the row's name <div> with
@@ -663,6 +758,96 @@
       input.addEventListener('pointerdown', e => e.stopPropagation());
     }
 
+    _applyNamesWidth(w) {
+      w = Math.max(120, Math.min(420, Math.round(w)));
+      if (!this.names) return;
+      this.names.style.flex = '0 0 ' + w + 'px';
+      this.names.style.width = w + 'px';
+      this.app.tlNamesWidth = w;
+    }
+    _installNamesResizer() {
+      const h = this.namesResizer;
+      if (!h) return;
+      let startX = 0, startW = 0, dragging = false;
+      h.addEventListener('pointerdown', (e) => {
+        dragging = true; startX = e.clientX;
+        startW = this.names.getBoundingClientRect().width;
+        try { h.setPointerCapture(e.pointerId); } catch (_) {}
+        h.classList.add('dragging');
+        e.preventDefault();
+      });
+      h.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        this._applyNamesWidth(startW + (e.clientX - startX));
+      });
+      const end = (e) => {
+        if (!dragging) return;
+        dragging = false;
+        h.classList.remove('dragging');
+        try { h.releasePointerCapture(e.pointerId); } catch (_) {}
+        if (typeof this.app._savePrefs === 'function') this.app._savePrefs();
+      };
+      h.addEventListener('pointerup', end);
+      h.addEventListener('pointercancel', end);
+      h.addEventListener('dblclick', () => this._applyNamesWidth(150));
+    }
+
+    /* While Shift is held, hovering a row in `container` lights up every
+       row between the current active layer and the hovered row so the user
+       can see exactly what a shift-click would select. The listener is
+       installed once on the container and uses event delegation — rows
+       themselves get rebuilt on every render, but the container is stable.
+       Cleared on Shift release, container leave, or selection change. */
+    _installShiftHoverPreview(container, rowSel) {
+      const app = this.app;
+      let shiftDown = false;
+      let hoveredLayer = null;
+
+      const allRows = () => container.querySelectorAll(rowSel);
+      const clear = () => allRows().forEach(r => r.classList.remove('range-preview', 'range-preview-end'));
+      const apply = () => {
+        clear();
+        if (!shiftDown || !hoveredLayer) return;
+        const anchor = app.activeLayer();
+        if (!anchor || anchor === hoveredLayer) return;
+        const L = app.project.layers;
+        const i0 = L.indexOf(anchor), i1 = L.indexOf(hoveredLayer);
+        if (i0 < 0 || i1 < 0) return;
+        const lo = Math.min(i0, i1), hi = Math.max(i0, i1);
+        for (const r of allRows()) {
+          const id = r.dataset.layerId;
+          if (!id) continue;
+          const idx = L.findIndex(l => l.id === id);
+          if (idx >= lo && idx <= hi) r.classList.add('range-preview');
+          if (idx === i1) r.classList.add('range-preview-end');
+        }
+      };
+
+      container.addEventListener('mousemove', (e) => {
+        const row = e.target.closest(rowSel);
+        if (!row) {
+          if (hoveredLayer) { hoveredLayer = null; apply(); }
+          return;
+        }
+        const id = row.dataset.layerId;
+        const ly = id ? app.project.layers.find(l => l.id === id) : null;
+        if (ly === hoveredLayer) return;
+        hoveredLayer = ly;
+        apply();
+      });
+      container.addEventListener('mouseleave', () => {
+        if (hoveredLayer) { hoveredLayer = null; apply(); }
+      });
+      const keyCheck = (e) => {
+        const ns = !!e.shiftKey;
+        if (ns !== shiftDown) { shiftDown = ns; apply(); }
+      };
+      window.addEventListener('keydown', keyCheck);
+      window.addEventListener('keyup', keyCheck);
+      window.addEventListener('blur', () => { if (shiftDown) { shiftDown = false; clear(); } });
+      app.on && app.on('layerselect', () => { if (shiftDown) apply(); else clear(); });
+    }
+
     /* Drag-to-reorder for the timeline names column. Mirrors the panel's
        behaviour in ui.js. Rows are top = front-most layer. */
     _installNameDnD(row, layer) {
@@ -677,10 +862,35 @@
       row.addEventListener('dragstart', e => {
         e.dataTransfer.effectAllowed = 'move';
         try { e.dataTransfer.setData('text/plain', layer.id); } catch (_) {}
-        row.classList.add('dragging');
+        // When the dragged layer is part of a multi-selection, dim every
+        // selected row + any descendants of selected groups so the user
+        // sees what's actually moving.
+        const sel = app.selectedLayers;
+        const parent = row.parentNode;
+        if (parent && sel && sel.size > 1 && sel.has(layer)) {
+          const moving = new Set();
+          for (const l of sel) {
+            moving.add(l.id);
+            if (l.type === 'group') for (const d of app.layerDescendants(l)) moving.add(d.id);
+          }
+          parent.querySelectorAll('.' + cls).forEach(n => {
+            if (moving.has(n.dataset.layerId)) n.classList.add('dragging');
+          });
+        } else if (layer.type === 'group') {
+          // Drag of a folder pulls its descendants visually too.
+          const moving = new Set([layer.id]);
+          for (const d of app.layerDescendants(layer)) moving.add(d.id);
+          if (parent) parent.querySelectorAll('.' + cls).forEach(n => {
+            if (moving.has(n.dataset.layerId)) n.classList.add('dragging');
+          });
+        } else {
+          row.classList.add('dragging');
+        }
       });
       row.addEventListener('dragend', () => {
-        row.classList.remove('dragging');
+        const parent = row.parentNode;
+        if (parent) parent.querySelectorAll('.' + cls + '.dragging')
+          .forEach(n => n.classList.remove('dragging'));
         clearMarks();
       });
       row.addEventListener('dragover', e => {
@@ -706,15 +916,46 @@
         if (!src) return;
         const r = row.getBoundingClientRect();
         const above = e.clientY < r.top + r.height / 2;
+        // Block we're moving:
+        //   • if the source is part of a >1 multi-selection, every selected
+        //     layer comes along (preserves relative project order);
+        //   • any selected group also drags its descendants so folders stay
+        //     contiguous;
+        //   • otherwise it's just the dragged layer (+ descendants if group).
+        const selSet = app.selectedLayers;
+        const seed = (selSet && selSet.size > 1 && selSet.has(src))
+          ? L.filter(l => selSet.has(l))
+          : [src];
+        const expanded = new Set(seed);
+        for (const m of seed) if (m.type === 'group')
+          for (const d of app.layerDescendants(m)) expanded.add(d);
+        const block = L.filter(l => expanded.has(l));   // preserves order
+        if (block.includes(layer)) return;   // dropping onto self / own child
         const srcIdx = L.indexOf(src);
         let tgtIdx = L.indexOf(layer);
         if (srcIdx < 0 || tgtIdx < 0) return;
         let insert = above ? tgtIdx + 1 : tgtIdx;
-        if (srcIdx < insert) insert--;
-        if (insert === srcIdx) return;
+        const blockIdxs = block.map(l => L.indexOf(l)).filter(i => i >= 0).sort((a, b) => a - b);
+        // Account for block members removed from positions before `insert`.
+        const removedBefore = blockIdxs.filter(i => i < insert).length;
+        insert -= removedBefore;
+        if (insert < 0) insert = 0;
+        // Reparent the dragged top-level layers (those in the block whose
+        // own parent isn't also in the block). Rule:
+        //   • drop above a row → become its sibling (target.parentId)
+        //   • drop below a leaf → become its sibling (target.parentId)
+        //   • drop below a folder header → join that folder (target.id)
+        const newParentId = (!above && layer.type === 'group')
+          ? layer.id
+          : (layer.parentId || null);
+        const movingIds = new Set(block.map(l => l.id));
+        const topLevel = block.filter(l => !movingIds.has(l.parentId));
         const apply = () => {
-          L.splice(srcIdx, 1);
-          L.splice(insert, 0, src);
+          const sortedBlock = block.slice().sort((a, b) => L.indexOf(a) - L.indexOf(b));
+          for (let i = L.length - 1; i >= 0; i--) if (block.includes(L[i])) L.splice(i, 1);
+          if (insert > L.length) insert = L.length;
+          L.splice(insert, 0, ...sortedBlock);
+          for (const l of topLevel) l.parentId = newParentId;
         };
         if (typeof app.doStruct === 'function') app.doStruct('Reorder layer', apply);
         else { apply(); app.emit('layerschange'); app.emit('render'); }
@@ -740,7 +981,10 @@
     }
 
     _renderGrid() {
-      const app = this.app, p = app.project, L = p.layers;
+      const app = this.app, p = app.project;
+      // `L` here is the visible-rows list so the grid height + row mapping
+      // stays in sync with the names column when groups are collapsed.
+      const L = app.visibleLayers();
       const cw = this.cellW, rh = this.rowH, hh = this.headerH;
       const audioH = app.audioPeaks ? 38 : 0;
       const w = p.frameCount * cw + this.endPad, h = hh + L.length * rh + audioH;
@@ -768,16 +1012,36 @@
         c.fillStyle = '#54b06a';
         c.fillRect(lo * cw, hh - 4, (hi - lo + 1) * cw, 4);
       }
+      // 2D-animation-style ruler: frame-number labels whose stride is a
+      // divisor of FPS (so sub-second fractions are meaningful), with
+      // second-boundary labels emphasised as the dominant rhythm.
+      const ticks = this._rulerStrides(cw, p.fps, p.frameCount);
+      const labelStride = ticks.label;
+      const tickStride  = ticks.tick;
+      const F = Math.max(1, Math.round(p.fps || 24));
+
       c.font = '10px Segoe UI';
       c.textBaseline = 'middle';
       for (let f = 0; f < p.frameCount; f++) {
         const x = f * cw;
-        if (f % 5 === 0 || f === p.frameCount - 1) {
-          c.strokeStyle = '#0008'; c.lineWidth = 1;
-          c.beginPath(); c.moveTo(x + 0.5, hh - 7); c.lineTo(x + 0.5, hh); c.stroke();
-          c.fillStyle = (f === cf) ? '#4a9fd4' : '#8b919c';
+        const onLabel = (f % labelStride === 0) || f === p.frameCount - 1;
+        const onTick  = !onLabel && tickStride > 0 && (f % tickStride === 0);
+        const onSecond = (f % F === 0);
+        if (onLabel) {
+          // Long-tick + bright label for the seconds; shorter + dimmer for
+          // intermediate frame markers. The current frame still wins colour.
+          c.strokeStyle = onSecond ? '#000c' : '#0007';
+          c.lineWidth = 1;
+          c.beginPath();
+          c.moveTo(x + 0.5, hh - (onSecond ? 11 : 7));
+          c.lineTo(x + 0.5, hh);
+          c.stroke();
+          c.fillStyle = (f === cf) ? '#4a9fd4' : (onSecond ? '#c8ccd3' : '#7a808b');
           c.textAlign = 'left';
           c.fillText(String(f + 1), x + 2, hh / 2);
+        } else if (onTick) {
+          c.strokeStyle = '#00000055'; c.lineWidth = 1;
+          c.beginPath(); c.moveTo(x + 0.5, hh - 4); c.lineTo(x + 0.5, hh); c.stroke();
         }
       }
       // frame-count handle -- drag this to grow / shrink the timeline length
@@ -808,6 +1072,13 @@
         }
         // light table dim
         if (!layer.visible) { c.fillStyle = '#0003'; c.fillRect(0, y, w, rh); }
+        // folder rows show a faint banded tint across the whole row to
+        // signal "this row groups the rows below" — no cel renders.
+        if (layer.type === 'group') {
+          c.fillStyle = this._alpha(layer.color || '#c8a04a', 0.10);
+          c.fillRect(0, y, w, rh);
+          continue;
+        }
         // video layer film strip
         if (layer.type === 'video') {
           const vf = Math.min(layer.videoFrames || p.frameCount, p.frameCount);
@@ -836,21 +1107,15 @@
           const isActive = layer === app.activeLayer();
           const cel = layer.cels[num];
           if (this.showThumbs && cel) {
-            // Render the thumbnail at the project's aspect ratio, left-aligned
-            // in the cel block. The remainder of a held run is filled with the
-            // layer's tint colour so a single drawing held across many frames
-            // reads as "drawing N, held for ..." -- the same shape stretched
-            // horizontally (Harmony / TVPaint style) without distorting the
-            // artwork.
+            // Treat the entire run as ONE continuous mini-canvas: thumb at
+            // the start at native aspect, the held remainder is the same
+            // canvas bg "extending" rather than a coloured stripe. Layer
+            // identity moves entirely to the rounded border colour.
             c.save();
             this._roundRect(c, bx, by, bw, bh, 3);
-            // base fill: the layer tint, so the held area has a clear colour
-            c.fillStyle = this._alpha(layer.color, isActive ? 0.45 : 0.32);
-            c.fill();
             c.clip();
-            // thumb dims: full block height, project aspect ratio, clipped to
-            // the block width when the run is narrower than one frame's worth
-            // of aspect-correct thumb width
+            c.fillStyle = p.bg || '#f4f1ea';
+            c.fillRect(bx, by, bw, bh);
             const thumbW = Math.min(bw, Math.round(bh * p.width / p.height));
             const dpr = Math.min(window.devicePixelRatio || 1, 2);
             const srcW = Math.min(384, Math.max(64, Math.ceil(thumbW * dpr / 64) * 64));
@@ -860,8 +1125,9 @@
             c.imageSmoothingQuality = 'high';
             c.drawImage(th, bx, by, thumbW, bh);
             c.restore();
-            c.lineWidth = 1.5;
-            c.strokeStyle = this._alpha(layer.color, isActive ? 1 : 0.7);
+            // Slim layer-tint border = the only layer-colour cue.
+            c.lineWidth = 1;
+            c.strokeStyle = this._alpha(layer.color, isActive ? 0.9 : 0.5);
             this._roundRect(c, bx, by, bw, bh, 3);
             c.stroke();
           } else {
@@ -885,8 +1151,11 @@
             c.moveTo(hx + 2, by + 3); c.lineTo(hx + 2, by + bh - 3);
             c.stroke();
           }
-          // drawing number
-          if (bw > 16 && !this.showThumbs) {
+          // drawing number — only annotated when thumbnails are on (then
+          // the small "N" sits in the run's leading corner as a key-label).
+          // With thumbs off, the coloured bar carries the visual info and the
+          // ruler above already supplies the frame index.
+          if (bw > 16 && this.showThumbs) {
             c.fillStyle = '#0009';
             c.font = '9px Segoe UI'; c.textAlign = 'left';
             c.fillText(String(num), f * cw + cw / 2 + 5, y + rh / 2);
@@ -937,9 +1206,11 @@
         c.textAlign = 'left'; c.textBaseline = 'middle';
         c.fillText('♪ ' + (app.project.audio ? app.project.audio.name : 'audio'), 5, ay + 9);
       }
-      // 5-frame gridlines
+      // body gridlines — same FPS-aware stride as the ruler so the vertical
+      // guides under each row align with labels above.
+      const grid = (tickStride > 0 ? tickStride : labelStride);
       c.strokeStyle = '#ffffff0a';
-      for (let f = 5; f < p.frameCount; f += 5) {
+      for (let f = grid; f < p.frameCount; f += grid) {
         c.beginPath(); c.moveTo(f * cw + 0.5, hh); c.lineTo(f * cw + 0.5, h); c.stroke();
       }
       // playhead line
@@ -947,6 +1218,46 @@
       c.beginPath();
       c.moveTo(cf * cw + cw / 2, hh); c.lineTo(cf * cw + cw / 2, h);
       c.stroke();
+    }
+
+    // Pick label + minor-tick strides for the timeline ruler. The strategy
+    // is built for the way 2D animators read a timeline — frame numbers
+    // (not timecode) with rhythmically-meaningful spacings:
+    //   • Candidate strides are *divisors of FPS* so every label lands on
+    //     a clean sub-second fraction (¼ s, ⅓ s, ½ s, 1 s) — unlike the
+    //     fixed 5-frame stride Toon Boom uses, which doesn't align to
+    //     seconds on 24 fps (5/24 ≈ 0.208 s of meaningless drift).
+    //   • At low zoom the candidates extend to whole-second multiples.
+    //   • Second-boundary labels are visually emphasised at draw time so
+    //     the eye picks up "1 s, 2 s, 3 s …" while still seeing the finer
+    //     rhythm in between.
+    _rulerStrides(cw, fps, frameCount) {
+      const F = Math.max(1, Math.round(fps || 24));
+      const divisors = [];
+      for (let i = 1; i <= F; i++) if (F % i === 0) divisors.push(i);
+      // Append multi-second strides for the zoomed-out case.
+      const cand = [...divisors, F * 2, F * 3, F * 5, F * 10, F * 15, F * 30, F * 60];
+      const minLabelGap = 48; // a touch tighter than 52 — keeps rhythm visible
+      let label = cand[cand.length - 1];
+      for (const s of cand) { if (s * cw >= minLabelGap) { label = s; break; } }
+      if (label > frameCount) {
+        const fit = cand.slice().reverse().find(s => s <= frameCount);
+        label = Math.max(1, fit || 1);
+      }
+      // Subtick: pick the largest divisor of label that's <label and still
+      // legible. Falling back to a near-half if no clean divisor fits.
+      let tick = 0;
+      const labelDivs = [];
+      for (let i = 1; i < label; i++) if (label % i === 0) labelDivs.push(i);
+      labelDivs.reverse(); // largest first
+      for (const d of labelDivs) {
+        if (d * cw >= 8) { tick = d; break; }
+      }
+      if (!tick) {
+        const half = Math.max(1, Math.round(label / 2));
+        if (half < label && half * cw >= 8) tick = half;
+      }
+      return { label, tick };
     }
 
     // hh:mm:ss:ff zero-padded SMPTE timecode for the current frame.

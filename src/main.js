@@ -90,7 +90,7 @@
   const KEY_COMMANDS = [
     { id: 'tool-select', label: 'Select tool', cat: 'Tools', def: 'v', noRepeat: 1, run: a => a.tools.select('select') },
     { id: 'tool-lasso', label: 'Lasso tool', cat: 'Tools', def: 'l', noRepeat: 1, run: a => a.tools.select('lasso') },
-    { id: 'tool-transform', label: 'Transform tool', cat: 'Tools', def: 'm', noRepeat: 1, run: a => a.tools.select('transform') },
+    { id: 'tool-transform', label: 'Free transform', cat: 'Tools', def: 't', noRepeat: 1, run: a => a.freeTransform() },
     { id: 'tool-brush', label: 'Brush tool', cat: 'Tools', def: 'b', noRepeat: 1, run: a => a.tools.select('brush') },
     { id: 'tool-pencil', label: 'Pencil tool', cat: 'Tools', def: 'p', noRepeat: 1, run: a => a.tools.select('pencil') },
     { id: 'tool-eraser', label: 'Eraser tool', cat: 'Tools', def: 'e', noRepeat: 1, run: a => a.tools.select('eraser') },
@@ -113,6 +113,12 @@
     { id: 'frame-extend', label: 'Extend exposure', cat: 'Animation', def: 'shift+f', noRepeat: 1, run: a => a.extendExposure() },
     { id: 'frame-duplicate', label: 'Duplicate drawing', cat: 'Animation', def: 'ctrl+d', prevent: 1, noRepeat: 1, run: a => a.duplicateDrawing() },
     { id: 'layer-new', label: 'New layer', cat: 'Animation', def: 'ctrl+shift+n', prevent: 1, noRepeat: 1, run: a => a.addLayer() },
+    { id: 'layer-group', label: 'Group selected layers', cat: 'Animation', def: 'ctrl+g', prevent: 1, noRepeat: 1, run: a => a.groupSelectedLayers() },
+    { id: 'layer-ungroup', label: 'Ungroup folder', cat: 'Animation', def: 'ctrl+shift+g', prevent: 1, noRepeat: 1, run: a => {
+        const lay = a.activeLayer();
+        if (lay && lay.type === 'group') a.ungroupLayer(lay);
+        else for (const l of a.selectedLayers) if (l.type === 'group') { a.ungroupLayer(l); break; }
+      } },
     { id: 'clear', label: 'Clear drawing', cat: 'Animation', def: 'delete', prevent: 1, run: a => {
         // When multiple layers are selected in the panel, Del deletes them all
         // rather than clearing the current drawing.
@@ -151,6 +157,7 @@
       this.recentFiles = [];     // recently opened / saved .otoon paths (desktop)
       this.sidebarWidth = 0;     // user-dragged sidebar width (0 = CSS default)
       this.timelineHeight = 0;   // user-dragged timeline height (0 = CSS default)
+      this.tlNamesWidth = 0;     // user-dragged width of the timeline Layers column
       this.playIn = null;
       this.playOut = null;
       this.audioBuffer = null;   // decoded AudioBuffer (runtime)
@@ -159,12 +166,34 @@
       this._activeLayer = this.project.layers[this.project.layers.length - 1];
 
       this.settings = {
-        brushSize: 8, brushOpacity: 1, smoothing: 0.5,
-        eraserSize: 26, eraserOpacity: 1,
-        pencilSize: 3, pencilOpacity: 1,
+        // Defaults tuned to 2D-animation cleanup-line conventions.
+        // Brush (sketch / contour, variable width) ~6 px — Toon Boom default
+        // range. Pencil (centerline, uniform density for cleanup) ~2 px —
+        // CSP G-pen default. Eraser sized to a thumb-tip touch-up at
+        // 1920 px canvas zoom.
+        brushSize: 6, brushOpacity: 1, smoothing: 0.5,
+        eraserSize: 24, eraserOpacity: 1,
+        pencilSize: 2, pencilOpacity: 1,
         fillTolerance: 36, fillContiguous: true, fillGap: 6,
         snapDist: 14,
-        shapeFill: false, shapeStroke: true, shapeStrokeWidth: 6
+        shapeFill: false, shapeStroke: true, shapeStrokeWidth: 6,
+        // Ink-pen dynamics: when on, the stroke thins as the pen moves faster
+        // (and thickens when slow), the way a real dip pen behaves. Off by
+        // default — most users want pressure-only control.
+        inkDynamics: false,
+        // Procreate-style "QuickShape": draw a shape, hold the pen still at
+        // the end of the stroke, and the freehand path snaps to a recognised
+        // primitive (line, circle, ellipse, square, rectangle). Tunable
+        // hold duration in ms (Procreate ≈ 250 ms feels right) and the
+        // movement-radius below which the cursor counts as "still".
+        shapeSnap: true,
+        // 1300 ms — a confident hold that still feels responsive. Existing
+        // users may have a stale value in localStorage that gets normalised
+        // in _loadPrefs.
+        shapeSnapHoldMs: 1300,
+        // 14 px (was 8) leaves enough room for natural pen wobble during
+        // a hold. Procreate's hold radius is similarly generous.
+        shapeSnapHoldPx: 14
       };
       this.onion = {
         on: false, prev: 2, next: 1,
@@ -176,7 +205,12 @@
       this.grid = { on: false, size: 64, guides: false };
       this.symmetry = { on: false, axis: 'v' };
       // pen-tablet pressure response: out = min + (max-min) * raw^gamma
-      this.pen = { gamma: 1, min: 0, max: 1 };
+      // Out-of-the-box pen response tuned for natural light-touch sensitivity.
+      // gamma 0.6 favours the lower half of pressure range (most pens have
+      // a hard-to-reach high end). 0.15 floor prevents invisibly-thin starts.
+      // _loadPrefs uses Object.assign so any user-saved pen prefs take
+      // precedence over this default.
+      this.pen = { gamma: 0.6, min: 0.15, max: 1 };
       this.keymap = {};          // user keyboard-shortcut overrides {cmdId: key}
       this.collapsedPanels = []; // ids of sidebar panels collapsed to their header
       this.brushPresets = DEFAULT_BRUSHES.map(b => Object.assign({}, b));
@@ -204,6 +238,16 @@
       this._installKeys();
       this._installGuards();
       this._installFpsWatch();
+
+      // Any selection change auto-commits an in-flight free transform
+      // (Photoshop-style). Without this the chip can get stuck showing
+      // "Transforming X" while the artist clicks around to a different
+      // layer — selectLayer-only flushes don't cover ctrl/shift paths
+      // or range selects.
+      this.on('layerselect', () => {
+        const lasso = this.tools && this.tools.tools && this.tools.tools.lasso;
+        if (lasso && lasso.vt) lasso._commitVector(this);
+      });
 
       this.tools.select('brush');
       this.emitAll();
@@ -271,6 +315,13 @@
         if (!raw) return;
         const pr = JSON.parse(raw);
         if (pr.settings) Object.assign(this.settings, pr.settings);
+        // Normalise a stale shapeSnapHoldMs from earlier sessions.
+        //   - Anything < 1100 ms — likely an old short default (250/320/450/700/1000)
+        //   - Exactly 1500 ms or 2000 ms — the prior force-bumped values
+        //     from earlier tuning iterations, now superseded by 1300 ms.
+        // Explicit user choices outside these specific values are preserved.
+        const h = this.settings.shapeSnapHoldMs;
+        if (h < 1100 || h === 1500 || h === 2000) this.settings.shapeSnapHoldMs = 1300;
         if (pr.onion) Object.assign(this.onion, pr.onion);
         if (pr.grid) Object.assign(this.grid, pr.grid);
         if (pr.symmetry) Object.assign(this.symmetry, pr.symmetry);
@@ -279,6 +330,7 @@
         if (Array.isArray(pr.recentFiles)) this.recentFiles = pr.recentFiles.slice(0, 8);
         if (pr.sidebarWidth) this.sidebarWidth = pr.sidebarWidth;
         if (pr.timelineHeight) this.timelineHeight = pr.timelineHeight;
+        if (pr.tlNamesWidth) this.tlNamesWidth = pr.tlNamesWidth;
         if (pr.pen) Object.assign(this.pen, pr.pen);
         if (pr.keymap && typeof pr.keymap === 'object') this.keymap = pr.keymap;
         if (Array.isArray(pr.collapsedPanels)) this.collapsedPanels = pr.collapsedPanels;
@@ -296,6 +348,7 @@
           recentFiles: this.recentFiles,
           sidebarWidth: this.sidebarWidth,
           timelineHeight: this.timelineHeight,
+          tlNamesWidth: this.tlNamesWidth,
           pen: this.pen,
           keymap: this.keymap,
           collapsedPanels: this.collapsedPanels,
@@ -444,7 +497,9 @@
     activeLayer() {
       if (this._activeLayer && this.project.layers.indexOf(this._activeLayer) >= 0)
         return this._activeLayer;
-      this._activeLayer = this.project.layers[this.project.layers.length - 1];
+      // Fallback prefers a drawable layer so tools have something to draw
+      // into; only falls back to a group if no drawables remain.
+      this._activeLayer = this.topDrawableLayer() || this.project.layers[this.project.layers.length - 1];
       return this._activeLayer;
     }
     selectLayer(layer) {
@@ -553,6 +608,12 @@
     setColor(hex) {
       this.color = hex;
       this.emit('colorchange', hex);
+      // Active vector selection in either Select or Lasso → recolour those
+      // strokes. Matches "select → click swatch → lines turn that colour".
+      const tools = this.tools && this.tools.tools;
+      if (!tools) return;
+      if (tools.lasso && tools.lasso.recolorSelection) tools.lasso.recolorSelection(hex, this);
+      if (tools.select && tools.select.recolorSelection) tools.select.recolorSelection(hex, this);
     }
     emitAll() {
       this.emit('projectchange');
@@ -623,6 +684,16 @@
     }
 
     undo() {
+      // If a lasso transform is in flight, Ctrl+Z should cancel the transform
+      // (revert to the pre-transform stroke shape) rather than undoing the
+      // underlying drawing that existed before the lasso was even made.
+      // Matches Photoshop's Ctrl+T → drag → Ctrl+Z behaviour.
+      const lasso = this.tools && this.tools.tools && this.tools.tools.lasso;
+      if (lasso && (lasso.vt || (lasso.raster && lasso.raster.lifted))) {
+        lasso.cancel(this);
+        this.ui.status('Cancelled transform');
+        return;
+      }
       if (!this.history.canUndo()) { this.ui.status('Nothing to undo'); return; }
       this.history.undo();
       this.emit('render'); this.emit('celchange'); this.emit('layerschange');
@@ -772,6 +843,163 @@
       this.ui.status('Drawing cleared');
     }
 
+    /* ---------------- folder / group ops ---------------- */
+    // Layers visible in the UI list — children of collapsed groups are
+    // hidden, but the group rows themselves remain. Returns the flat
+    // project order so timeline rows + sidebar rows stay in sync.
+    visibleLayers() {
+      const L = this.project.layers;
+      const byId = new Map(L.map(l => [l.id, l]));
+      const out = [];
+      for (const layer of L) {
+        let hidden = false;
+        let cur = byId.get(layer.parentId);
+        while (cur) {
+          if (cur._collapsed) { hidden = true; break; }
+          cur = byId.get(cur.parentId);
+        }
+        if (!hidden) out.push(layer);
+      }
+      return out;
+    }
+    // Depth of a layer in the folder tree (top-level = 0). Used for
+    // indentation in the layer list.
+    layerDepth(layer) {
+      let d = 0;
+      const L = this.project.layers;
+      const byId = new Map(L.map(l => [l.id, l]));
+      let cur = byId.get(layer.parentId);
+      while (cur) { d++; cur = byId.get(cur.parentId); }
+      return d;
+    }
+    // Walk up the parent chain. Returns the layer's ancestor groups in
+    // ascending order (immediate parent first). Used for visibility/lock
+    // propagation and indent-depth computation in the UI.
+    layerAncestors(layer) {
+      const out = [];
+      const L = this.project.layers;
+      let cur = layer;
+      while (cur && cur.parentId) {
+        const next = L.find(l => l.id === cur.parentId);
+        if (!next || next === layer || out.includes(next)) break;
+        out.push(next);
+        cur = next;
+      }
+      return out;
+    }
+    // Direct children of a group, in their stack order (low index → high).
+    layerChildren(group) {
+      if (!group || !group.id) return [];
+      return this.project.layers.filter(l => l.parentId === group.id);
+    }
+    // Full descendants of a group, walking nested folders recursively.
+    layerDescendants(group) {
+      const out = [];
+      const walk = (g) => {
+        for (const c of this.layerChildren(g)) {
+          out.push(c);
+          if (c.type === 'group') walk(c);
+        }
+      };
+      walk(group);
+      return out;
+    }
+    // Topmost non-group layer (for activeLayer fallback after a group is
+    // selected/removed). Returns null if the project has only groups, which
+    // shouldn't happen since we always keep ≥1 drawing layer.
+    topDrawableLayer() {
+      const L = this.project.layers;
+      for (let i = L.length - 1; i >= 0; i--) if (L[i].type !== 'group') return L[i];
+      return null;
+    }
+    // Group the current multi-selection (or just the active layer) into a
+    // new folder. The folder is inserted at the topmost selected layer's
+    // position; the selected layers are clustered immediately below it so
+    // the array reads [.. children .. group, ..]. We treat end-of-array as
+    // "top of stack" — groups sit visually above their children.
+    groupSelectedLayers() {
+      const L = this.project.layers;
+      const selSet = this.selectedLayers && this.selectedLayers.size
+        ? this.selectedLayers : new Set([this.activeLayer()]);
+      const sel = L.filter(l => selSet.has(l));
+      if (!sel.length) { this.ui.status('Nothing to group'); return; }
+      // Only group layers that share the same parent — otherwise we'd have
+      // to invent a re-parenting policy. Mixed-parent selection silently
+      // groups only the immediate-parent layers; the user can iterate.
+      const parentId = sel[0].parentId;
+      const sameParent = sel.filter(l => l.parentId === parentId);
+      if (sameParent.length < 1) return;
+      this.doStruct('Group layers', () => {
+        const group = new OT.Layer('Folder', 'group');
+        group.parentId = parentId;
+        group.color = '#c8a04a';
+        // Pluck the selected layers from the array (keeping their
+        // relative order) and re-insert them as a contiguous block at the
+        // highest original index, with the group sitting just above them.
+        const indices = sameParent.map(l => L.indexOf(l)).sort((a, b) => a - b);
+        const topIdx = indices[indices.length - 1];
+        const block = sameParent.slice().sort((a, b) => L.indexOf(a) - L.indexOf(b));
+        for (let i = L.length - 1; i >= 0; i--) if (block.includes(L[i])) L.splice(i, 1);
+        // After splicing, work out the new insertion index. We aim to
+        // insert the block at the position previously occupied by the
+        // topmost selected layer (now shifted by removals before it).
+        const removedBefore = indices.filter(i => i < topIdx).length;
+        const insertAt = Math.max(0, topIdx - removedBefore);
+        L.splice(insertAt, 0, ...block);
+        // Folder goes immediately above the block.
+        L.splice(insertAt + block.length, 0, group);
+        for (const l of block) l.parentId = group.id;
+        this.selectedLayers.clear();
+        this.selectedLayers.add(group);
+        // Keep the previous active layer if it's still in the project;
+        // otherwise pick a drawable to draw into.
+        if (this.project.layers.indexOf(this._activeLayer) < 0) {
+          this._activeLayer = this.topDrawableLayer() || block[0];
+        }
+      });
+      this.emit('layerschange'); this.emit('layerselect'); this.emit('render');
+      this.ui.status('Grouped ' + sameParent.length + ' layer' + (sameParent.length === 1 ? '' : 's'));
+    }
+    // Ungroup: drop the folder layer but keep its children at their
+    // current positions. Children's parentId reverts to the folder's own
+    // parentId (so nested-ungrouping promotes them one level).
+    ungroupLayer(group) {
+      if (!group || group.type !== 'group') { this.ui.status('Not a folder'); return; }
+      const L = this.project.layers;
+      this.doStruct('Ungroup', () => {
+        const newParent = group.parentId || null;
+        for (const c of L) if (c.parentId === group.id) c.parentId = newParent;
+        const gi = L.indexOf(group);
+        if (gi >= 0) L.splice(gi, 1);
+        if (this._activeLayer === group) this._activeLayer = this.topDrawableLayer();
+        this.selectedLayers.delete(group);
+        if (!this.selectedLayers.size && this._activeLayer) this.selectedLayers.add(this._activeLayer);
+      });
+      this.emit('layerschange'); this.emit('layerselect'); this.emit('render');
+    }
+    // Toggle a folder's collapsed/expanded flag (UI-only — collapsed
+    // groups still render their children, they're just hidden from the
+    // layer list / timeline names panel).
+    toggleGroupCollapsed(group) {
+      if (!group || group.type !== 'group') return;
+      group._collapsed = !group._collapsed;
+      this.emit('layerschange');
+    }
+    // Visible: cascade to all descendants on toggle so a folder behaves
+    // like a single visibility unit.
+    setGroupVisible(group, v) {
+      if (!group) return;
+      group.visible = v;
+      for (const c of this.layerDescendants(group)) c.visible = v;
+      this.emit('layerschange'); this.emit('render');
+    }
+    setGroupLocked(group, v) {
+      if (!group) return;
+      group.locked = v;
+      for (const c of this.layerDescendants(group)) c.locked = v;
+      this.emit('layerschange');
+    }
+
     /* ---------------- layer ops ---------------- */
     addLayer(type) {
       const kind = type === 'drawing' ? 'drawing' : 'vector';
@@ -874,6 +1102,18 @@
       if (!layer) return;
       if (!layer.transform.keyframes.length) { this.ui.status('Layer has no transform'); return; }
       this.doStruct('Reset layer transform', () => { layer.transform.keyframes = []; });
+    }
+    // Free Transform — single canonical path through the lasso tool's
+    // transformWholeCel: auto-selects every stroke in the active cel
+    // and arms the full lasso transform pill (Uniform / Freeform /
+    // Distort / Warp · ✓ · ✕). One UI everywhere — chip, T hotkey,
+    // context menu, pen-window chip all funnel here.
+    freeTransform() {
+      const layer = this.activeLayer();
+      if (!layer) { this.ui.status('No layer selected'); return; }
+      this.tools.select('lasso');
+      this.tools.tools.lasso.transformWholeCel(this);
+      this.emit('render');
     }
 
     /* ---------------- auto-shading (light & shade) ---------------- */
@@ -1568,6 +1808,21 @@
           const t = this.tools.active;
           if (t && typeof t.cancel === 'function') t.cancel(this);
           return;
+        }
+        if (k === 'enter') {
+          // Commit the active lasso selection if one is live — matches
+          // Photoshop's "press Enter to apply the transform" muscle memory.
+          const lasso = this.tools.tools.lasso;
+          if (this.tools.active === lasso && lasso.hasSelection()) {
+            ev.preventDefault();
+            if (lasso._commitRaster) lasso._commitRaster(this);
+            if (lasso._commitVector) lasso._commitVector(this);
+            lasso.vsel = []; lasso.vcel = null;
+            lasso.transformMode = 'move';
+            if (lasso._hideToolbar) lasso._hideToolbar();
+            this.emit('render'); this.emit('overlayrender');
+            return;
+          }
         }
         if (k === '[' || k === ']') {
           const d = k === ']' ? 1 : -1;

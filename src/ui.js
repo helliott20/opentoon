@@ -19,8 +19,14 @@
     hand: '<path d="M8 12V5.5a1.6 1.6 0 0 1 3.2 0V11m0-1V4a1.6 1.6 0 0 1 3.2 0v7m0-2V6a1.6 1.6 0 0 1 3.2 0v8.5c0 4-3 6.5-7 6.5-2.6 0-4.6-1.4-6-3.6l-2.4-4a1.7 1.7 0 0 1 2.9-1.8L8 13"/>',
     zoom: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-5.5-5.5M11 8v6M8 11h6"/>'
   };
+  // Free Transform isn't a dedicated tool button — invoked via T,
+  // right-click → Free Transform, or the viewbar selection chip. The
+  // action routes through app.freeTransform() which calls the lasso
+  // tool's transformWholeCel: auto-selects every stroke in the active
+  // vector cel and arms the full transform pill (Uniform / Freeform /
+  // Distort / Warp). One canonical path, one UI everywhere.
   const TOOL_LIST = [
-    ['select', 'V'], ['lasso', 'Q'], ['transform', 'A'],
+    ['select', 'V'], ['lasso', 'Q'],
     ['sep'], ['brush', 'B'], ['pencil', 'N'], ['eraser', 'E'],
     ['sep'], ['fill', 'G'], ['eyedropper', 'I'],
     ['sep'], ['rect', 'R'], ['ellipse', 'O'], ['line', 'L'],
@@ -42,19 +48,24 @@
       this._buildLayers();
       this._buildViewbar();
       this._buildStatus();
+      this._buildCanvasActions();
       this._installSidebarResize();
       this._installPanelCollapse();
 
-      app.on('toolchange', () => { this._refreshTool(); this._buildToolOpts(); });
-      app.on('layerschange', () => this._refreshLayers());
-      app.on('layerselect', () => { this._refreshLayers(); this._buildToolOpts(); });
+      app.on('toolchange', () => { this._refreshTool(); this._buildToolOpts(); this._refreshCanvasActions(); });
+      app.on('layerschange', () => { this._refreshLayers(); this._refreshCanvasActions(); });
+      app.on('layerselect', () => { this._refreshLayers(); this._buildToolOpts(); this._refreshCanvasActions(); });
       app.on('celchange', () => this._refreshLayers());
-      app.on('framechange', () => this._refreshLayers());
-      app.on('render', () => this._refreshViewbar());
-      app.on('projectchange', () => {
-        this._refreshViewbar();
-        if (this.app.tools.active.name === 'transform') this._buildToolOpts();
-      });
+      app.on('framechange', () => { this._refreshLayers(); this._refreshCanvasActions(); });
+      // Refresh the chip on render too — catches the transform-toolbar
+      // hide/show transition (no explicit event for that) and keeps the
+      // chip in sync when a folder / multi-select changes mid-action.
+      app.on('render', () => { this._refreshViewbar(); this._refreshCanvasActions(); });
+      // Arming a free transform only emits 'overlayrender' from inside
+      // the lasso tool; the chip needs to flip to its armed state on
+      // that signal too, not just on 'render'.
+      app.on('overlayrender', () => this._refreshCanvasActions());
+      app.on('projectchange', () => { this._refreshViewbar(); });
     }
 
     /* ============================ menu bar ============================ */
@@ -305,6 +316,21 @@
       const row = el('label', { class: 'chk-row' }, [cb, label]);
       return row;
     }
+    // Shape-snap rows shared by brush + pencil panels. Hold slider only
+    // appears when the toggle is on. Toggling the checkbox re-renders the
+    // panel so the slider shows/hides immediately.
+    _appendShapeSnapRows(body, s) {
+      body.appendChild(this._check('Shape snap (hold to lock)', s.shapeSnap, v => {
+        s.shapeSnap = v;
+        this._buildToolOpts();
+      }));
+      if (s.shapeSnap) {
+        // Range up to 4000 ms so users can test extreme holds if the
+        // default feels too short.
+        body.appendChild(this._sliderRow('Hold ms', 200, 4000, 50,
+          s.shapeSnapHoldMs, v => s.shapeSnapHoldMs = v));
+      }
+    }
     _buildToolOpts() {
       const p = document.getElementById('toolopts');
       const a = this.app, s = a.settings, t = a.tools.active.name;
@@ -315,25 +341,36 @@
 
       const isVec = a.activeLayer() && a.activeLayer().type === 'vector';
       if (t === 'brush') {
-        body.appendChild(this._sliderRow('Size', 1, 250, 1, s.brushSize, v => s.brushSize = v));
+        // Brush max 100 matches typical 2D-animation sketch range (Toon Boom
+        // Harmony, Clip Studio Paint). 250 left useful values crammed into
+        // the left 10% of the slider track.
+        body.appendChild(this._sliderRow('Size', 1, 100, 1, s.brushSize, v => s.brushSize = v));
         body.appendChild(this._sliderRow('Opacity', 0.05, 1, 0.01, s.brushOpacity, v => s.brushOpacity = v));
         body.appendChild(this._sliderRow('Smoothing', 0, 1, 0.01, s.smoothing, v => s.smoothing = v));
         if (isVec) {
           body.appendChild(this._sliderRow('Connect', 0, 50, 1, s.snapDist, v => s.snapDist = v));
           body.appendChild(this._check('Mirror (symmetry)', a.symmetry.on,
             v => { a.symmetry.on = v; a.emit('render'); }));
+          this._appendShapeSnapRows(body, s);
         }
       } else if (t === 'pencil') {
-        body.appendChild(this._sliderRow('Size', 1, 60, 1, s.pencilSize, v => s.pencilSize = v));
+        // Pencil max 30 matches industry cleanup-line range. CSP G-pen
+        // defaults to 2 px; Toon Boom Harmony pencil typically lives in
+        // 1-15. No real use case for pencil above 30 in 2D animation.
+        body.appendChild(this._sliderRow('Size', 1, 30, 1, s.pencilSize, v => s.pencilSize = v));
         body.appendChild(this._sliderRow('Opacity', 0.05, 1, 0.01, s.pencilOpacity, v => s.pencilOpacity = v));
         body.appendChild(this._sliderRow('Smoothing', 0, 1, 0.01, s.smoothing, v => s.smoothing = v));
         if (isVec) {
           body.appendChild(this._sliderRow('Connect', 0, 50, 1, s.snapDist, v => s.snapDist = v));
           body.appendChild(this._check('Mirror (symmetry)', a.symmetry.on,
             v => { a.symmetry.on = v; a.emit('render'); }));
+          this._appendShapeSnapRows(body, s);
         }
       } else if (t === 'eraser') {
-        body.appendChild(this._sliderRow('Size', 1, 300, 1, s.eraserSize, v => s.eraserSize = v));
+        // Eraser max 150 covers everything from precise touch-ups to
+        // wide-area clears; 300 was excessive (a 300 px eraser on a
+        // 1920 px canvas is 1/6 of the whole sheet).
+        body.appendChild(this._sliderRow('Size', 1, 150, 1, s.eraserSize, v => s.eraserSize = v));
         body.appendChild(this._sliderRow('Opacity', 0.05, 1, 0.01, s.eraserOpacity, v => s.eraserOpacity = v));
       } else if (t === 'fill') {
         if (isVec) {
@@ -366,20 +403,6 @@
         del.addEventListener('click', () => a.deleteSelection());
         body.appendChild(el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } }, [del]));
         body.appendChild(el('div', { class: 'chk-row', text: 'Draw a freeform loop to grab strokes or a pixel region, then drag it. Esc drops it.' }));
-      } else if (t === 'transform') {
-        const mk = (lbl, fn) => {
-          const b = el('button', { class: 'btn', text: lbl, style: { padding: '5px 8px' } });
-          b.addEventListener('click', fn);
-          return b;
-        };
-        body.appendChild(el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } }, [
-          mk('Set Keyframe', () => a.setLayerKeyHere()),
-          mk('Reset Layer', () => a.resetLayerTransform(a.activeLayer()))
-        ]));
-        const layer = a.activeLayer();
-        const kc = layer && layer.transform ? layer.transform.keyframes.length : 0;
-        body.appendChild(el('div', { class: 'chk-row', text: kc + ' transform keyframe' + (kc === 1 ? '' : 's') }));
-        body.appendChild(el('div', { class: 'chk-row', text: 'Drag the layer to animate position / scale / rotation.' }));
       } else {
         body.appendChild(el('div', { class: 'chk-row', text: 'Drag in the canvas to use this tool.' }));
       }
@@ -446,7 +469,59 @@
       p.appendChild(head);
       this.layerBody = el('div', { class: 'panel-body' });
       p.appendChild(this.layerBody);
+      this._installShiftHoverPreview(this.layerBody, '.layer-item');
       this._refreshLayers();
+    }
+    // While Shift is held, hovering a layer row previews the range that
+    // would be selected (active layer → hovered row) with a tinted strip,
+    // mirrored on both the sidebar layer panel and the timeline names
+    // column. Cleared on Shift release or mouseleave.
+    _installShiftHoverPreview(container, rowSel) {
+      const app = this.app;
+      let shiftDown = false;
+      let hoveredLayer = null;
+      const allRows = () => container.querySelectorAll(rowSel);
+      const clear = () => allRows().forEach(r => r.classList.remove('range-preview', 'range-preview-end'));
+      const apply = () => {
+        clear();
+        if (!shiftDown || !hoveredLayer) return;
+        const anchor = app.activeLayer();
+        if (!anchor || anchor === hoveredLayer) return;
+        const L = app.project.layers;
+        const i0 = L.indexOf(anchor), i1 = L.indexOf(hoveredLayer);
+        if (i0 < 0 || i1 < 0) return;
+        const lo = Math.min(i0, i1), hi = Math.max(i0, i1);
+        for (const r of allRows()) {
+          const id = r.dataset.layerId;
+          if (!id) continue;
+          const idx = L.findIndex(l => l.id === id);
+          if (idx >= lo && idx <= hi) r.classList.add('range-preview');
+          if (idx === i1) r.classList.add('range-preview-end');
+        }
+      };
+      container.addEventListener('mousemove', (e) => {
+        const row = e.target.closest(rowSel);
+        if (!row) {
+          if (hoveredLayer) { hoveredLayer = null; apply(); }
+          return;
+        }
+        const id = row.dataset.layerId;
+        const ly = id ? app.project.layers.find(l => l.id === id) : null;
+        if (ly === hoveredLayer) return;
+        hoveredLayer = ly;
+        apply();
+      });
+      container.addEventListener('mouseleave', () => {
+        if (hoveredLayer) { hoveredLayer = null; apply(); }
+      });
+      const keyCheck = (e) => {
+        const ns = !!e.shiftKey;
+        if (ns !== shiftDown) { shiftDown = ns; apply(); }
+      };
+      window.addEventListener('keydown', keyCheck);
+      window.addEventListener('keyup', keyCheck);
+      window.addEventListener('blur', () => { if (shiftDown) { shiftDown = false; clear(); } });
+      app.on && app.on('layerselect', () => { if (shiftDown) apply(); else clear(); });
     }
     _refreshLayers() {
       if (!this.layerBody) return;
@@ -461,19 +536,32 @@
       const present = new Set(L);
       for (const l of Array.from(selSet)) if (!present.has(l)) selSet.delete(l);
       this.layerBody.innerHTML = '';
-      for (let i = L.length - 1; i >= 0; i--) {
-        const layer = L[i];
+      // The "focus" layer — the row that gets the opacity slider.
+      // Prefer the solo-selected layer over activeLayer so a solo-
+      // selected folder gets its own slider (selecting a folder makes
+      // activeLayer auto-fall through to a child drawable, but the
+      // user expects opacity to attach to whatever they selected).
+      const focusLayer = (selSet && selSet.size === 1)
+        ? selSet.values().next().value
+        : active;
+      // Render visible layers only (children of collapsed groups are hidden).
+      const V = a.visibleLayers();
+      for (let i = V.length - 1; i >= 0; i--) {
+        const layer = V[i];
         const isActive = layer === active;
+        const isFocus = layer === focusLayer;
+        const isGroup = layer.type === 'group';
+        const depth = a.layerDepth(layer);
         const inSet = selSet.has(layer) || isActive;
+        const isMulti = inSet && selSet.size > 1;
         const item = el('div', {
-          class: 'layer-item' + (inSet ? ' sel' : '') + (inSet && !isActive ? ' multi-sel' : '')
+          class: 'layer-item'
+            + (inSet ? ' sel' : '')
+            + (isMulti ? ' multi-sel' : '')
+            + (isMulti && isActive ? ' primary-in-set' : '')
+            + (isGroup ? ' is-group' : '')
         });
-        // For non-active multi-selected layers, give them a clearly visible
-        // accent outline so the user can see the selection set at a glance.
-        if (inSet && !isActive) {
-          item.style.outline = '1px solid var(--accent)';
-          item.style.outlineOffset = '-1px';
-        }
+        if (depth) item.style.paddingLeft = (6 + depth * 12) + 'px';
 
         // Eye / lock toggles operate on every selected layer if there's a
         // multi-set AND this row is part of it; otherwise just on this row.
@@ -491,7 +579,10 @@
         eye.addEventListener('click', e => {
           e.stopPropagation();
           const v = !layer.visible;
-          for (const l of batch) l.visible = v;
+          for (const l of batch) {
+            if (l.type === 'group') a.setGroupVisible(l, v);
+            else l.visible = v;
+          }
           a.emit('layerschange'); a.emit('render');
         });
 
@@ -505,28 +596,53 @@
         lock.addEventListener('click', e => {
           e.stopPropagation();
           const v = !layer.locked;
-          for (const l of batch) l.locked = v;
+          for (const l of batch) {
+            if (l.type === 'group') a.setGroupLocked(l, v);
+            else l.locked = v;
+          }
           a.emit('layerschange');
         });
 
-        const thumb = el('canvas', { class: 'layer-thumb' });
-        thumb.width = 60; thumb.height = 44;
-        const tx = thumb.getContext('2d');
-        tx.fillStyle = a.project.bg; tx.fillRect(0, 0, 60, 44);
-        const cel = layer.celAt(a.frame);
-        if (cel) tx.drawImage(cel.canvas, 0, 0, 60, 44);
-        else if (layer.type === 'video' && layer.videoEl && layer.videoEl.readyState >= 2)
-          try { tx.drawImage(layer.videoEl, 0, 0, 60, 44); } catch (e) {}
+        let thumb;
+        if (isGroup) {
+          thumb = el('div', { class: 'layer-thumb layer-thumb-group', style: { background: layer.color || '#c8a04a' } });
+          thumb.innerHTML = U.svg(layer._collapsed
+            ? '<path d="M3 6h6l2 3h10v10H3z"/>'
+            : '<path d="M3 6h6l2 3h10v3H3z M3 12h18l-2 7H5z"/>');
+        } else {
+          thumb = el('canvas', { class: 'layer-thumb' });
+          thumb.width = 60; thumb.height = 44;
+          const tx = thumb.getContext('2d');
+          tx.fillStyle = a.project.bg; tx.fillRect(0, 0, 60, 44);
+          const cel = layer.celAt(a.frame);
+          if (cel) tx.drawImage(cel.canvas, 0, 0, 60, 44);
+          else if (layer.type === 'video' && layer.videoEl && layer.videoEl.readyState >= 2)
+            try { tx.drawImage(layer.videoEl, 0, 0, 60, 44); } catch (e) {}
+        }
 
         const name = el('input', { class: 'lname', value: layer.name });
         name.addEventListener('change', () => { layer.name = name.value || 'Layer'; a.emit('layerschange'); });
         name.addEventListener('click', e => e.stopPropagation());
 
-        const ltype = layer.type === 'vector' ? 'VEC' : layer.type === 'video' ? 'VID' : 'BMP';
+        const ltype = isGroup ? 'DIR' : (layer.type === 'vector' ? 'VEC' : layer.type === 'video' ? 'VID' : 'BMP');
         const tag = el('div', {
           class: 'ltype', text: ltype,
-          title: ltype === 'VEC' ? 'Vector layer' : ltype === 'VID' ? 'Video layer' : 'Bitmap layer'
+          title: ltype === 'VEC' ? 'Vector layer' : ltype === 'VID' ? 'Video layer'
+               : ltype === 'DIR' ? 'Folder' : 'Bitmap layer'
         });
+        if (isGroup) {
+          const chev = el('button', {
+            class: 'layer-chev' + (layer._collapsed ? '' : ' open'),
+            title: layer._collapsed ? 'Expand folder' : 'Collapse folder',
+            html: U.svg('<path d="M9 6l6 6-6 6"/>')
+          });
+          chev.addEventListener('click', ev => {
+            ev.stopPropagation();
+            a.toggleGroupCollapsed(layer);
+            a.emit('render');
+          });
+          item.appendChild(chev);
+        }
         item.appendChild(eye);
         item.appendChild(lock);
         item.appendChild(thumb);
@@ -545,26 +661,60 @@
         });
         item.addEventListener('contextmenu', e => {
           e.preventDefault();
-          this.contextMenu(e.clientX, e.clientY, [
-            { label: 'Duplicate Layer', fn: () => a.duplicateLayer(layer) },
-            { label: 'Delete Layer', fn: () => a.deleteLayer(layer) },
-            { sep: 1 },
-            { label: 'Move Up', fn: () => a.moveLayer(layer, 1) },
-            { label: 'Move Down', fn: () => a.moveLayer(layer, -1) },
-            { label: 'Merge Down', fn: () => a.mergeDown(layer) }
-          ]);
+          const isGroup = layer.type === 'group';
+          const multi = a.selectedLayers && a.selectedLayers.size > 1 && a.selectedLayers.has(layer);
+          const items = [];
+          if (!isGroup) items.push({ label: 'Duplicate Layer', fn: () => a.duplicateLayer(layer) });
+          items.push({
+            label: multi ? 'Delete selected layers' : (isGroup ? 'Delete folder (ungroup)' : 'Delete Layer'),
+            fn: () => {
+              if (multi) a.deleteSelectedLayers();
+              else if (isGroup) a.ungroupLayer(layer);
+              else a.deleteLayer(layer);
+            }
+          });
+          items.push({ sep: 1 });
+          items.push({ label: 'Move Up', fn: () => a.moveLayer(layer, 1) });
+          items.push({ label: 'Move Down', fn: () => a.moveLayer(layer, -1) });
+          if (!isGroup) items.push({ label: 'Merge Down', fn: () => a.mergeDown(layer) });
+          items.push({ sep: 1 });
+          if (multi) items.push({ label: 'Group selected', fn: () => a.groupSelectedLayers() });
+          else if (!isGroup) items.push({ label: 'New folder', fn: () => a.groupSelectedLayers() });
+          if (isGroup) {
+            items.push({ label: layer._collapsed ? 'Expand folder' : 'Collapse folder',
+                         fn: () => { a.toggleGroupCollapsed(layer); a.emit('render'); a.emit('layerschange'); } });
+            items.push({ label: 'Ungroup', fn: () => a.ungroupLayer(layer) });
+          }
+          items.push({ sep: 1 });
+          items.push({
+            label: 'Free transform (T)' + (isGroup ? ' — whole folder' : ''),
+            fn: () => { a.selectLayer(layer); a.freeTransform(); }
+          });
+          if (layer.transform && layer.transform.keyframes && layer.transform.keyframes.length) {
+            items.push({ label: 'Reset transform', fn: () => a.resetLayerTransform(layer) });
+          }
+          this.contextMenu(e.clientX, e.clientY, items);
         });
         this.layerBody.appendChild(item);
 
-        // Show the opacity slider only for the active layer (the single one
-        // currently being drawn into). Multi-selected non-active layers don't
-        // get their own slider — opacity stays a per-layer prop, not batched.
-        if (isActive) {
-          const op = this._slider(0, 1, 0.01, layer.opacity, v => {
-            layer.opacity = v; a.emit('render');
+        // Show the opacity slider only for the focus row. For a solo-
+        // selected folder that's the folder itself (cascades through
+        // descendants in compositeStage); for everything else it's
+        // the active drawable.
+        if (isFocus) {
+          // Slider runs 0-100 (linear, whole percent) for the user, but
+          // layer.opacity stays 0-1 to feed straight into ctx.globalAlpha.
+          const pct = Math.round(layer.opacity * 100);
+          const valEl = el('span', { class: 'val', text: pct + '%' });
+          const range = el('input', { type: 'range', min: 0, max: 100, step: 1, value: pct });
+          range.addEventListener('input', () => {
+            const p = parseInt(range.value, 10);
+            valEl.textContent = p + '%';
+            layer.opacity = p / 100;
+            a.emit('render');
           });
           this.layerBody.appendChild(el('div', { class: 'opt-row', style: { marginBottom: '4px' } }, [
-            el('label', { style: { flex: '0 0 48px' } }, ['Opacity']), op.range, op.valEl
+            el('label', { style: { flex: '0 0 48px' } }, ['Opacity']), range, valEl
           ]));
         }
       }
@@ -617,20 +767,35 @@
         const above = e.clientY < r.top + r.height / 2;
         // If the dragged source is part of a >1 multi-selection, move all
         // selected layers together preserving their relative order. Otherwise
-        // fall back to the single-layer drag behaviour.
+        // fall back to the single-layer drag behaviour. Dragging a group
+        // always also moves its descendants so the folder stays one block.
         const selSet = a.selectedLayers;
-        const multi = (selSet && selSet.size > 1 && selSet.has(src))
+        let multi = (selSet && selSet.size > 1 && selSet.has(src))
           ? L.filter(l => selSet.has(l))   // preserves project-order
           : [src];
-        if (multi.includes(layer) && multi.length > 1) return;   // dropping onto self
+        // Expand any selected group into its descendants (dedupe with Set).
+        const expanded = new Set(multi);
+        for (const m of multi) if (m.type === 'group')
+          for (const d of a.layerDescendants(m)) expanded.add(d);
+        multi = L.filter(l => expanded.has(l));
+        if (multi.includes(layer) && multi.length > 1) return;   // dropping onto self/own child
         if (multi.length === 1 && src === layer) return;
         let tgtIdx = L.indexOf(layer);
         if (tgtIdx < 0) return;
         // "above" visually -> higher index in L (top = front-most)
         let insert = above ? tgtIdx + 1 : tgtIdx;
+        // Reparent rule (matches timeline DnD):
+        //   • drop above any row → sibling of target (target.parentId)
+        //   • drop below a leaf  → sibling of target (target.parentId)
+        //   • drop below a group header → join that group (target.id)
+        // Only top-level members of the moved block reparent; descendants
+        // of a moved group keep their existing parent.
+        const newParentId = (!above && layer.type === 'group')
+          ? layer.id
+          : (layer.parentId || null);
+        const movingIds = new Set(multi.map(l => l.id));
+        const topLevel = multi.filter(l => !movingIds.has(l.parentId));
         const apply = () => {
-          // Remove all moved layers first, recompute insertion index accounting
-          // for removals before it, then splice them back together.
           let removedBefore = 0;
           for (const m of multi) {
             const i = L.indexOf(m);
@@ -642,11 +807,13 @@
           if (insert < 0) insert = 0;
           if (insert > L.length) insert = L.length;
           L.splice(insert, 0, ...multi);
+          for (const l of topLevel) l.parentId = newParentId;
         };
-        // No-op detection: if everything's already contiguous and ends at the
-        // target slot, skip the history entry.
+        // No-op detection: same position AND same parent on both sides.
         const srcIdx = L.indexOf(src);
-        if (multi.length === 1 && srcIdx === insert - (srcIdx < insert ? 1 : 0)) return;
+        const sameSlot = multi.length === 1 && srcIdx === insert - (srcIdx < insert ? 1 : 0);
+        const parentUnchanged = topLevel.every(l => (l.parentId || null) === newParentId);
+        if (sameSlot && parentUnchanged) return;
         if (typeof a.doStruct === 'function')
           a.doStruct(multi.length > 1 ? 'Reorder layers' : 'Reorder layer', apply);
         else { apply(); a.emit('layerschange'); a.emit('render'); }
@@ -654,6 +821,128 @@
     }
 
     /* ============================ viewbar ============================ */
+    /* ===== floating canvas-action bar (selection HUD) =====
+       A subtle pill at the bottom of the viewport that surfaces actions
+       for the currently-selected layer(s)/folder. It exists so the user
+       doesn't have to memorise hotkeys — Free Transform is one click
+       away, with Reset surfacing only when the selection actually has
+       transform keyframes to clear. Hides itself when the lasso/peg
+       transform pill is already on-screen, while drawing, and during
+       playback. */
+    _buildCanvasActions() {
+      // The action bar lives INSIDE the viewbar (alongside zoom / onion /
+      // grid / flip), so at rest it occupies zero canvas pixels. The chip
+      // shows a layer-coloured dot + name; hovering the chip raises a
+      // small popover with the action buttons. _buildViewbar appends the
+      // chip itself; here we just remember a hook for refresh.
+      this.canvasActions = null;
+      this._refreshCanvasActions();
+    }
+    _refreshCanvasActions() {
+      const chip = this.canvasActions;
+      if (!chip) return;
+      const a = this.app;
+      const sel = a.selectedLayers;
+      // Prefer the selectedLayers set as the source of truth — clicking
+      // a folder sets selectedLayers={folder} while activeLayer auto-
+      // falls through to a leaf drawable (so paint tools work). For
+      // the chip we want what the artist actually selected.
+      let targets = [];
+      if (sel && sel.size) {
+        const setIds = new Set(Array.from(sel).map(l => l.id));
+        targets = a.project.layers.filter(l => sel.has(l) && !setIds.has(l.parentId));
+      } else if (a.activeLayer()) {
+        targets = [a.activeLayer()];
+      }
+      // Is a free-transform armed right now? Keep the chip visible
+      // and switch it into an "active" state so the artist has a
+      // persistent indicator of what's being transformed (the lasso
+      // toolbar shows mode buttons; the chip shows the subject).
+      const lasso = a.tools && a.tools.tools && a.tools.tools.lasso;
+      const transformArmed = !!(lasso && lasso.vt);
+      const lassoTbVisible = (() => {
+        const tb = document.getElementById('lasso-toolbar');
+        return tb && !tb.classList.contains('hidden');
+      })();
+      // Hide only when there's no subject, the lasso toolbar is
+      // visible WITHOUT a transform armed (e.g. raw lasso selection),
+      // or playback is running.
+      if (!targets.length
+          || (lassoTbVisible && !transformArmed)
+          || (a.playback && a.playback.playing)) {
+        chip.classList.add('hidden');
+        chip.classList.remove('is-active');
+        chip.innerHTML = '';
+        chip.onclick = null;
+        return;
+      }
+      chip.classList.remove('hidden');
+      chip.classList.toggle('is-active', transformArmed);
+      chip.innerHTML = '';
+      chip.onclick = (ev) => {
+        if (ev.target.closest('.ca-popover')) return;
+        if (transformArmed) {
+          // Re-clicking the chip mid-transform commits — the toolbar's
+          // ✓ button does the same; the chip is just a bigger target.
+          if (lasso && lasso._commitVector) lasso._commitVector(a);
+          a.emit('render');
+          return;
+        }
+        a.freeTransform();
+      };
+      // ---- single-segment action button: no layer name on purpose.
+      // The layer panel + timeline already show what's selected; the
+      // chip's job is just to execute Transform on whatever's there.
+      // A small dot (or stacked dots for multi) is the only "subject"
+      // hint — colour-coded so you know it's pointing at a real target.
+      if (targets.length === 1) {
+        const dot = el('span', {
+          class: 'ca-dot' + (targets[0].type === 'group' ? ' ca-dot-group' : ''),
+          style: { background: targets[0].color || '#3d9be0' }
+        });
+        chip.appendChild(dot);
+      } else if (targets.length > 1) {
+        const dotWrap = el('span', { class: 'ca-dot-stack' });
+        for (let i = 0; i < Math.min(3, targets.length); i++) {
+          dotWrap.appendChild(el('span', { class: 'ca-dot', style: { background: targets[i].color || '#3d9be0' } }));
+        }
+        chip.appendChild(dotWrap);
+      }
+
+      // ---- inline action affordance : Transform CTA / armed indicator
+      const cta = el('div', { class: 'ca-cta' });
+      cta.appendChild(el('span', {
+        class: 'ca-cta-icon',
+        html: U.svg('<path d="M4 4l4 4M16 4l-4 4M4 20l4-4M16 20l-4-4M3 12h6M15 12h6M12 3v6M12 15v6"/>')
+      }));
+      cta.appendChild(el('span', { class: 'ca-cta-text' },
+        [transformArmed ? 'Transforming' : 'Transform']));
+      cta.appendChild(el('kbd', { class: 'ca-kbd' },
+        [transformArmed ? '✓' : 'T']));
+      chip.appendChild(cta);
+      chip.title = transformArmed
+        ? 'Free Transform armed — click to commit, Esc to cancel'
+        : 'Free Transform — click or press T';
+
+      // ---- hover popover : secondary actions (Reset only)
+      const hasXform = targets.some(t => t.transform && t.transform.keyframes && t.transform.keyframes.length);
+      if (hasXform) {
+        const pop = el('div', { class: 'ca-popover' });
+        const rs = el('button', { class: 'ca-btn ca-reset', title: 'Reset transform' });
+        rs.innerHTML = U.svg('<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/>')
+          + '<span>Reset transform</span>';
+        rs.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          a.doStruct(targets.length > 1 ? 'Reset transforms' : 'Reset transform', () => {
+            for (const t of targets) if (t.transform) t.transform.keyframes = [];
+          });
+          a.emit('layerschange'); a.emit('render');
+        });
+        pop.appendChild(rs);
+        chip.appendChild(pop);
+      }
+    }
+
     _buildViewbar() {
       const vb = document.getElementById('viewbar');
       vb.innerHTML = '';
@@ -675,17 +964,25 @@
       vb.appendChild(this.rotLabel);
       vb.appendChild(mk('⟳', () => a.rotateView(15), 'Rotate canvas right'));
       vb.appendChild(el('div', { class: 'sp' }));
+      // Selection chip — sits centred between zoom + view-toggle groups
+      // (two flex spacers keep it bang in the middle). The chip itself
+      // IS the Transform action: clicking it fires app.freeTransform();
+      // hovering raises a popover for Reset + the T shortcut hint.
+      this.canvasActions = el('div', { class: 'ca-chip hidden', tabindex: '0', role: 'button' });
+      vb.appendChild(this.canvasActions);
+      vb.appendChild(el('div', { class: 'sp' }));
       this.camBtn = mk('Camera', () => a.toggleCamera(), 'Toggle camera guide');
-      this.onionVB = mk('Onion', () => a.toggleOnion(), 'Toggle onion skin');
+      this.onionSplit = this._mkOnionSplit();
       this.gridBtn = mk('Grid', () => a.toggleGrid(), 'Toggle grid');
       this.flipHBtn = mk('Flip H', () => a.toggleFlipH(), 'Flip view horizontally (M)');
       this.flipVBtn = mk('Flip V', () => a.toggleFlipV(), 'Flip view vertically');
       vb.appendChild(this.camBtn);
-      vb.appendChild(this.onionVB);
+      vb.appendChild(this.onionSplit);
       vb.appendChild(this.gridBtn);
       vb.appendChild(this.flipHBtn);
       vb.appendChild(this.flipVBtn);
       this._refreshViewbar();
+      this._refreshCanvasActions();
     }
     _zoom100() {
       const st = this.app.stage;
@@ -697,13 +994,220 @@
       if (this.rotLabel)
         this.rotLabel.textContent = Math.round(this.app.stage.view.rot || 0) + '°';
       this.camBtn.classList.toggle('on', this.app.showCamera);
-      this.onionVB.classList.toggle('on', this.app.onion.on);
+      if (this.onionVB) this.onionVB.classList.toggle('on', this.app.onion.on);
+      if (this.onionChev) this.onionChev.classList.toggle('on', this.app.onion.on);
       this.flipHBtn.classList.toggle('on', this.app.stage.flipH);
       this.flipVBtn.classList.toggle('on', this.app.stage.flipV);
       if (this.gridBtn) this.gridBtn.classList.toggle('on', this.app.grid && this.app.grid.on);
       if (this.coordEl) {
         this.zoomStat.textContent = Math.round(this.app.stage.view.zoom * 100) + '%';
       }
+      if (this._onionPop) this._onionPop.syncFromState();
+    }
+
+    /* ---------- onion skin: split-button + popover ---------- */
+    _mkOnionSplit() {
+      const a = this.app;
+      const wrap = el('div', { class: 'vb-split', 'aria-label': 'Onion skin' });
+      const main = el('button', { class: 'vb-btn vb-split-main', title: 'Toggle onion skin' }, ['Onion']);
+      const chev = el('button', { class: 'vb-btn vb-split-chev', title: 'Onion skin settings', 'aria-haspopup': 'true' }, ['▾']);
+      main.addEventListener('click', () => a.toggleOnion());
+      // Right-click anywhere on the split opens the settings popover too.
+      const openOnRC = (e) => { e.preventDefault(); this._toggleOnionPop(wrap); };
+      main.addEventListener('contextmenu', openOnRC);
+      wrap.addEventListener('contextmenu', openOnRC);
+      chev.addEventListener('click', () => this._toggleOnionPop(wrap));
+      wrap.appendChild(main);
+      wrap.appendChild(chev);
+      this.onionVB = main;
+      this.onionChev = chev;
+      return wrap;
+    }
+    _toggleOnionPop(anchor) {
+      if (this._onionPop) { this._closeOnionPop(); return; }
+      this._openOnionPop(anchor);
+    }
+    _openOnionPop(anchor) {
+      const a = this.app, o = a.onion;
+      const pop = el('div', { class: 'onion-pop', role: 'dialog', 'aria-label': 'Onion skin settings' });
+
+      // Live-update channel — emit canvas redraw + persist prefs on every tweak.
+      const live = () => {
+        a.emit('onionchange');
+        a.emit('render');
+        this._refreshViewbar();
+        if (typeof a._savePrefs === 'function') a._savePrefs();
+      };
+
+      // --- master switch
+      const masterSw = el('button', { class: 'onion-switch' + (o.on ? ' on' : ''), role: 'switch', 'aria-checked': String(o.on), title: 'Enable / disable onion skin' });
+      masterSw.appendChild(el('span', { class: 'onion-switch-thumb' }));
+      const syncMaster = () => {
+        masterSw.classList.toggle('on', o.on);
+        masterSw.setAttribute('aria-checked', String(o.on));
+        pop.classList.toggle('is-off', !o.on);
+      };
+      masterSw.addEventListener('click', () => { o.on = !o.on; syncMaster(); live(); });
+      const head = el('div', { class: 'onion-pop-head' }, [
+        el('span', { class: 'onion-pop-title' }, ['ONION SKIN']),
+        masterSw
+      ]);
+
+      // --- frame-stack preview (the visual hook of this popover)
+      const stack = el('div', { class: 'onion-stack' });
+      const prevLbl = el('span', { class: 'onion-stack-label left' }, [o.prev + ' prev']);
+      const nextLbl = el('span', { class: 'onion-stack-label right' }, [o.next + ' next']);
+      const buildStack = () => {
+        stack.innerHTML = '';
+        for (let i = o.prev; i >= 1; i--) {
+          const f = el('span', { class: 'onion-stack-f prev' });
+          const t = o.prev > 1 ? (i - 1) / (o.prev - 1) : 0;
+          f.style.opacity = String(U.lerp(o.maxAlpha, o.minAlpha, t));
+          f.style.background = o.prevColor;
+          stack.appendChild(f);
+        }
+        stack.appendChild(el('span', { class: 'onion-stack-f current' }));
+        for (let i = 1; i <= o.next; i++) {
+          const f = el('span', { class: 'onion-stack-f next' });
+          const t = o.next > 1 ? (i - 1) / (o.next - 1) : 0;
+          f.style.opacity = String(U.lerp(o.maxAlpha, o.minAlpha, t));
+          f.style.background = o.nextColor;
+          stack.appendChild(f);
+        }
+      };
+      const refreshStack = () => {
+        prevLbl.textContent = o.prev + ' prev';
+        nextLbl.textContent = o.next + ' next';
+        buildStack();
+      };
+      buildStack();
+      const stackWrap = el('div', { class: 'onion-stack-wrap' }, [prevLbl, stack, nextLbl]);
+
+      // Touching prev/next from zero auto-enables onion skin so the user
+      // sees their change immediately — otherwise a hidden master toggle
+      // would silently swallow the input.
+      const bumpOn = () => { if (!o.on) { o.on = true; syncMaster(); } };
+
+      // --- prev row
+      const prevStep = this._onionStepper(o.prev, 0, 12, v => { o.prev = v; bumpOn(); refreshStack(); live(); });
+      const prevSw = this._onionSwatch(o.prevColor, c => { o.prevColor = c; refreshStack(); live(); });
+      const prevRow = el('div', { class: 'onion-row' }, [
+        el('span', { class: 'onion-row-lbl' }, ['Previous']),
+        prevStep,
+        prevSw
+      ]);
+
+      // --- next row
+      const nextStep = this._onionStepper(o.next, 0, 12, v => { o.next = v; bumpOn(); refreshStack(); live(); });
+      const nextSw = this._onionSwatch(o.nextColor, c => { o.nextColor = c; refreshStack(); live(); });
+      const nextRow = el('div', { class: 'onion-row' }, [
+        el('span', { class: 'onion-row-lbl' }, ['Next']),
+        nextStep,
+        nextSw
+      ]);
+
+      // --- strength slider (drives maxAlpha; minAlpha tracks proportionally)
+      const fade = el('input', { type: 'range', class: 'onion-fade', min: '0.1', max: '0.9', step: '0.05', value: String(o.maxAlpha) });
+      const fadeVal = el('span', { class: 'onion-fade-val mono' }, [Math.round(o.maxAlpha * 100) + '%']);
+      fade.addEventListener('input', () => {
+        o.maxAlpha = parseFloat(fade.value);
+        o.minAlpha = Math.min(o.minAlpha, o.maxAlpha * 0.7);
+        if (o.minAlpha < 0.05) o.minAlpha = 0.05;
+        fadeVal.textContent = Math.round(o.maxAlpha * 100) + '%';
+        buildStack();
+        live();
+      });
+      const fadeRow = el('div', { class: 'onion-row onion-row-fade' }, [
+        el('span', { class: 'onion-row-lbl' }, ['Strength']),
+        fade,
+        fadeVal
+      ]);
+
+      if (!o.on) pop.classList.add('is-off');
+      pop.appendChild(head);
+      pop.appendChild(stackWrap);
+      pop.appendChild(prevRow);
+      pop.appendChild(nextRow);
+      pop.appendChild(fadeRow);
+      document.body.appendChild(pop);
+
+      // Position the popover above the anchor, clamped to the viewport, and
+      // park the caret directly over the anchor's centre.
+      const positionPop = () => {
+        const r = anchor.getBoundingClientRect();
+        const w = pop.offsetWidth, h = pop.offsetHeight;
+        let left = r.left + (r.width - w) / 2;
+        left = Math.max(8, Math.min(window.innerWidth - w - 8, left));
+        let top = r.top - h - 10;
+        if (top < 8) top = r.bottom + 10;
+        pop.style.left = left + 'px';
+        pop.style.top = top + 'px';
+        const caretX = (r.left + r.width / 2) - left;
+        pop.style.setProperty('--caret-x', caretX + 'px');
+        pop.classList.toggle('flip', top > r.top);
+      };
+      positionPop();
+      requestAnimationFrame(() => pop.classList.add('open'));
+
+      const onResize = () => positionPop();
+      const onDocPointer = (e) => {
+        if (pop.contains(e.target) || anchor.contains(e.target)) return;
+        this._closeOnionPop();
+      };
+      const onKey = (e) => { if (e.key === 'Escape') this._closeOnionPop(); };
+      // Defer mousedown listener attach by one frame so the same click that
+      // opened the popover doesn't immediately dismiss it.
+      setTimeout(() => document.addEventListener('mousedown', onDocPointer), 0);
+      window.addEventListener('resize', onResize);
+      window.addEventListener('scroll', onResize, true);
+      document.addEventListener('keydown', onKey);
+
+      // Allow external state changes (toggle from menubar, viewbar main btn)
+      // to refresh the open popover.
+      const syncFromState = () => { syncMaster(); refreshStack(); fade.value = String(o.maxAlpha); fadeVal.textContent = Math.round(o.maxAlpha * 100) + '%'; };
+
+      this._onionPop = { pop, onResize, onDocPointer, onKey, syncFromState };
+    }
+    _closeOnionPop() {
+      if (!this._onionPop) return;
+      const { pop, onResize, onDocPointer, onKey } = this._onionPop;
+      pop.classList.remove('open');
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('scroll', onResize, true);
+      document.removeEventListener('mousedown', onDocPointer);
+      document.removeEventListener('keydown', onKey);
+      setTimeout(() => { if (pop.parentNode) pop.parentNode.removeChild(pop); }, 150);
+      this._onionPop = null;
+    }
+    _onionStepper(val, min, max, onChange) {
+      let cur = val;
+      const wrap = el('div', { class: 'onion-stepper' });
+      const dec = el('button', { class: 'onion-step', 'aria-label': 'Decrease' }, ['−']);
+      const num = el('span', { class: 'onion-step-val mono' }, [String(cur)]);
+      const inc = el('button', { class: 'onion-step', 'aria-label': 'Increase' }, ['+']);
+      const upd = (nv) => {
+        nv = Math.max(min, Math.min(max, nv));
+        if (nv === cur) return;
+        cur = nv;
+        num.textContent = String(nv);
+        onChange(nv);
+      };
+      dec.addEventListener('click', () => upd(cur - 1));
+      inc.addEventListener('click', () => upd(cur + 1));
+      wrap.appendChild(dec); wrap.appendChild(num); wrap.appendChild(inc);
+      return wrap;
+    }
+    _onionSwatch(color, onChange) {
+      const wrap = el('label', { class: 'onion-swatch', title: 'Click to change tint' });
+      const chip = el('span', { class: 'onion-swatch-chip' });
+      chip.style.background = color;
+      const inp = el('input', { type: 'color', value: color });
+      inp.addEventListener('input', () => {
+        chip.style.background = inp.value;
+        onChange(inp.value);
+      });
+      wrap.appendChild(chip); wrap.appendChild(inp);
+      return wrap;
     }
 
     /* ============================ status bar ============================ */

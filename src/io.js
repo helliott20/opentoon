@@ -95,6 +95,8 @@
           exposure: l.exposure.slice(), nextNum: l.nextNum,
           transform: JSON.parse(JSON.stringify(l.transform || { keyframes: [] })),
           video: l.video || null,
+          parentId: l.parentId || null,
+          collapsed: !!l._collapsed,
           cels: cels
         };
       })
@@ -119,6 +121,8 @@
       layer.nextNum = ld.nextNum || 1;
       layer.transform = ld.transform && ld.transform.keyframes ? ld.transform : { keyframes: [] };
       if (ld.video) layer.video = ld.video;
+      layer.parentId = ld.parentId || null;
+      layer._collapsed = !!ld.collapsed;
       const isVec = ld.type === 'vector';
       for (const num in (ld.cels || {})) {
         const cd = ld.cels[num];

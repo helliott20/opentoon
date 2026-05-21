@@ -17,6 +17,17 @@
     <div id="viewport">
       <canvas id="canvas"></canvas>
       <canvas id="overlay"></canvas>
+      <div id="lasso-toolbar" class="lasso-tb hidden">
+        <button data-mode="uniform" class="active" title="Uniform: scale + rotate, aspect preserved (default — drag inside to translate)">Uniform</button>
+        <button data-mode="freeform" title="Freeform: scale X/Y independently + rotate">Freeform</button>
+        <button data-mode="distort" title="Distort: drag corners for perspective">Distort</button>
+        <button data-mode="warp" title="Warp: curve the edges">Warp</button>
+        <span class="lasso-tb-sep"></span>
+        <button data-mode="reset" title="Reset transform (clear keyframes)">Reset</button>
+        <span class="lasso-tb-sep"></span>
+        <button data-mode="commit" title="Commit (Enter)">✓</button>
+        <button data-mode="cancel" title="Cancel (Esc)">✕</button>
+      </div>
     </div>
     <div id="viewbar"></div>
   </div>

@@ -189,20 +189,32 @@
         ctx.fillRect(0, 0, p.width, p.height);
       }
       const px = p.width / 2, py = p.height / 2;
+      // Multiply a leaf's opacity by every ancestor folder's opacity
+      // so folder-level fades cascade through their children (Toon
+      // Boom peg / After Effects "Track Matte" parity). A folder
+      // that's invisible or 0-opacity hides every descendant.
+      const ancestors = this.app.layerAncestors
+        ? l => this.app.layerAncestors(l)
+        : () => [];
+      const worldOpacity = (layer) => {
+        let op = layer.opacity == null ? 1 : layer.opacity;
+        for (const a of ancestors(layer)) op *= (a.opacity == null ? 1 : a.opacity);
+        return op;
+      };
+      const ancestorVisible = (layer) => {
+        for (const a of ancestors(layer)) if (!a.visible) return false;
+        return true;
+      };
       for (const layer of p.layers) {
+        if (layer.type === 'group') continue;   // folders don't render
         if (!layer.visible) continue;
+        if (!ancestorVisible(layer)) continue;
         if (layer.type === 'video') {
           const v = layer.videoEl;
           if (v && v.readyState >= 2 && v.videoWidth) {
-            const tr = layer.transformAt(frame);
             ctx.save();
-            ctx.globalAlpha = layer.opacity;
-            if (tr.x || tr.y || tr.rot || tr.sx !== 1 || tr.sy !== 1) {
-              ctx.translate(tr.x + px, tr.y + py);
-              ctx.rotate(tr.rot * Math.PI / 180);
-              ctx.scale(tr.sx, tr.sy);
-              ctx.translate(-px, -py);
-            }
+            ctx.globalAlpha = worldOpacity(layer);
+            this._applyWorldXform(ctx, layer, frame);
             const sc = Math.min(p.width / v.videoWidth, p.height / v.videoHeight);
             const vw = v.videoWidth * sc, vh = v.videoHeight * sc;
             ctx.drawImage(v, (p.width - vw) / 2, (p.height - vh) / 2, vw, vh);
@@ -212,15 +224,9 @@
         }
         const cel = layer.celAt(frame);
         if (!cel) continue;
-        const tr = layer.transformAt(frame);
         ctx.save();
-        ctx.globalAlpha = layer.opacity;
-        if (tr.x || tr.y || tr.rot || tr.sx !== 1 || tr.sy !== 1) {
-          ctx.translate(tr.x + px, tr.y + py);
-          ctx.rotate(tr.rot * Math.PI / 180);
-          ctx.scale(tr.sx, tr.sy);
-          ctx.translate(-px, -py);
-        }
+        ctx.globalAlpha = worldOpacity(layer);
+        this._applyWorldXform(ctx, layer, frame);
         // Vector cels: re-render strokes directly into the stage instead of
         // upscaling cel.canvas, so the linework stays crisp at any zoom.
         // Skip the direct path while a stroke is being live-drawn (the
@@ -231,8 +237,11 @@
         if (cel.kind === 'vector' && cel.strokes && OT.Vector
             && !opts.useRaster && !cel._liveDrawing) {
           const V = OT.Vector;
-          for (const st of cel.strokes) if (st.type === 'fill') V.renderStroke(ctx, st);
-          for (const st of cel.strokes) if (st.type !== 'fill') V.renderStroke(ctx, st);
+          // Skip strokes flagged _lassoHidden — the lasso tool renders them
+          // separately via the overlay as a pre-rasterised snippet during
+          // transform drags (huge perf win for large selections).
+          for (const st of cel.strokes) if (st.type === 'fill' && !st._lassoHidden) V.renderStroke(ctx, st);
+          for (const st of cel.strokes) if (st.type !== 'fill' && !st._lassoHidden) V.renderStroke(ctx, st);
         } else {
           ctx.drawImage(cel.canvas, 0, 0, p.width, p.height);
         }
@@ -241,13 +250,30 @@
       ctx.globalAlpha = 1;
     }
     _layerXform(ctx, layer, frame) {
+      // Now an alias for the ancestor-aware version. Kept for callers
+      // (onion skin etc.) that pass a leaf layer and want the same world
+      // matrix the composite uses.
+      this._applyWorldXform(ctx, layer, frame);
+    }
+    // Apply the full ancestor → leaf transform chain to ctx. Outermost
+    // ancestor first so a parent group's translate/rotate/scale becomes
+    // the frame in which every descendant draws (Toon Boom peg model).
+    _applyWorldXform(ctx, layer, frame) {
       const p = this.app.project, px = p.width / 2, py = p.height / 2;
-      const tr = layer.transformAt(frame);
-      if (tr.x || tr.y || tr.rot || tr.sx !== 1 || tr.sy !== 1) {
-        ctx.translate(tr.x + px, tr.y + py);
-        ctx.rotate(tr.rot * Math.PI / 180);
-        ctx.scale(tr.sx, tr.sy);
-        ctx.translate(-px, -py);
+      const chain = [];
+      // Build ancestor chain (immediate parent first, root last) then add leaf
+      const ancestors = (this.app.layerAncestors ? this.app.layerAncestors(layer) : []);
+      for (let i = ancestors.length - 1; i >= 0; i--) chain.push(ancestors[i]);
+      chain.push(layer);
+      for (const l of chain) {
+        const tr = l.transformAt ? l.transformAt(frame) : null;
+        if (!tr) continue;
+        if (tr.x || tr.y || tr.rot || tr.sx !== 1 || tr.sy !== 1) {
+          ctx.translate(tr.x + px, tr.y + py);
+          ctx.rotate(tr.rot * Math.PI / 180);
+          ctx.scale(tr.sx, tr.sy);
+          ctx.translate(-px, -py);
+        }
       }
     }
 
@@ -493,6 +519,26 @@
           // corrupt view.x / view.y, leaving the canvas un-pannable.
           pt.sx = ce.clientX; pt.sy = ce.clientY;
           this.app.tools.pointerMove(pt, e);
+        }
+        // Predicted events: extrapolated samples ahead of the cursor that
+        // the browser hands us via PointerEvent.getPredictedEvents (where
+        // available). Forwarded to the active tool for overlay-only
+        // draw-ahead, hiding ~16 ms of display latency without ever
+        // committing potentially-wrong points to the stroke. Wrapped in
+        // try/catch because some drivers throw inside this API.
+        if (this.app.tools.dragging) {
+          let predicted = [];
+          if (e.getPredictedEvents) {
+            try { predicted = e.getPredictedEvents().filter(usable); }
+            catch (_) { predicted = []; }
+          }
+          const projected = predicted.map(ce => {
+            const p = this.screenToProject(ce.clientX, ce.clientY);
+            p.pressure = (ce.pointerType === 'pen')
+              ? this.app.mapPressure(ce.pressure || 0.5) : 1;
+            return p;
+          });
+          if (this.app.tools.setPredicted) this.app.tools.setPredicted(projected);
         }
         this.cursorPt = pt;
         if (!this.app.tools.dragging) this.renderOverlay();
