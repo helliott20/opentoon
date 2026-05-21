@@ -1118,3 +1118,154 @@ body.clean-view #viewbar{display:none;}
 .about-link a{color:var(--accent);text-decoration:none;}
 .about-link a:hover{text-decoration:underline;}
 .about-status{color:var(--accent);font-size:11px;min-height:15px;}
+
+/* ---------- Update Ready: banner + pill ---------- */
+.update-card{
+  position:fixed;
+  right:18px;bottom:46px;
+  width:288px;
+  z-index:950;
+  background:linear-gradient(180deg,#1d2026 0%,#161920 100%);
+  border:1px solid #000a;
+  border-radius:8px;
+  box-shadow:
+    0 1px 0 #ffffff08 inset,
+    0 14px 32px #000c,
+    0 0 0 1px var(--accent-glow),
+    0 0 40px #4ba8e022;
+  color:var(--cream);
+  overflow:hidden;
+  animation:update-card-in .32s cubic-bezier(.2,.7,.3,1);
+}
+.update-card.is-leaving{
+  animation:update-card-out .22s cubic-bezier(.55,0,.7,.3) forwards;
+}
+@keyframes update-card-in{
+  from{opacity:0;transform:translateY(14px) scale(.985);}
+  to{opacity:1;transform:none;}
+}
+@keyframes update-card-out{
+  to{opacity:0;transform:translateY(8px) scale(.99);}
+}
+.update-card__bar{
+  height:3px;
+  background:linear-gradient(90deg,
+    transparent 0%,
+    var(--accent) 18%,
+    #7ec5ee 50%,
+    var(--accent) 82%,
+    transparent 100%);
+  background-size:200% 100%;
+  animation:update-card-stripe 3.2s linear infinite;
+}
+@keyframes update-card-stripe{
+  from{background-position:200% 0;}
+  to{background-position:-200% 0;}
+}
+.update-card__head{
+  display:flex;align-items:center;gap:8px;
+  padding:11px 12px 8px;
+}
+.update-card__pip{
+  width:8px;height:8px;border-radius:50%;
+  background:var(--accent);
+  box-shadow:0 0 0 3px #4ba8e033,0 0 10px var(--accent);
+  flex:0 0 auto;
+  animation:update-pip-pulse 1.6s ease-in-out infinite;
+}
+@keyframes update-pip-pulse{
+  0%,100%{box-shadow:0 0 0 3px #4ba8e022,0 0 6px var(--accent);}
+  50%   {box-shadow:0 0 0 5px #4ba8e040,0 0 14px #7ec5ee;}
+}
+.update-card__eyebrow{
+  font-size:10px;
+  letter-spacing:0.22em;
+  text-transform:uppercase;
+  color:var(--cream);
+  font-weight:700;
+}
+.update-card__ver{
+  margin-left:auto;
+  font-size:10px;
+  letter-spacing:0.12em;
+  color:var(--text-dim);
+}
+.update-card__x{
+  width:22px;height:22px;
+  display:flex;align-items:center;justify-content:center;
+  background:transparent;border:none;
+  color:var(--text-dim);border-radius:4px;
+  cursor:pointer;transition:background var(--t),color var(--t);
+  margin-left:6px;
+}
+.update-card__x:hover{background:#ffffff10;color:var(--cream);}
+.update-card__body{
+  padding:0 12px 12px;
+  font-size:12.5px;
+  line-height:1.55;
+  color:#cdd2dc;
+}
+.update-card__body b{color:var(--cream);font-weight:600;}
+.update-card__foot{
+  display:flex;gap:8px;align-items:center;
+  padding:0 12px 12px;
+}
+.update-card__install{
+  flex:1;
+  font-size:12px;
+  letter-spacing:0.02em;
+  padding:8px 10px;
+  box-shadow:
+    inset 0 1px 0 #ffffff30,
+    0 0 0 1px #4ba8e040,
+    0 6px 18px #4ba8e033;
+}
+.update-card__install:hover{filter:brightness(1.12);}
+.update-card__later{
+  font-size:11.5px;
+  padding:8px 12px;
+  background:transparent;
+  border-color:#ffffff14;
+  color:var(--text-dim);
+}
+.update-card__later:hover{background:#ffffff08;color:var(--cream);}
+.update-card.is-installing .update-card__install{
+  pointer-events:none;opacity:.65;
+}
+
+.update-pill{
+  position:fixed;
+  right:14px;bottom:38px;
+  display:inline-flex;align-items:center;gap:7px;
+  padding:6px 11px 6px 9px;
+  background:linear-gradient(180deg,#1d2026,#161920);
+  border:1px solid #4ba8e055;
+  border-radius:999px;
+  color:var(--cream);
+  font-size:10px;letter-spacing:0.18em;text-transform:uppercase;
+  cursor:pointer;
+  z-index:949;
+  box-shadow:
+    0 1px 0 #ffffff10 inset,
+    0 6px 18px #000a,
+    0 0 0 1px #4ba8e022,
+    0 0 18px #4ba8e022;
+  transition:transform var(--t),box-shadow var(--t),border-color var(--t);
+  animation:update-card-in .26s cubic-bezier(.2,.7,.3,1);
+}
+.update-pill:hover{
+  transform:translateY(-1px);
+  border-color:#4ba8e0aa;
+  box-shadow:
+    0 1px 0 #ffffff14 inset,
+    0 8px 22px #000c,
+    0 0 0 1px #4ba8e055,
+    0 0 26px #4ba8e055;
+}
+.update-pill__pip{
+  width:7px;height:7px;border-radius:50%;
+  background:var(--accent);
+  box-shadow:0 0 0 2px #4ba8e033,0 0 8px var(--accent);
+  animation:update-pip-pulse 1.6s ease-in-out infinite;
+}
+.update-pill__label{font-weight:700;}

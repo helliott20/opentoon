@@ -51,6 +51,7 @@
       this._buildCanvasActions();
       this._installSidebarResize();
       this._installPanelCollapse();
+      this._installUpdateBanner();
 
       app.on('toolchange', () => { this._refreshTool(); this._buildToolOpts(); this._refreshCanvasActions(); });
       app.on('layerschange', () => { this._refreshLayers(); this._refreshCanvasActions(); });
@@ -2093,6 +2094,93 @@
         if (e && e.isConnected && r && r.state === 'disabled')
           e.textContent = 'Updates are disabled in this build.';
       }).catch(() => {});
+    }
+
+    /* ============================ update-ready banner ============================ */
+    // electron-updater downloads silently in the background. Without a prompt,
+    // the artist never knows a restart is needed. This installs a global
+    // listener and surfaces a non-modal card in the bottom-right when the
+    // update has finished downloading.
+    _installUpdateBanner() {
+      const d = window.OpenToonDesktop;
+      if (!d || !d.onUpdateStatus) return;
+      d.onUpdateStatus(s => {
+        if (!s) return;
+        if (s.state === 'downloaded') {
+          this._updateReadyVersion = s.version || '';
+          this._showUpdateBanner();
+        }
+      });
+    }
+    _showUpdateBanner() {
+      if (this._updateBannerEl && this._updateBannerEl.isConnected) return;
+      // If a pill was sitting in the corner, retire it — the full card returns.
+      if (this._updatePillEl && this._updatePillEl.isConnected)
+        this._updatePillEl.remove();
+
+      const v = this._updateReadyVersion;
+      const vLabel = v ? ('v' + v) : '';
+      const card = el('div', { class: 'update-card', role: 'dialog', 'aria-label': 'Update ready' });
+      card.innerHTML =
+        '<div class="update-card__bar"></div>' +
+        '<div class="update-card__head">' +
+          '<span class="update-card__pip" aria-hidden="true"></span>' +
+          '<span class="update-card__eyebrow brand-mono">Update Ready</span>' +
+          (vLabel ? '<span class="update-card__ver brand-mono">' + vLabel + '</span>' : '') +
+          '<button class="update-card__x" type="button" aria-label="Dismiss">' +
+            '<svg viewBox="0 0 14 14" width="12" height="12" aria-hidden="true">' +
+              '<path d="M3 3 L11 11 M11 3 L3 11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>' +
+            '</svg>' +
+          '</button>' +
+        '</div>' +
+        '<div class="update-card__body">' +
+          'A new version of <b>OpenToon</b> has been downloaded.<br>' +
+          'Restart to finish installing.' +
+        '</div>' +
+        '<div class="update-card__foot">' +
+          '<button class="btn primary update-card__install" type="button">Restart &amp; Install</button>' +
+          '<button class="btn update-card__later" type="button">Later</button>' +
+        '</div>';
+
+      const install = () => {
+        const desktop = window.OpenToonDesktop;
+        if (desktop && desktop.quitAndInstall) {
+          card.classList.add('is-installing');
+          const eyebrow = card.querySelector('.update-card__eyebrow');
+          if (eyebrow) eyebrow.textContent = 'Installing…';
+          try { desktop.quitAndInstall(); } catch (_) {}
+        }
+      };
+      const later = () => {
+        card.classList.add('is-leaving');
+        setTimeout(() => { if (card.isConnected) card.remove(); }, 220);
+        this._showUpdatePill();
+      };
+
+      card.querySelector('.update-card__install').addEventListener('click', install);
+      card.querySelector('.update-card__later').addEventListener('click', later);
+      card.querySelector('.update-card__x').addEventListener('click', later);
+
+      document.body.appendChild(card);
+      this._updateBannerEl = card;
+    }
+    _showUpdatePill() {
+      if (this._updatePillEl && this._updatePillEl.isConnected) return;
+      const pill = el('button', {
+        class: 'update-pill brand-mono',
+        type: 'button',
+        title: 'Restart to install the new version of OpenToon',
+        'aria-label': 'Update ready - click to restart'
+      });
+      pill.innerHTML =
+        '<span class="update-pill__pip" aria-hidden="true"></span>' +
+        '<span class="update-pill__label">Update Ready</span>';
+      pill.addEventListener('click', () => {
+        pill.remove();
+        this._showUpdateBanner();
+      });
+      document.body.appendChild(pill);
+      this._updatePillEl = pill;
     }
   }
 
