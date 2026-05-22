@@ -552,10 +552,11 @@
     }
     _seedWetStroke(id, projPt) {
       const t = this.state.tool;
-      // No `predicted` field: D1 drops predicted touches entirely. They
-      // caused leading-edge shimmer because their extrapolation flickered
-      // frame-to-frame, and the `pts.concat(predicted)` produced a fresh
-      // array each render -- defeating OT.Vector.samplesOf's cache.
+      // wet.rawPts is the append-only raw input -- post-pointer-event,
+      // pre-finalize. wet.pts is the finalize output that the renderer
+      // sees. Both start with the single seed point because finalize on
+      // a 1-pt array returns that 1-pt array.
+      const rawPts = [projPt];
       this.state.wetStroke = {
         id: id, type: 'line',
         pencil: t.name === 'pencil',
@@ -563,7 +564,8 @@
         width: t.toolSize || 6,
         opacity: t.toolOpacity == null ? 1 : t.toolOpacity,
         closed: false,
-        pts: [projPt]
+        rawPts: rawPts,
+        pts: rawPts
       };
       if (this._wetTimer) { clearTimeout(this._wetTimer); this._wetTimer = null; }
     }
@@ -580,7 +582,23 @@
     _extendWetStroke(actualPts, predictedPts) {
       const ws = this.state.wetStroke;
       if (!ws || !actualPts || !actualPts.length) return;
-      ws.pts = ws.pts.concat(actualPts);
+      // Append to rawPts (the input), then run finalize() to get the
+      // would-commit pts (the output the renderer uses). Building a
+      // new rawPts array invalidates OT.Vector.samplesOf's per-array
+      // cache; finalize then produces a fresh result pts as well.
+      ws.rawPts = ws.rawPts.concat(actualPts);
+      const t = this.state.tool;
+      const layer = this.state.layersById.get(this.state.activeLayerId);
+      const cel = layer ? layer.celAt(this.state.frame) : null;
+      const fin = OT.StrokeFinalize.finalize(ws.rawPts, {
+        tol: typeof t.tol === 'number' ? t.tol : 0.4,
+        snapDist: typeof t.snapDist === 'number' ? t.snapDist : 0,
+        inkDynamics: !!t.inkDynamics,
+        autoClose: !!t.autoClose,
+        cel: cel && cel.kind === 'vector' ? cel : null
+      });
+      ws.pts = fin.pts;
+      ws.closed = fin.closed;
     }
     // Defensive timer: started on pointerup, NOT on seed. While the artist
     // is still dragging, the wet stroke must stay alive arbitrarily long.
@@ -651,10 +669,11 @@
         const projScale = this.fit.w / Math.max(1, s.project.width);
         c.translate(this.fit.x, this.fit.y);
         c.scale(projScale, projScale);
-        // Pass the wet stroke straight through. Its `pts` array reference
-        // is stable across renders (mutated by push only) which keeps
-        // OT.Vector.samplesOf's WeakMap cache hot. No predicted touches
-        // are appended — see _seedWetStroke for the rationale.
+        // Pass the wet stroke straight through. Its `pts` is the finalize
+        // output rebuilt on every _extendWetStroke -- a fresh array each
+        // time, so OT.Vector.samplesOf's WeakMap key changes and the
+        // sample cache stays correct. No predicted touches are appended —
+        // see _seedWetStroke for the rationale.
         OT.compositeStage(s.project, s.frame, c, {
           bg: true,
           wetStroke: s.wetStroke || null,
