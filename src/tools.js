@@ -939,6 +939,11 @@
       if (changed) {
         pending.cel.strokes = strokes;
         this.changed = true;
+        // Pen window mirrors cel.strokes; emit celchange so pencast can
+        // republish the live mid-drag state. Without this, the pen only
+        // sees the eraser's effect after pointerUp (pencast was last
+        // told celchange on the previous commit, not this in-flight one).
+        pending.app.emit('celchange');
       }
       pending.app.emit('render');
     }
