@@ -413,6 +413,20 @@
       const s = Object.assign({}, st);
       s.id = U.uid();
       s.closed = false;
+      // Disable auto-taper on cut fragments. computeTaperEnv tapers
+      // the first/last min(0.08*L, 60)px of every brush stroke to give
+      // it pointy ends; on a fragment freshly cut by the eraser it
+      // applies that taper at the CUT endpoint, producing a fine
+      // pointy tip where the destination-out hole showed a sharp
+      // circular bite at full stroke width. The user wants the cut
+      // to match what the eraser disc actually removed, so we turn
+      // the auto-taper off for any fragment produced by an erase.
+      //
+      // Side effect: if the original stroke had its natural start or
+      // end inside this fragment, that endpoint loses its original
+      // auto-taper too. Less jarring than a new pointy spike at the
+      // cut and matches the cut visual the artist saw.
+      s.taper = false;
       // Use the run's first/last (interpolated cut endpoints) plus the
       // ORIGINAL polyline vertices that fell inside the run. The original
       // st.pts were already simplified at commit time, so re-simplifying
