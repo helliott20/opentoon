@@ -307,7 +307,10 @@
     // bounding box, return immediately. With many strokes scattered
     // across the cel this is the difference between a snappy drag and
     // a stutter — every miss skips the whole densify-and-trim loop.
-    const reach = r + (st.width || 0) / 2;
+    // The bbox uses the maximum possible reach (linejoin disc at an
+    // original pt = r + wHalf); the per-pt check below is tighter.
+    const wHalf = (st.width || 0) / 2;
+    const reach = r + wHalf;
     if (st.pts && st.pts.length) {
       let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
       for (const p of st.pts) {
@@ -317,25 +320,86 @@
       if (cx + reach < minx || cx - reach > maxx
           || cy + reach < miny || cy - reach > maxy) return null;
     }
+    // Densify each segment, tagging each dense pt with the segment unit
+    // direction so we can do a per-pt band-vs-disc check (more accurate
+    // than treating every pt as a disc of radius wHalf).
+    //
+    // The original eraseStroke used reach = r + wHalf everywhere -- a
+    // worst-case disc test that assumed each pt's perpendicular extent
+    // always pointed toward the eraser. For segments that run roughly
+    // perpendicular to the eraser-to-stroke direction (so the band's
+    // perpendicular extent goes ACROSS the stroke, not toward the
+    // eraser), this overcut the stroke by wHalf at the edges, and on
+    // commit users saw the cut go wider than the destination-out hole.
+    //
+    // For interpolated pts (interior of a segment), we now use the
+    // actual band geometry: if perp_dist (perpendicular from eraser to
+    // centerline) <= wHalf the closest band-point is the projection of
+    // the eraser onto the perpendicular line, at along-distance from
+    // the pt -- cut iff along < r. Otherwise the closest band-point is
+    // the perpendicular endpoint w/2 from the centerline, at distance
+    // sqrt(along^2 + (perp - wHalf)^2) -- cut iff that < r.
+    //
+    // For ORIGINAL pts (the polyline corners), lineJoin='round' renders
+    // a disc of radius wHalf at the corner regardless of segment dir,
+    // so we keep the wider reach = r + wHalf disc test there.
     const P = st.pts, dense = [];
     const spacing = Math.max(2, r * 0.4);
     for (let i = 0; i < P.length - 1; i++) {
       const a = P[i], b = P[i + 1];
-      const d = Math.hypot(b.x - a.x, b.y - a.y);
-      const n = Math.max(1, Math.ceil(d / spacing));
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dLen = Math.hypot(dx, dy) || 1;
+      const ndx = dx / dLen, ndy = dy / dLen;
+      const n = Math.max(1, Math.ceil(dLen / spacing));
       const pa = a.p == null ? 1 : a.p, pb = b.p == null ? 1 : b.p;
       for (let k = 0; k < n; k++) {
         const t = k / n;
-        dense.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, p: pa + (pb - pa) * t });
+        dense.push({
+          x: a.x + dx * t, y: a.y + dy * t,
+          p: pa + (pb - pa) * t,
+          dx: ndx, dy: ndy,
+          orig: k === 0      // original polyline vertex
+        });
       }
     }
+    // Final pt: original vertex, direction = last segment's direction.
     const last = P[P.length - 1];
-    dense.push({ x: last.x, y: last.y, p: last.p == null ? 1 : last.p });
+    if (P.length >= 2) {
+      const a2 = P[P.length - 2];
+      const dx = last.x - a2.x, dy = last.y - a2.y;
+      const dLen = Math.hypot(dx, dy) || 1;
+      dense.push({
+        x: last.x, y: last.y, p: last.p == null ? 1 : last.p,
+        dx: dx / dLen, dy: dy / dLen, orig: true
+      });
+    } else {
+      dense.push({
+        x: last.x, y: last.y, p: last.p == null ? 1 : last.p,
+        dx: 1, dy: 0, orig: true
+      });
+    }
     let any = false;
     const keep = dense.map(p => {
-      const e = Math.hypot(p.x - cx, p.y - cy) <= reach;
-      if (e) any = true;
-      return !e;
+      const ex = cx - p.x, ey = cy - p.y;
+      let cut;
+      if (p.orig) {
+        // Round lineJoin disc test.
+        cut = (ex * ex + ey * ey) <= reach * reach;
+      } else {
+        // Band-vs-disc test using segment direction.
+        const perp = Math.abs(ex * (-p.dy) + ey * p.dx);
+        const along = Math.abs(ex * p.dx + ey * p.dy);
+        let bandDist2;
+        if (perp <= wHalf) {
+          bandDist2 = along * along;
+        } else {
+          const dp = perp - wHalf;
+          bandDist2 = along * along + dp * dp;
+        }
+        cut = bandDist2 <= r * r;
+      }
+      if (cut) any = true;
+      return !cut;
     });
     if (!any) return null;
     const runs = [];
