@@ -311,8 +311,51 @@
         zoom: Math.round(st.view.zoom * 100),
         activeLayerKind,
         sel: { name: selName, count: selCount, group: selIsGroup, hasXform: selHasXform, color: selColor, colors: selColors },
-        transform: { armed: xfArmed, mode: xfMode, isRaster: xfIsRaster }
+        transform: { armed: xfArmed, mode: xfMode, isRaster: xfIsRaster },
+        // Procreate-style shape-snap (QuickShape): when the artist holds
+        // at the end of a stroke, the brush/pencil tool detects a clean
+        // primitive and morphs the rough drawing into it. The morph runs
+        // on main (tool._snapAnim → tool._snapPreview); we publish the
+        // CURRENT rendered pts (with morph interpolation already applied)
+        // so the pen window can render the snap live during the drag
+        // instead of only seeing it after commit. null when no snap.
+        snapShape: this._activeSnapShape(t)
       };
+    }
+
+    // Read the active brush/pencil tool's current shape-snap state and
+    // return the pts the artist should see THIS frame. Returns null when
+    // no snap is in flight. The morph interpolation here mirrors the
+    // logic in PaintTool/PencilTool.drawOverlay (see tools.js:543).
+    _activeSnapShape(tool) {
+      if (!tool) return null;
+      const isPencil = tool.name === 'pencil';
+      // _snapAnim: morphing from rough freehand toward the snapped pts.
+      if (tool._snapAnim) {
+        const a = tool._snapAnim;
+        const now = performance.now();
+        const t = Math.min(1, (now - a.start) / a.duration);
+        const eased = t * t * (3 - 2 * t);
+        const from = a.fromPts, to = a.toPts;
+        const pts = new Array(from.length);
+        for (let i = 0; i < from.length; i++) {
+          pts[i] = {
+            x: from[i].x + (to[i].x - from[i].x) * eased,
+            y: from[i].y + (to[i].y - from[i].y) * eased
+          };
+        }
+        return { pts, closed: !!a.closed, pencil: isPencil };
+      }
+      // _snapPreview: morph finished (or never animated, e.g. line-snap
+      // drag-to-refine which mutates pts[1] each frame).
+      if (tool._snapPreview && tool._snapPreview.pts) {
+        return {
+          pts: tool._snapPreview.pts.slice(),
+          closed: !!tool._snapPreview.closed,
+          pencil: isPencil
+        };
+      }
+      return null;
     }
 
     /* ----- pen -> main : pointer input ----- */

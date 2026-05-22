@@ -48,7 +48,7 @@
         palette: [],
         activeLayerId: null,
         frame: 0,
-        tool: { name: 'brush', color: '#222222', toolSize: 6, toolOpacity: 1, pencil: false, brushFrac: 0.02, toolRadius: 0, tol: 0.4, snapDist: 0, inkDynamics: false, autoClose: false, smoothing: 0, activeLayerKind: null, sel: {}, transform: {} },
+        tool: { name: 'brush', color: '#222222', toolSize: 6, toolOpacity: 1, pencil: false, brushFrac: 0.02, toolRadius: 0, tol: 0.4, snapDist: 0, inkDynamics: false, autoClose: false, smoothing: 0, snapShape: null, activeLayerKind: null, sel: {}, transform: {} },
         wetStroke: null
       };
       this.fit = { x: 0, y: 0, w: 0, h: 0 };
@@ -444,6 +444,12 @@
       if (typeof meta.inkDynamics === 'boolean') t.inkDynamics = meta.inkDynamics;
       if (typeof meta.autoClose === 'boolean') t.autoClose = meta.autoClose;
       if (typeof meta.smoothing === 'number') t.smoothing = meta.smoothing;
+      // Shape-snap (QuickShape) live preview. `null` clears, an object
+      // {pts, closed, pencil} causes _compositeStage to render the snapped
+      // shape in place of the artist's freehand wet stroke. Updated by
+      // main on every overlayrender pump (~30 Hz) so the morph animation
+      // is visible on the pen during the drag instead of only on commit.
+      if ('snapShape' in meta) t.snapShape = meta.snapShape;
       if (meta.sel) t.sel = meta.sel;
       if (meta.transform) t.transform = meta.transform;
       if (typeof meta.activeLayerKind === 'string') t.activeLayerKind = meta.activeLayerKind;
@@ -703,9 +709,26 @@
         // time, so OT.Vector.samplesOf's WeakMap key changes and the
         // sample cache stays correct. No predicted touches are appended —
         // see _seedWetStroke for the rationale.
+        //
+        // If shape-snap (QuickShape) is active on main, the snapped pts
+        // arrive via tool-meta as state.tool.snapShape. Override the wet
+        // stroke's pts with the snapped pts (and force sharp+no-taper so
+        // it renders as a clean primitive) so the artist sees the morph
+        // live during the drag instead of only after release.
+        let wetForRender = s.wetStroke;
+        if (wetForRender && s.tool.snapShape && s.tool.snapShape.pts) {
+          const ss = s.tool.snapShape;
+          wetForRender = Object.assign({}, s.wetStroke, {
+            pts: ss.pts,
+            closed: !!ss.closed,
+            sharp: true,
+            taper: false,
+            pencil: !!ss.pencil
+          });
+        }
         OT.compositeStage(s.project, s.frame, c, {
           bg: true,
-          wetStroke: s.wetStroke || null,
+          wetStroke: wetForRender || null,
           wetLayerId: s.activeLayerId,
           includeVideo: false          // D1: pen has no <video> element
           // includeLassoHidden defaults to false (skip transform-drag
