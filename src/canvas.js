@@ -182,99 +182,14 @@
     /* ---------------- compositing ---------------- */
     // Draw bg + all visible layers at `frame` onto ctx already in project coords.
     compositeStage(frame, ctx, opts) {
-      opts = opts || {};
-      const p = this.app.project;
-      if (opts.bg !== false) {
-        ctx.fillStyle = p.bg;
-        ctx.fillRect(0, 0, p.width, p.height);
-      }
-      const px = p.width / 2, py = p.height / 2;
-      // Multiply a leaf's opacity by every ancestor folder's opacity
-      // so folder-level fades cascade through their children (Toon
-      // Boom peg / After Effects "Track Matte" parity). A folder
-      // that's invisible or 0-opacity hides every descendant.
-      const ancestors = this.app.layerAncestors
-        ? l => this.app.layerAncestors(l)
-        : () => [];
-      const worldOpacity = (layer) => {
-        let op = layer.opacity == null ? 1 : layer.opacity;
-        for (const a of ancestors(layer)) op *= (a.opacity == null ? 1 : a.opacity);
-        return op;
-      };
-      const ancestorVisible = (layer) => {
-        for (const a of ancestors(layer)) if (!a.visible) return false;
-        return true;
-      };
-      for (const layer of p.layers) {
-        if (layer.type === 'group') continue;   // folders don't render
-        if (!layer.visible) continue;
-        if (!ancestorVisible(layer)) continue;
-        if (layer.type === 'video') {
-          const v = layer.videoEl;
-          if (v && v.readyState >= 2 && v.videoWidth) {
-            ctx.save();
-            ctx.globalAlpha = worldOpacity(layer);
-            this._applyWorldXform(ctx, layer, frame);
-            const sc = Math.min(p.width / v.videoWidth, p.height / v.videoHeight);
-            const vw = v.videoWidth * sc, vh = v.videoHeight * sc;
-            ctx.drawImage(v, (p.width - vw) / 2, (p.height - vh) / 2, vw, vh);
-            ctx.restore();
-          }
-          continue;
-        }
-        const cel = layer.celAt(frame);
-        if (!cel) continue;
-        ctx.save();
-        ctx.globalAlpha = worldOpacity(layer);
-        this._applyWorldXform(ctx, layer, frame);
-        // Vector cels: re-render strokes directly into the stage instead of
-        // upscaling cel.canvas, so the linework stays crisp at any zoom.
-        // Skip the direct path while a stroke is being live-drawn (the
-        // committed stroke isn't in cel.strokes yet -- live stamps live on
-        // cel.canvas) so the brush wet-ink preview stays visible. Raster
-        // cels and the cached cel.canvas (used for thumbs/exports/onion) are
-        // untouched.
-        if (cel.kind === 'vector' && cel.strokes && OT.Vector
-            && !opts.useRaster && !cel._liveDrawing) {
-          const V = OT.Vector;
-          // Skip strokes flagged _lassoHidden — the lasso tool renders them
-          // separately via the overlay as a pre-rasterised snippet during
-          // transform drags (huge perf win for large selections).
-          for (const st of cel.strokes) if (st.type === 'fill' && !st._lassoHidden) V.renderStroke(ctx, st);
-          for (const st of cel.strokes) if (st.type !== 'fill' && !st._lassoHidden) V.renderStroke(ctx, st);
-        } else {
-          ctx.drawImage(cel.canvas, 0, 0, p.width, p.height);
-        }
-        ctx.restore();
-      }
-      ctx.globalAlpha = 1;
+      OT.compositeStage(this.app.project, frame, ctx, opts, {
+        layerAncestors: layer => this.app.layerAncestors
+          ? this.app.layerAncestors(layer) : []
+      });
     }
     _layerXform(ctx, layer, frame) {
-      // Now an alias for the ancestor-aware version. Kept for callers
-      // (onion skin etc.) that pass a leaf layer and want the same world
-      // matrix the composite uses.
-      this._applyWorldXform(ctx, layer, frame);
-    }
-    // Apply the full ancestor → leaf transform chain to ctx. Outermost
-    // ancestor first so a parent group's translate/rotate/scale becomes
-    // the frame in which every descendant draws (Toon Boom peg model).
-    _applyWorldXform(ctx, layer, frame) {
-      const p = this.app.project, px = p.width / 2, py = p.height / 2;
-      const chain = [];
-      // Build ancestor chain (immediate parent first, root last) then add leaf
-      const ancestors = (this.app.layerAncestors ? this.app.layerAncestors(layer) : []);
-      for (let i = ancestors.length - 1; i >= 0; i--) chain.push(ancestors[i]);
-      chain.push(layer);
-      for (const l of chain) {
-        const tr = l.transformAt ? l.transformAt(frame) : null;
-        if (!tr) continue;
-        if (tr.x || tr.y || tr.rot || tr.sx !== 1 || tr.sy !== 1) {
-          ctx.translate(tr.x + px, tr.y + py);
-          ctx.rotate(tr.rot * Math.PI / 180);
-          ctx.scale(tr.sx, tr.sy);
-          ctx.translate(-px, -py);
-        }
-      }
+      OT.applyWorldXform(ctx, layer, frame, this.app.project,
+        l => this.app.layerAncestors ? this.app.layerAncestors(l) : []);
     }
 
     _tinted(cel, color) {

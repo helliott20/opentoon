@@ -1268,8 +1268,9 @@ Overwrite `pen/pen.js` with:
           bg: true,
           wetStroke: wetForRender,
           wetLayerId: s.activeLayerId,
-          skipVideo: true,             // D1: no video on pen
-          skipLassoHidden: false
+          includeVideo: false          // D1: pen has no <video> element
+          // includeLassoHidden defaults to false (skip transform-drag
+          // rasterised originals); same as the main canvas.
         }, {
           layerAncestors: layer => this._layerAncestors(layer)
         });
