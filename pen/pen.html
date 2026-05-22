@@ -53,12 +53,10 @@
   }
   /* ---- canvas ---- */
   #stage{flex:1;position:relative;min-height:0;}
-  /* #screen carries the bitmap streamed from the main window and only
-     repaints when a new frame arrives. #wet sits on top and carries the
-     in-progress brush stroke -- redrawn every pointer move but tiny. The
-     split avoids a full-resolution drawImage per pen sample. */
-  #screen,#wet{position:absolute;top:0;left:0;touch-action:none;display:block;}
-  #wet{pointer-events:none;}
+  /* D1 slave-renderer: #screen is the only canvas now. Vector layers are
+     re-rendered locally each tick from the mirrored OT.Layer/OT.Cel state
+     plus a wet stroke fed from local pointer input. No bitmap channel. */
+  #screen{position:absolute;top:0;left:0;touch-action:none;display:block;}
   #hint{
     position:absolute;inset:0;display:flex;align-items:center;
     justify-content:center;flex-direction:column;gap:8px;
@@ -68,93 +66,204 @@
     font-family:"Space Grotesk","Segoe UI",system-ui,sans-serif;
     font-weight:700;font-size:18px;color:#7d838f;letter-spacing:-.01em;
   }
-  /* ---- selection chip inside the top toolbar (mirrors main viewbar) ----
-     The chip itself lives in #bar so it doesn't cover the canvas. On
-     hover (or tap on tablets), a popover descends below it with the
-     Free Transform / Reset actions. */
-  .pen-actions{
+  /* ---- Selection chip (mirrors main window's .ca-chip exactly) ----
+     The chip sits inside #bar and IS the Transform action: click to arm
+     (or commit while armed). Hover raises a popover beneath it with the
+     Reset button when the selection already carries a transform. */
+  .ca-chip{
     position:relative;
-    display:flex;align-items:center;gap:6px;
-    padding:2px 9px;height:30px;
-    background:#272b32;border:1px solid #00000055;border-radius:99px;
-    color:#7d838f;font-size:11px;
-    transition:background-color .12s ease,color .12s ease,border-color .12s ease;
-    cursor:default;
-    user-select:none;
+    display:flex;align-items:stretch;
+    height:22px;
+    background:linear-gradient(180deg,#222831 0%,#1a1d23 100%);
+    border:1px solid #00000088;border-radius:99px;
+    box-shadow:
+      inset 0 1px 0 #ffffff12,
+      inset 0 0 0 1px #4ba8e012,
+      0 1px 0 #0006,
+      0 0 0 1px transparent;
+    color:#cdd2d9;font-size:11px;
+    cursor:pointer;outline:none;user-select:none;
+    transition:transform .13s ease, box-shadow .13s ease, border-color .13s ease;
   }
-  .pen-actions.hidden{display:none;}
-  .pen-actions:hover,.pen-actions:focus-within,.pen-actions.open{
-    background:#343942;color:#f7f1e5;
+  .ca-chip.hidden{display:none;}
+  .ca-chip:hover,.ca-chip:focus-visible{
+    transform:translateY(-1px);border-color:#000a;
+    box-shadow:
+      inset 0 1px 0 #ffffff18,
+      inset 0 0 0 1px #4ba8e028,
+      0 2px 0 #0008,
+      0 6px 14px #0008,
+      0 0 0 1px #4ba8e033;
   }
-  .pen-actions::before{
-    /* invisible hit zone so the popover stays open while the cursor
-       drifts between chip and popover below */
-    content:"";position:absolute;left:-10px;right:-10px;top:-6px;bottom:-16px;
+  .ca-chip:active{transform:translateY(0);box-shadow:inset 0 1px 2px #0008;}
+  .ca-chip.is-active{
+    background:linear-gradient(180deg,#4ba8e0 0%,#2f7fb8 100%) !important;
+    border:1px solid #ffffffaa !important;color:#fff !important;
+    box-shadow:
+      inset 0 1px 0 #ffffff60,
+      0 0 0 3px #4ba8e0aa,
+      0 0 24px #4ba8e0,
+      0 4px 16px #0009 !important;
+    transform:translateY(-1px) scale(1.03) !important;
   }
-  .pen-actions .pa-pin{display:flex;align-items:center;gap:6px;}
-  .pen-actions .pa-pin-icon{display:inline-flex;align-items:center;opacity:.75;}
-  .pen-actions .pa-pin-icon svg{width:12px;height:12px;}
-  .pen-actions .pa-dot{
+  .ca-chip.is-active::after{
+    content:"";position:absolute;left:-3px;top:50%;
+    width:6px;height:6px;border-radius:50%;
+    background:#fff;
+    box-shadow:0 0 0 2px #4ba8e0,0 0 8px #fff;
+    transform:translateY(-50%);
+    animation:caLiveDot 1.1s ease-in-out infinite;
+  }
+  .ca-chip.is-active .ca-dot,
+  .ca-chip.is-active .ca-dot-stack .ca-dot{
+    background:#fff !important;
+    box-shadow:0 0 0 1px #1c5d8e,inset 0 1px 0 #ffffff60;
+  }
+  .ca-chip.is-active .ca-cta{background:transparent;color:#fff;}
+  .ca-chip.is-active .ca-cta-icon svg{transform:rotate(45deg);stroke:#fff;}
+  .ca-chip.is-active .ca-kbd{
+    color:#fff;border-color:#ffffff60;background:#ffffff20;
+  }
+  .ca-chip.is-active:hover{
+    background:linear-gradient(180deg,#5fb4e6 0%,#3989c0 100%);
+    box-shadow:
+      inset 0 1px 0 #ffffff50,
+      0 3px 0 #0008,
+      0 10px 26px #4ba8e080,
+      0 0 0 2px #4ba8e050;
+  }
+  @keyframes caLiveDot{
+    0%,100%{opacity:1;transform:translateY(-50%) scale(1);}
+    50%{opacity:0.5;transform:translateY(-50%) scale(1.4);}
+  }
+  .ca-chip::before{
+    content:"";position:absolute;left:-12px;right:-12px;top:-6px;bottom:-20px;
+  }
+  .ca-chip > .ca-dot,
+  .ca-chip > .ca-dot-stack{margin:0 0 0 10px;align-self:center;}
+  .ca-chip .ca-dot{
     display:inline-block;width:8px;height:8px;border-radius:50%;
     box-shadow:0 0 0 1px #0008,inset 0 1px 0 #ffffff20;
   }
-  .pen-actions .pa-chip-name{
-    font-family:"Space Grotesk","Segoe UI",system-ui,sans-serif;
-    font-weight:600;max-width:140px;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  .ca-chip .ca-dot.ca-dot-group{
+    border-radius:2px;
+    box-shadow:0 0 0 1px #0008,inset 0 1px 0 #ffffff20,2px 2px 0 -1px #4ba8e055;
   }
-  /* popover descends BELOW the chip (toolbar is at top of window) */
-  .pen-actions .pa-popover{
-    position:absolute;left:50%;top:calc(100% + 10px);
+  .ca-chip .ca-dot-stack{display:inline-flex;align-items:center;}
+  .ca-chip .ca-dot-stack .ca-dot{margin-left:-3px;}
+  .ca-chip .ca-dot-stack .ca-dot:first-child{margin-left:0;}
+  .ca-chip .ca-cta{
+    display:flex;align-items:center;gap:6px;padding:0 12px 0 10px;
+    background:linear-gradient(180deg,#4ba8e024 0%,#4ba8e010 100%);
+    color:#4ba8e0;
+    font-family:"Space Grotesk","Segoe UI",system-ui,sans-serif;
+    font-weight:700;letter-spacing:.04em;text-transform:uppercase;font-size:10px;
+    border-top-right-radius:99px;border-bottom-right-radius:99px;
+    position:relative;margin-left:8px;
+  }
+  .ca-chip > .ca-cta:first-child{margin-left:0;border-radius:99px;padding-left:12px;}
+  .ca-chip:hover .ca-cta,
+  .ca-chip:focus-visible .ca-cta{
+    background:linear-gradient(180deg,#4ba8e040 0%,#4ba8e020 100%);
+    color:#cce8fa;
+  }
+  .ca-chip .ca-cta-icon{display:inline-flex;align-items:center;}
+  .ca-chip .ca-cta-icon svg{
+    width:13px;height:13px;
+    transition:transform .25s cubic-bezier(.2,.85,.3,1);
+  }
+  .ca-chip:hover .ca-cta-icon svg,
+  .ca-chip:focus-visible .ca-cta-icon svg{transform:rotate(45deg);}
+  .ca-chip .ca-kbd{
+    font-family:"JetBrains Mono",monospace;
+    font-size:9.5px;color:#7d838f;
+    background:#0009;border:1px solid #00000080;border-radius:3px;
+    padding:1px 4px;margin-left:1px;font-weight:400;
+  }
+  .ca-chip:hover .ca-kbd,
+  .ca-chip:focus-visible .ca-kbd{color:#4ba8e0;border-color:#4ba8e055;}
+  .ca-chip .ca-popover{
+    position:absolute;left:50%;top:calc(100% + 9px);
     transform:translate(-50%,-6px);
     display:flex;align-items:center;gap:6px;
-    background:linear-gradient(180deg,#262a32f2 0%,#1c1f25f2 100%);
-    border:1px solid #08090c;border-radius:999px;
+    background:linear-gradient(180deg,#262a32f5 0%,#1c1f25f5 100%);
+    border:1px solid #08090c;border-radius:99px;
     padding:5px 7px;color:#cdd2d9;
     box-shadow:0 10px 26px #000b,0 2px 6px #0008,inset 0 1px 0 #ffffff0d;
     z-index:6;opacity:0;pointer-events:none;
     transition:opacity .14s ease, transform .2s cubic-bezier(.18,.9,.26,1.1);
     backdrop-filter:blur(6px);
   }
-  .pen-actions:hover .pa-popover,
-  .pen-actions:focus-within .pa-popover,
-  .pen-actions.open .pa-popover{
+  .ca-chip:hover .ca-popover,
+  .ca-chip:focus-within .ca-popover,
+  .ca-chip.open .ca-popover{
     opacity:1;transform:translate(-50%,0);pointer-events:auto;
   }
-  .pen-actions .pa-popover::after{
-    /* caret pointing up at the chip */
+  .ca-chip .ca-popover::after{
     content:"";position:absolute;left:50%;top:-5px;
     width:8px;height:8px;background:#262a32;
     border-left:1px solid #08090c;border-top:1px solid #08090c;
     transform:translateX(-50%) rotate(45deg);
   }
-  .pen-actions .pa-btn{
+  .ca-chip .ca-btn{
     display:inline-flex;align-items:center;gap:5px;
     background:transparent;border:1px solid transparent;color:#cdd2d9;
     padding:4px 10px;border-radius:99px;font-size:11.5px;font-weight:600;
     cursor:pointer;white-space:nowrap;
     transition:background-color .12s ease,color .12s ease;
   }
-  .pen-actions .pa-btn svg{width:14px;height:14px;}
-  .pen-actions .pa-btn:hover{background:#ffffff10;color:#f7f1e5;}
-  .pen-actions .pa-primary{
+  .ca-chip .ca-btn svg{width:14px;height:14px;}
+  .ca-chip .ca-btn:hover{background:#ffffff10;color:#f7f1e5;}
+  .ca-chip .ca-reset:hover{color:#dd5038;}
+
+  /* ---- Lasso transform toolbar (mirrors main window's #lasso-toolbar) ---- */
+  #penLassoTb{
+    position:absolute;left:50%;top:60px;transform:translateX(-50%);
+    display:flex;align-items:center;gap:4px;padding:5px 7px;
+    background:linear-gradient(180deg,#262a32f2 0%,#1c1f25f2 100%);
+    border:1px solid #08090c;border-radius:999px;
+    box-shadow:0 10px 26px #000c,0 2px 6px #0008,inset 0 1px 0 #ffffff0d;
+    backdrop-filter:blur(6px);
+    z-index:7;color:#cdd2d9;
+    transition:opacity .14s ease, transform .2s cubic-bezier(.18,.9,.26,1.1);
+  }
+  #penLassoTb.hidden{display:none;}
+  #penLassoTb button{
+    background:transparent;border:1px solid transparent;
+    color:#cdd2d9;font:600 11.5px/1 "Space Grotesk","Segoe UI",system-ui,sans-serif;
+    padding:6px 12px;border-radius:99px;cursor:pointer;
+    transition:background-color .12s ease,color .12s ease,border-color .12s ease;
+  }
+  #penLassoTb button:hover{background:#ffffff10;color:#f7f1e5;}
+  #penLassoTb button.active{
     background:#4ba8e0;color:#fff;border-color:#0008;
     box-shadow:0 1px 0 #ffffff20 inset, 0 1px 3px #0007;
   }
-  .pen-actions .pa-primary:hover{background:#5dbbf0;color:#fff;}
-  .pen-actions .pa-reset:hover{color:#dd5038;}
+  #penLassoTb button.disabled{opacity:.4;pointer-events:none;}
+  #penLassoTb .pen-lasso-sep{width:1px;height:18px;background:#ffffff14;margin:0 4px;}
+  #penLassoTb .pen-lasso-commit{color:#54b06a;font-size:14px;padding:4px 12px;}
+  #penLassoTb .pen-lasso-commit:hover{background:#54b06a22;color:#7cd394;}
+  #penLassoTb .pen-lasso-cancel{color:#dd5038;font-size:13px;padding:4px 12px;}
+  #penLassoTb .pen-lasso-cancel:hover{background:#dd503822;color:#f17a64;}
 </style>
 </head>
 <body>
   <div id="bar"></div>
   <div id="stage">
     <canvas id="screen"></canvas>
-    <canvas id="wet"></canvas>
+    <div id="penLassoTb" class="hidden"></div>
     <div id="hint">
       <div class="big">OpenToon Drawing Window</div>
       <div>Waiting for the main window… draw here once the canvas appears.</div>
     </div>
   </div>
+  <!-- D1 slave renderer: pen window mirrors OT.Layer/OT.Cel from core.js
+       and runs the shared OT.compositeStage so it renders identically to
+       the main canvas. core.js declares OT.util internally; no separate
+       util.js is needed. -->
+  <script src="../src/core.js"></script>
+  <script src="../src/vector.js"></script>
+  <script src="../src/composite.js"></script>
   <script src="pen.js"></script>
 </body>
 </html>

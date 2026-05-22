@@ -1,79 +1,80 @@
-/* OpenToon Studio - drawing-window (pen display) logic.
+/* OpenToon Studio - pen-display window (D1 slave renderer).
 
-   This window owns no project. It shows a WebP frame streamed from the main
-   window and forwards pen / mouse input back. A lightweight local "wet ink"
-   preview is drawn while a stroke is in progress so the artist gets instant
-   feedback before the authoritative frame catches up. */
+   The pen window holds a real mirror of the project (OT.Layer / OT.Cel
+   from core.js) and runs OT.compositeStage itself. The artist's wet
+   stroke is drawn locally from pointer events; the committed stroke
+   arrives via vector-cel-replace and is matched by UUID. */
 (function () {
   'use strict';
   const PEN = window.OpenToonPen || null;
+  const OT = window.OT;
 
   const TOOL_ICON = {
     select: '<path d="M5 3l15 8-7 1.6L11 20z"/>',
     brush: '<path d="M4 21c3.2 0 5-1.8 5-5l-3-3c-3.2 0-5 1.8-5 5z"/><path d="M8 13L19 2.2a2 2 0 0 1 3 3L11 16z"/>',
     pencil: '<path d="M4 20l4-1L19 8l-3-3L5 16z"/><path d="M14 6l3 3"/>',
     eraser: '<path d="M7 21l-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M21 21H7"/><path d="M5 11l9 9"/>',
-    fill: '<path d="M11 3l8 8-7.5 7.5L4 11z"/><path d="M9 5l-5 6"/><path d="M20 13c0 0 2.4 3 2.4 4.8a2.4 2.4 0 1 1-4.8 0c0-1.8 2.4-4.8 2.4-4.8z"/>'
+    fill:   '<path d="M11 3l8 8-7.5 7.5L4 11z"/><path d="M9 5l-5 6"/><path d="M20 13c0 0 2.4 3 2.4 4.8a2.4 2.4 0 1 1-4.8 0c0-1.8 2.4-4.8 2.4-4.8z"/>'
   };
   const TOOL_NAME = {
     select: 'Select', brush: 'Brush', pencil: 'Pencil', eraser: 'Eraser', fill: 'Paint Bucket'
   };
   function svg(p) {
-    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + p + '</svg>';
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+      + 'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + p + '</svg>';
+  }
+
+  // Tiny UUID-ish generator if crypto.randomUUID isn't available. Doesn't
+  // need to be cryptographically strong -- it just needs to not collide
+  // with U.uid()'s output on the main side.
+  function makeStrokeId() {
+    if (window.crypto && crypto.randomUUID) return 'pen-' + crypto.randomUUID();
+    return 'pen-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
   }
 
   class PenWindow {
     constructor() {
-      // Two layered canvases:
-      //   #screen carries the streamed bitmap from the main window. It only
-      //   repaints when a new frame arrives -- so a full-resolution drawImage
-      //   doesn't run on every pointer move.
-      //   #wet carries the in-progress brush stroke (transparent). It redraws
-      //   on every pointermove but the work is tiny (just the new segment).
-      // The split removes the per-event 4K bitmap blit that was making the
-      // wet preview feel laggy on a Cintiq.
       this.canvas = document.getElementById('screen');
       this.ctx = this.canvas.getContext('2d');
-      this.wetCanvas = document.getElementById('wet');
-      this.wctx = this.wetCanvas ? this.wetCanvas.getContext('2d') : null;
       this.bar = document.getElementById('bar');
       this.hint = document.getElementById('hint');
-      // The selection chip is appended to #bar inside _buildBar — same
-      // pattern as the main window's viewbar chip.
       this.actions = null;
-      this.bmp = null;
-      this.meta = { tool: 'brush', color: '#222222', brushFrac: 0.02, frame: 1, frameCount: 1, zoom: 100 };
+      this.state = {
+        seq: 0,
+        project: { width: 1920, height: 1080, bg: '#ffffff', fps: 24, frameCount: 1, layers: [] },
+        // 'layers' is a duplicate inside project to satisfy compositeStage()
+        layers: [],
+        layersById: new Map(),
+        palette: [],
+        activeLayerId: null,
+        frame: 0,
+        tool: { name: 'brush', color: '#222222', toolSize: 6, toolOpacity: 1, pencil: false, brushFrac: 0.02, activeLayerKind: null, sel: {}, transform: {} },
+        wetStroke: null
+      };
       this.fit = { x: 0, y: 0, w: 0, h: 0 };
-      // local pen-window view -- magnifies / pans the streamed bitmap WITHOUT
-      // touching the main window's camera. Lets the artist zoom into a detail
-      // on the pen display while the producer / director still sees the
-      // full scene on the main monitor.
       this.view = { scale: 1, x: 0, y: 0 };
-      this.wet = [];                 // current stroke, in CSS canvas px
       this.stroking = false;
-      this.awaitingCommit = false;   // a stroke ended; clear wet on next frame
       this.toolBtns = {};
       this._lastHover = 0;
+      this._wetTimer = null;
 
       this._buildBar();
+      this._buildLassoTb();
       this._resize();
       this._installInput();
       this._installKeys();
       window.addEventListener('resize', () => { this._resize(); this.draw(); });
 
       if (PEN) {
-        PEN.onFrame((buf, meta) => this._onFrame(buf, meta));
+        if (PEN.onState) PEN.onState(msg => this._onState(msg));
         PEN.ready();
-        // initial size report so the very first frame is encoded at the
-        // correct resolution rather than the legacy 1680 px fallback
         this._reportSize();
       }
     }
 
     _cmd(msg) { if (PEN) PEN.sendCommand(msg); }
 
-    /* ---------------- toolbar ---------------- */
+    /* ---------------- toolbar (lifted from Phase 2 verbatim) ---------------- */
     _buildBar() {
       const bar = this.bar;
       const mkBtn = (html, title, fn) => {
@@ -138,14 +139,84 @@
       this.panBtn = mkBtn(svg('<path d="M12 3v18"/><path d="M3 12h18"/><path d="M7 8l-4 4 4 4"/><path d="M17 8l4 4-4 4"/><path d="M8 7l4-4 4 4"/><path d="M8 17l4 4 4-4"/>'),
         'Pan (hold space, or tap to toggle)', () => this._togglePan());
 
-      // Selection chip — sits inside the toolbar; popover descends below
-      // on hover (or tap on tablets). Built once; contents refresh as
-      // meta.sel arrives from the main window.
+      // Selection chip — exact mirror of the main window's .ca-chip. Sits
+      // inside #bar; popover descends below on hover/tap. Refreshes as
+      // meta.sel / meta.transform arrive from the main window.
       this.actions = document.createElement('div');
-      this.actions.id = 'penActions';
-      this.actions.className = 'pen-actions hidden';
+      this.actions.className = 'ca-chip hidden';
       this.actions.tabIndex = 0;
+      this.actions.setAttribute('role', 'button');
+      // Tablet: tap toggles the popover (hover doesn't fire reliably for
+      // pen/touch). Bound once at build time so we don't pile up listeners
+      // every refresh.
+      this.actions.addEventListener('pointerdown', (ev) => {
+        if (ev.pointerType === 'touch' || ev.pointerType === 'pen') {
+          if (ev.target && ev.target.closest && ev.target.closest('.ca-btn')) return;
+          this.actions.classList.toggle('open');
+        }
+      });
       bar.appendChild(this.actions);
+    }
+    // Lasso transform toolbar — visible when the main side has a transform
+    // armed. Buttons fire one-shot commands; the toolbar's mode toggles
+    // are driven by meta.transform on each frame.
+    _buildLassoTb() {
+      const tb = document.getElementById('penLassoTb');
+      if (!tb) return;
+      this.lassoTb = tb;
+      const mk = (label, mode, extraClass) => {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.dataset.mode = mode;
+        if (extraClass) b.className = extraClass;
+        b.addEventListener('click', () => {
+          if (b.classList.contains('disabled')) return;
+          this._cmd({ type: 'lasso-mode', mode: mode });
+          b.blur();
+        });
+        tb.appendChild(b);
+        return b;
+      };
+      const sep = () => {
+        const s = document.createElement('span');
+        s.className = 'pen-lasso-sep';
+        tb.appendChild(s);
+      };
+      this.lassoBtns = {};
+      this.lassoBtns.uniform  = mk('Uniform',  'uniform');
+      this.lassoBtns.freeform = mk('Freeform', 'freeform');
+      this.lassoBtns.distort  = mk('Distort',  'distort');
+      this.lassoBtns.warp     = mk('Warp',     'warp');
+      sep();
+      this.lassoBtns.reset    = mk('Reset',    'reset');
+      sep();
+      this.lassoBtns.commit   = mk('✓',   'commit', 'pen-lasso-commit');
+      this.lassoBtns.cancel   = mk('✕',   'cancel', 'pen-lasso-cancel');
+      this.lassoBtns.commit.title = 'Commit transform (Enter)';
+      this.lassoBtns.cancel.title = 'Cancel transform (Esc)';
+    }
+    _applyTransform(xf) {
+      const tb = this.lassoTb;
+      if (!tb) return;
+      if (!xf || !xf.armed) { tb.classList.add('hidden'); return; }
+      tb.classList.remove('hidden');
+      const modeBtns = ['uniform', 'freeform', 'distort', 'warp'];
+      for (const m of modeBtns) {
+        const b = this.lassoBtns[m];
+        if (!b) continue;
+        b.classList.toggle('active', m === xf.mode);
+        // Distort + warp are vector-only — grey them for raster lassos.
+        if (xf.isRaster && (m === 'distort' || m === 'warp')) {
+          b.classList.add('disabled');
+        } else {
+          b.classList.remove('disabled');
+        }
+      }
+      // Reset only makes sense for vector free-transform-tool sessions;
+      // hide it here as the main side does (the lasso path doesn't use it).
+      if (this.lassoBtns.reset) {
+        this.lassoBtns.reset.style.display = xf.isRaster ? 'none' : '';
+      }
     }
     // Local zoom -- adjusts this.view only, never sends to the main app.
     _zoomLocal(factor, cx, cy) {
@@ -184,181 +255,395 @@
       const barH = this.bar.offsetHeight || 48;
       const w = window.innerWidth;
       const h = Math.max(1, window.innerHeight - barH);
-      // Cap DPR at 3 (was 2) so Cintiq Pro / iPad-class pen displays get
-      // a properly high-resolution backing store.
       this.dpr = Math.min(window.devicePixelRatio || 1, 3);
       this.cssW = w; this.cssH = h;
-      for (const c of [this.canvas, this.wetCanvas]) {
-        if (!c) continue;
-        c.style.width = w + 'px';
-        c.style.height = h + 'px';
-        c.width = Math.round(w * this.dpr);
-        c.height = Math.round(h * this.dpr);
-      }
+      const c = this.canvas;
+      c.style.width = w + 'px'; c.style.height = h + 'px';
+      c.width = Math.round(w * this.dpr);
+      c.height = Math.round(h * this.dpr);
       this._computeFit();
-      // Let the main window know what resolution to encode for, so the
-      // streamed bitmap arrives at 1:1 with no upscaling = no pixelation.
       this._reportSize();
     }
     _reportSize() {
       if (!PEN) return;
-      // throttle: only resend if size meaningfully changed
       const k = this.cssW + 'x' + this.cssH + '@' + this.dpr;
       if (k === this._lastSizeKey) return;
       this._lastSizeKey = k;
       this._cmd({ type: 'pen-size', cssW: this.cssW, cssH: this.cssH, dpr: this.dpr });
     }
     _computeFit() {
-      if (!this.bmp) { this.fit = { x: 0, y: 0, w: 0, h: 0 }; return; }
-      const s = Math.min(this.cssW / this.bmp.width, this.cssH / this.bmp.height);
-      const w = this.bmp.width * s, h = this.bmp.height * s;
+      const pw = this.state.project.width || 1920;
+      const ph = this.state.project.height || 1080;
+      const s = Math.min(this.cssW / pw, this.cssH / ph);
+      const w = pw * s, h = ph * s;
       this.fit = { x: (this.cssW - w) / 2, y: (this.cssH - h) / 2, w: w, h: h };
     }
 
-    /* ---------------- incoming frame ---------------- */
-    _onFrame(buf, meta) {
-      if (meta) this._applyMeta(meta);
-      let blob;
-      try { blob = new Blob([buf], { type: 'image/webp' }); }
-      catch (e) { return; }
-      createImageBitmap(blob).then(bmp => {
-        if (this.bmp && this.bmp.close) this.bmp.close();
-        this.bmp = bmp;
-        this._computeFit();
-        const wetCleared = this.awaitingCommit && !this.stroking;
-        if (wetCleared) {
-          this.wet = []; this.awaitingCommit = false;
+    /* ---------------- incoming state ---------------- */
+    _onState(msg) {
+      if (!msg || !Array.isArray(msg.ops)) return;
+      for (const op of msg.ops) {
+        try { this._applyOp(op); }
+        catch (e) { console.error('pen: bad op', op, e); }
+      }
+      if (typeof msg.seq === 'number') {
+        this.state.seq = msg.seq;
+        if (PEN && PEN.sendStateAck) {
+          try { PEN.sendStateAck(msg.seq); } catch (_) {}
         }
-        if (this.hint) this.hint.style.display = 'none';
-        // Bitmap arrived: redraw the streamed background. Wet-ink layer is only
-        // touched when it changed (e.g. the stroke just committed), avoiding a
-        // pointless wet repaint on idle frame deliveries.
-        this._drawBg();
-        if (wetCleared) this._drawWet();
-      }).catch(() => {});
+      }
+      // After applying ops, see if our wet stroke has been committed.
+      this._checkWetCommit();
+      this._scheduleComposite();
     }
-    _applyMeta(meta) {
-      this.meta = meta;
+
+    // Construct an OT.Layer from a snapshot and put it in state.layers.
+    _hydrateLayer(snap) {
+      const L = new OT.Layer(snap.name, snap.type);
+      L.id = snap.id;
+      L.visible = !!snap.visible;
+      L.opacity = snap.opacity == null ? 1 : snap.opacity;
+      L.color = snap.color || '';
+      L.parentId = snap.parentId || null;
+      L._collapsed = !!snap._collapsed;
+      L.shadeOf = snap.shadeOf || null;
+      L.transform = { keyframes: (snap.transform && snap.transform.keyframes) ? snap.transform.keyframes.slice() : [] };
+      L.exposure = (snap.exposure || []).slice();
+      L.cels = {};
+      L.nextNum = 1;
+      return L;
+    }
+    _hydrateCel(layer, frame, celSnap) {
+      if (!celSnap) return;
+      const num = celSnap.celNum || 1;
+      let cel = layer.cels[num];
+      if (!cel) {
+        cel = new OT.Cel(num, celSnap.w, celSnap.h, celSnap.kind);
+        layer.cels[num] = cel;
+        if (num >= layer.nextNum) layer.nextNum = num + 1;
+      }
+      if (celSnap.kind === 'vector') {
+        cel.strokes = Array.isArray(celSnap.strokes) ? celSnap.strokes.slice() : [];
+      }
+      // raster cels: D1 keeps the placeholder; D2 wires bmp data
+      layer.exposure[frame] = num;
+    }
+
+    _applyOp(op) {
+      if (!op || !op.op) return;
+      const s = this.state;
+      switch (op.op) {
+        case 'init': {
+          if (op.project) {
+            Object.assign(s.project, op.project);
+            this._computeFit();
+          }
+          if (Array.isArray(op.palette)) s.palette = op.palette.slice();
+          if (Array.isArray(op.layers)) {
+            s.layers = op.layers.map(snap => this._hydrateLayer(snap));
+            s.layersById = new Map();
+            for (const L of s.layers) s.layersById.set(L.id, L);
+          }
+          s.project.layers = s.layers;
+          if (op.activeLayerId != null) s.activeLayerId = op.activeLayerId;
+          if (typeof op.frame === 'number') s.frame = op.frame;
+          if (op.cels && typeof op.cels === 'object') {
+            for (const layerId in op.cels) {
+              const layer = s.layersById.get(layerId);
+              if (layer) this._hydrateCel(layer, s.frame, op.cels[layerId]);
+            }
+          }
+          if (op.toolMeta) this._applyToolMeta(op.toolMeta);
+          if (this.hint) this.hint.style.display = 'none';
+          break;
+        }
+        case 'layers-replace': {
+          if (!Array.isArray(op.layers)) break;
+          // Preserve already-hydrated cels by id so a layer reorder/
+          // visibility flip doesn't drop strokes.
+          const oldById = s.layersById;
+          s.layers = op.layers.map(snap => {
+            const fresh = this._hydrateLayer(snap);
+            const old = oldById.get(snap.id);
+            if (old) {
+              fresh.cels = old.cels;
+              fresh.nextNum = old.nextNum;
+            }
+            return fresh;
+          });
+          s.layersById = new Map();
+          for (const L of s.layers) s.layersById.set(L.id, L);
+          s.project.layers = s.layers;
+          if (op.activeLayerId != null) s.activeLayerId = op.activeLayerId;
+          break;
+        }
+        case 'vector-cel-replace': {
+          const layer = s.layersById.get(op.layerId);
+          if (!layer || !op.cel) break;
+          this._hydrateCel(layer, op.frame, op.cel);
+          break;
+        }
+        case 'frame-change': {
+          if (typeof op.frame === 'number') s.frame = op.frame;
+          // Drop any in-flight wet stroke — its cel context just changed
+          // and rendering it on the new frame's cel would be wrong.
+          if (s.wetStroke) this._clearWetStroke();
+          break;
+        }
+        case 'active-layer': {
+          if (op.layerId != null) s.activeLayerId = op.layerId;
+          // Active layer just changed; wet stroke (if any) was targeting
+          // the previous active layer's cel.
+          if (s.wetStroke) this._clearWetStroke();
+          break;
+        }
+        case 'project-meta': {
+          if (op.patch) {
+            Object.assign(s.project, op.patch);
+            this._computeFit();
+          }
+          break;
+        }
+        case 'palette': {
+          if (Array.isArray(op.colors)) s.palette = op.colors.slice();
+          break;
+        }
+        case 'tool-meta': {
+          if (op.meta) this._applyToolMeta(op.meta);
+          break;
+        }
+        default: break;     // forward-compatible: unknown ops are ignored
+      }
+    }
+
+    _applyToolMeta(meta) {
+      if (!meta) return;
+      const t = this.state.tool;
+      if (meta.tool || meta.name) t.name = meta.name || meta.tool;
+      if (meta.color) t.color = meta.color;
+      if (typeof meta.brushFrac === 'number') t.brushFrac = meta.brushFrac;
+      if (typeof meta.toolSize === 'number') t.toolSize = meta.toolSize;
+      if (typeof meta.toolOpacity === 'number') t.toolOpacity = meta.toolOpacity;
+      if (typeof meta.pencil === 'boolean') t.pencil = meta.pencil;
+      if (meta.sel) t.sel = meta.sel;
+      if (meta.transform) t.transform = meta.transform;
+      if (typeof meta.activeLayerKind === 'string') t.activeLayerKind = meta.activeLayerKind;
+      // toolbar visuals
       for (const n in this.toolBtns)
-        this.toolBtns[n].classList.toggle('active', n === meta.tool);
-      if (meta.color && /^#[0-9a-fA-F]{6}$/.test(meta.color))
-        this.colorInput.value = meta.color;
-      this.colorWrap.style.background = meta.color || '#222222';
-      this.frameLabel.textContent = (meta.frame || 1) + ' / ' + (meta.frameCount || 1);
-      this._refreshActions(meta.sel || {});
-      // zoomBtn now shows the pen window's *local* view percent -- main
-      // window's camera zoom is irrelevant to the pen display, so we ignore
-      // meta.zoom here. _updateZoomLabel keeps it in sync with this.view.
+        this.toolBtns[n].classList.toggle('active', n === t.name);
+      if (t.color && /^#[0-9a-fA-F]{6}$/.test(t.color))
+        this.colorInput.value = t.color;
+      if (this.colorWrap) this.colorWrap.style.background = t.color || '#222222';
+      const f = (this.state.frame || 0) + 1;
+      const total = this.state.project.frameCount || 1;
+      if (this.frameLabel) this.frameLabel.textContent = f + ' / ' + total;
+      this._refreshActions(t.sel || {}, t.transform);
+      this._applyTransform(t.transform);
+      // If the tool/layer is no longer wet-stroke-eligible, drop any wet
+      if (this.state.wetStroke
+          && (t.activeLayerKind !== 'vector'
+              || (t.name !== 'brush' && t.name !== 'pencil'))) {
+        this._clearWetStroke();
+      }
     }
-    // Mirror of the main window's viewbar chip. The chip itself sits in
-    // the pen window's #bar; the popover descends below on hover or tap.
-    _refreshActions(sel) {
+
+    _refreshActions(sel, transform) {
       const el = this.actions;
       if (!el) return;
-      if (!sel || !sel.count) { el.classList.add('hidden'); el.innerHTML = ''; return; }
-      el.classList.remove('hidden');
-      el.innerHTML = '';
-      const pin = document.createElement('div');
-      pin.className = 'pa-pin';
-      const dot = document.createElement('span');
-      dot.className = 'pa-dot';
-      dot.style.background = sel.color || '#3d9be0';
-      pin.appendChild(dot);
-      const name = document.createElement('span');
-      name.className = 'pa-chip-name';
-      name.textContent = sel.count > 1
-        ? (sel.count + ' layers')
-        : ((sel.group ? '📁 ' : '') + (sel.name || 'Layer'));
-      pin.appendChild(name);
-      const ico = document.createElement('span');
-      ico.className = 'pa-pin-icon';
-      ico.innerHTML = svg('<path d="M4 4l4 4M16 4l-4 4M4 20l4-4M16 20l-4-4M3 12h6M15 12h6M12 3v6M12 15v6"/>');
-      pin.appendChild(ico);
-      el.appendChild(pin);
-      // popover descends below the chip
-      const pop = document.createElement('div'); pop.className = 'pa-popover';
-      const tx = document.createElement('button');
-      tx.className = 'pa-btn pa-primary'; tx.title = 'Free Transform';
-      tx.innerHTML = svg('<path d="M4 4l4 4M16 4l-4 4M4 20l4-4M16 20l-4-4M3 12h6M15 12h6M12 3v6M12 15v6"/>')
-        + '<span>Transform</span>';
-      tx.addEventListener('click', () => { this._cmd({ type: 'free-transform' }); tx.blur(); el.classList.remove('open'); });
-      pop.appendChild(tx);
-      if (sel.hasXform) {
-        const rs = document.createElement('button');
-        rs.className = 'pa-btn pa-reset'; rs.title = 'Reset transform';
-        rs.innerHTML = svg('<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/>')
-          + '<span>Reset</span>';
-        rs.addEventListener('click', () => { this._cmd({ type: 'reset-transform' }); rs.blur(); el.classList.remove('open'); });
-        pop.appendChild(rs);
+      // Hide when there's nothing to act on. (Main window also hides when
+      // a raw lasso poly is being drawn — we don't have that signal here
+      // but the visual cost is minimal: an extra still chip.)
+      if (!sel || !sel.count) {
+        el.classList.add('hidden');
+        el.classList.remove('is-active');
+        el.innerHTML = '';
+        el.onclick = null;
+        return;
       }
-      el.appendChild(pop);
-      // Tablet: tap to toggle, since hover is unreliable on touch/stylus.
-      pin.addEventListener('pointerdown', (ev) => {
-        if (ev.pointerType === 'touch' || ev.pointerType === 'pen') {
-          el.classList.toggle('open');
-          ev.preventDefault();
+      const armed = !!(transform && transform.armed);
+      el.classList.remove('hidden');
+      el.classList.toggle('is-active', armed);
+      el.innerHTML = '';
+      el.onclick = (ev) => {
+        if (ev.target && ev.target.closest && ev.target.closest('.ca-popover')) return;
+        if (armed) {
+          // Click commits, same as the main chip.
+          this._cmd({ type: 'lasso-mode', mode: 'commit' });
+          return;
         }
-      });
+        this._cmd({ type: 'free-transform' });
+      };
+      // ---- dot(s): single dot or stacked-3 for multi-select ----
+      if (sel.count === 1) {
+        const dot = document.createElement('span');
+        dot.className = 'ca-dot' + (sel.group ? ' ca-dot-group' : '');
+        dot.style.background = sel.color || '#3d9be0';
+        el.appendChild(dot);
+      } else if (sel.count > 1) {
+        const stack = document.createElement('span');
+        stack.className = 'ca-dot-stack';
+        const colors = (sel.colors && sel.colors.length) ? sel.colors : [sel.color];
+        for (let i = 0; i < Math.min(3, sel.count); i++) {
+          const d = document.createElement('span');
+          d.className = 'ca-dot';
+          d.style.background = colors[i] || colors[0] || '#3d9be0';
+          stack.appendChild(d);
+        }
+        el.appendChild(stack);
+      }
+      // ---- CTA: icon + Transform/Transforming + kbd ----
+      const cta = document.createElement('div');
+      cta.className = 'ca-cta';
+      const icon = document.createElement('span');
+      icon.className = 'ca-cta-icon';
+      icon.innerHTML = svg('<path d="M4 4l4 4M16 4l-4 4M4 20l4-4M16 20l-4-4M3 12h6M15 12h6M12 3v6M12 15v6"/>');
+      cta.appendChild(icon);
+      const txt = document.createElement('span');
+      txt.className = 'ca-cta-text';
+      txt.textContent = armed ? 'Transforming' : 'Transform';
+      cta.appendChild(txt);
+      const kbd = document.createElement('kbd');
+      kbd.className = 'ca-kbd';
+      kbd.textContent = armed ? '✓' : 'T';
+      cta.appendChild(kbd);
+      el.appendChild(cta);
+      el.title = armed
+        ? 'Free Transform armed — click to commit, Esc to cancel'
+        : 'Free Transform';
+      // ---- popover (Reset, when targets already carry a transform) ----
+      if (sel.hasXform) {
+        const pop = document.createElement('div');
+        pop.className = 'ca-popover';
+        const rs = document.createElement('button');
+        rs.className = 'ca-btn ca-reset';
+        rs.title = 'Reset transform';
+        rs.innerHTML = svg('<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/>') + '<span>Reset</span>';
+        rs.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          this._cmd({ type: 'reset-transform' });
+          el.classList.remove('open');
+        });
+        pop.appendChild(rs);
+        el.appendChild(pop);
+      }
+    }
+
+    /* ---------------- wet stroke lifecycle ---------------- */
+    _wetEligible() {
+      const t = this.state.tool;
+      return t.activeLayerKind === 'vector'
+        && (t.name === 'brush' || t.name === 'pencil');
+    }
+    _seedWetStroke(id, projPt) {
+      const t = this.state.tool;
+      this.state.wetStroke = {
+        id: id, type: 'line',
+        pencil: t.name === 'pencil',
+        color: t.color || '#222222',
+        width: t.toolSize || 6,
+        opacity: t.toolOpacity == null ? 1 : t.toolOpacity,
+        closed: false,
+        pts: [projPt],
+        predicted: []          // rendered alongside pts; cleared on each move
+      };
+      if (this._wetTimer) { clearTimeout(this._wetTimer); this._wetTimer = null; }
+    }
+    _extendWetStroke(actualPts, predictedPts) {
+      const ws = this.state.wetStroke;
+      if (!ws) return;
+      for (const p of actualPts) ws.pts.push(p);
+      ws.predicted = predictedPts || [];
+    }
+    // Defensive timer: started on pointerup, NOT on seed. While the artist
+    // is still dragging, the wet stroke must stay alive arbitrarily long.
+    // Once the artist lifts, main has 2 seconds to commit (via celchange)
+    // or we drop the wet stroke to avoid a phantom that never clears.
+    _armWetTimer() {
+      if (this._wetTimer) clearTimeout(this._wetTimer);
+      this._wetTimer = setTimeout(() => this._clearWetStroke(), 2000);
+    }
+    _clearWetStroke() {
+      this.state.wetStroke = null;
+      if (this._wetTimer) { clearTimeout(this._wetTimer); this._wetTimer = null; }
+    }
+    // After applying any state batch, see if our wet stroke has been
+    // committed -- if a cel now contains a stroke with our wet id, drop.
+    _checkWetCommit() {
+      const ws = this.state.wetStroke;
+      if (!ws) return;
+      const layer = this.state.layersById.get(this.state.activeLayerId);
+      if (!layer) return;
+      const cel = layer.celAt(this.state.frame);
+      if (!cel || cel.kind !== 'vector' || !Array.isArray(cel.strokes)) return;
+      for (const st of cel.strokes) {
+        if (st.id === ws.id) {
+          this._clearWetStroke();
+          return;
+        }
+      }
     }
 
     /* ---------------- draw ---------------- */
-    // Full redraw -- bitmap + wet. Called on frame arrival, view change, resize.
-    draw() {
-      this._drawBg();
-      this._drawWet();
+    draw() { this._compositeStage(); }
+    _scheduleComposite() {
+      if (this._compositeRAF) return;
+      this._compositeRAF = requestAnimationFrame(() => {
+        this._compositeRAF = 0;
+        this._compositeStage();
+      });
     }
-    // Bitmap-only redraw. Heavy (full-resolution drawImage) but only runs when
-    // the streamed bitmap or local view actually changes -- never on a pen move.
-    _drawBg() {
+    _layerAncestors(layer) {
+      const out = [];
+      let cur = layer;
+      while (cur && cur.parentId) {
+        const next = this.state.layersById.get(cur.parentId);
+        if (!next || next === layer || out.includes(next)) break;
+        out.push(next);
+        cur = next;
+      }
+      return out;
+    }
+    _compositeStage() {
+      const s = this.state;
       const c = this.ctx;
       c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
       c.clearRect(0, 0, this.cssW, this.cssH);
       c.fillStyle = '#0c0d10';
       c.fillRect(0, 0, this.cssW, this.cssH);
-      if (this.bmp) {
-        const v = this.view;
-        c.save();
-        // local view: translate then scale, on top of the fit-to-window rect
-        c.translate(v.x, v.y); c.scale(v.scale, v.scale);
-        c.imageSmoothingEnabled = v.scale < 3;
-        c.imageSmoothingQuality = 'high';
-        c.drawImage(this.bmp, this.fit.x, this.fit.y, this.fit.w, this.fit.h);
-        c.restore();
+      // local view (zoom/pan on pen, doesn't touch main)
+      c.save();
+      c.translate(this.view.x, this.view.y);
+      c.scale(this.view.scale, this.view.scale);
+      // map the project rect into the fit rectangle
+      if (this.fit.w > 0) {
+        const projScale = this.fit.w / Math.max(1, s.project.width);
+        c.translate(this.fit.x, this.fit.y);
+        c.scale(projScale, projScale);
+        // wet stroke renderer: concatenate predicted onto pts inside a
+        // synthetic stroke object (don't mutate the canonical wetStroke).
+        const wet = s.wetStroke;
+        let wetForRender = null;
+        if (wet) {
+          if (wet.predicted && wet.predicted.length) {
+            wetForRender = Object.assign({}, wet, {
+              pts: wet.pts.concat(wet.predicted)
+            });
+          } else {
+            wetForRender = wet;
+          }
+        }
+        OT.compositeStage(s.project, s.frame, c, {
+          bg: true,
+          wetStroke: wetForRender,
+          wetLayerId: s.activeLayerId,
+          includeVideo: false          // D1: pen has no <video> element
+          // includeLassoHidden defaults to false (skip transform-drag
+          // rasterised originals); same as the main canvas.
+        }, {
+          layerAncestors: layer => this._layerAncestors(layer)
+        });
       }
-    }
-    // RAF-coalesced wet-ink redraw. Multiple pen samples in the same frame
-    // produce one canvas paint instead of N.
-    _scheduleWet() {
-      if (this._wetRAF) return;
-      this._wetRAF = requestAnimationFrame(() => {
-        this._wetRAF = 0;
-        this._drawWet();
-      });
-    }
-    // Local in-progress stroke preview -- runs on its own transparent canvas
-    // so we never re-blit the streamed bitmap per pointer move.
-    _drawWet() {
-      const w = this.wctx || this.ctx;
-      w.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-      w.clearRect(0, 0, this.cssW, this.cssH);
-      if (this.wet.length < 1 || !this.fit.w) return;
-      const tool = this.meta.tool;
-      if (tool !== 'brush' && tool !== 'pencil' && tool !== 'eraser') return;
-      // brush radius scales with the local view so the wet-ink preview
-      // matches the diameter the artist will actually see after commit
-      const dia = Math.max(1.5,
-        (this.meta.brushFrac || 0.02) * this.fit.w * 2 * (this.view.scale || 1));
-      w.save();
-      w.lineJoin = 'round'; w.lineCap = 'round';
-      w.lineWidth = dia;
-      w.strokeStyle = tool === 'eraser' ? 'rgb(202,208,216)' : (this.meta.color || '#222222');
-      w.globalAlpha = tool === 'eraser' ? 0.5 : 0.9;
-      w.beginPath();
-      w.moveTo(this.wet[0].x, this.wet[0].y);
-      for (let i = 1; i < this.wet.length; i++) w.lineTo(this.wet[i].x, this.wet[i].y);
-      if (this.wet.length === 1) w.lineTo(this.wet[0].x + 0.1, this.wet[0].y + 0.1);
-      w.stroke();
-      w.restore();
+      c.restore();   // local view
     }
 
     /* ---------------- pointer input ---------------- */
@@ -366,7 +651,7 @@
       const cv = this.canvas;
       const rect = () => cv.getBoundingClientRect();
       // Map a window-CSS-px coord back through the local view to a 0..1
-      // fraction over the streamed bitmap, so input always lands on the
+      // fraction over the project rect, so input always lands on the
       // correct project pixel regardless of how the artist has zoomed.
       const norm = (clientX, clientY, r) => {
         const v = this.view;
@@ -377,6 +662,13 @@
           ny: (oy - this.fit.y) / (this.fit.h || 1)
         };
       };
+      // Convert a 0..1 fraction to a project-space pt the wet stroke can
+      // render at (matches the main side's _ptFromNorm math).
+      const toProjPt = (n, pressure) => ({
+        x: n.nx * this.state.project.width,
+        y: n.ny * this.state.project.height,
+        p: pressure == null ? 1 : pressure
+      });
       const isPenEraser = e =>
         e.pointerType === 'pen' && (((e.buttons & 32) !== 0) || e.button === 5);
       const mods = e => ({
@@ -410,10 +702,11 @@
       const cancelStroke = () => {
         if (!this.stroking) return;
         this.stroking = false;
-        this.awaitingCommit = false;
-        this.wet = [];
         if (PEN) PEN.sendInput({ type: 'cancel' });
-        this._drawWet();
+        // The wet stroke is local; if a gesture takes over, drop it so
+        // we don't leave a phantom line on screen.
+        this._clearWetStroke();
+        this._scheduleComposite();
       };
       const beginGesture = () => {
         cancelStroke();
@@ -442,7 +735,8 @@
       };
 
       cv.addEventListener('pointerdown', e => {
-        if (!this.bmp) return;
+        // Need a project rect computed to map input into normalised coords.
+        if (!this.fit.w) return;
         // Palm rejection: an active pen stroke vetos any touch entirely --
         // a resting palm must not interrupt the line being drawn.
         if (e.pointerType === 'touch' && this.stroking) return;
@@ -498,20 +792,23 @@
           return;
         }
         const n = norm(e.clientX, e.clientY, r);
+        const pressure = e.pointerType === 'pen' ? e.pressure : 1;
         this.stroking = true;
-        this.awaitingCommit = false;
-        this.wet = [{ x: e.clientX - r.left, y: e.clientY - r.top }];
+        // Client-generated UUID flows to the main side as the stroke id;
+        // the main side's brush/pencil tool honours pendingStrokeId so the
+        // committed stroke matches the wet one we render locally.
+        const strokeId = makeStrokeId();
         if (PEN) PEN.sendInput(Object.assign({
-          type: 'down', nx: n.nx, ny: n.ny,
-          pressure: e.pointerType === 'pen' ? e.pressure : 1
+          type: 'down', id: strokeId, nx: n.nx, ny: n.ny, pressure
         }, mods(e)));
-        // Wet-ink only: the bitmap hasn't changed. Avoids a full-resolution
-        // drawImage on every pen down.
-        this._drawWet();
+        if (this._wetEligible()) {
+          this._seedWetStroke(strokeId, toProjPt(n, pressure));
+          this._scheduleComposite();
+        }
       });
 
       cv.addEventListener('pointermove', e => {
-        if (!this.bmp) return;
+        if (!this.fit.w) return;
         const r = rect();
         if (this.pointers.has(e.pointerId)) {
           const p = this.pointers.get(e.pointerId);
@@ -530,21 +827,32 @@
           return;
         }
         if (this.stroking) {
-          let batch = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
-          if (!batch.length) batch = [e];
-          const pts = [];
-          for (const ce of batch) {
+          // actual coalesced points (everything since last move event)
+          let coalesced = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
+          if (!coalesced.length) coalesced = [e];
+          const actualPts = [];
+          const wirePts = [];
+          for (const ce of coalesced) {
             const n = norm(ce.clientX, ce.clientY, r);
-            pts.push({
-              nx: n.nx, ny: n.ny,
-              pressure: ce.pointerType === 'pen' ? ce.pressure : 1
-            });
-            this.wet.push({ x: ce.clientX - r.left, y: ce.clientY - r.top });
+            const pr = ce.pointerType === 'pen' ? ce.pressure : 1;
+            actualPts.push(toProjPt(n, pr));
+            wirePts.push({ nx: n.nx, ny: n.ny, pressure: pr });
           }
-          if (PEN) PEN.sendInput(Object.assign({ type: 'move', pts: pts }, mods(e)));
-          // Wet-ink only, RAF-coalesced: heavy bitmap blit no longer runs per
-          // pointer move, which removes the main source of pen-window lag.
-          this._scheduleWet();
+          // predicted points -- never sent on the wire, never persist
+          let predictedPts = [];
+          if (e.getPredictedEvents) {
+            const predicted = e.getPredictedEvents();
+            for (const pe of predicted) {
+              const n = norm(pe.clientX, pe.clientY, r);
+              const pr = pe.pointerType === 'pen' ? pe.pressure : 1;
+              predictedPts.push(toProjPt(n, pr));
+            }
+          }
+          if (this.state.wetStroke) {
+            this._extendWetStroke(actualPts, predictedPts);
+            this._scheduleComposite();
+          }
+          if (PEN) PEN.sendInput(Object.assign({ type: 'move', pts: wirePts }, mods(e)));
         } else {
           const now = performance.now();
           if (now - this._lastHover < 55) return;
@@ -580,15 +888,41 @@
         }
         if (!this.stroking) return;
         this.stroking = false;
-        this.awaitingCommit = true;
-        const n = norm(e.clientX, e.clientY, rect());
+        // Clear predicted on the wet (no more predicting past finished input)
+        // and arm the 2-second defensive cleanup so the wet eventually goes
+        // away even if the commit message never arrives.
+        const id = this.state.wetStroke ? this.state.wetStroke.id : null;
+        if (this.state.wetStroke) {
+          this.state.wetStroke.predicted = [];
+          this._armWetTimer();
+          this._scheduleComposite();
+        }
+        const r = rect();
+        const n = norm(e.clientX, e.clientY, r);
+        const pressure = e.pointerType === 'pen' ? e.pressure : 1;
         if (PEN) PEN.sendInput(Object.assign({
-          type: 'up', nx: n.nx, ny: n.ny,
-          pressure: e.pointerType === 'pen' ? e.pressure : 1
+          type: 'up', id, nx: n.nx, ny: n.ny, pressure
         }, mods(e)));
       };
       cv.addEventListener('pointerup', end);
-      cv.addEventListener('pointercancel', end);
+      cv.addEventListener('pointercancel', e => {
+        if (this.pointers.has(e.pointerId)) this.pointers.delete(e.pointerId);
+        if (this._pendingTouch.has(e.pointerId)) {
+          const pt = this._pendingTouch.get(e.pointerId);
+          if (pt.timer) clearTimeout(pt.timer);
+          this._pendingTouch.delete(e.pointerId);
+        }
+        if (this.gesture && this.pointers.size < 2) {
+          this.gesture = null;
+          this.panning = null;
+        }
+        if (this.stroking) {
+          this.stroking = false;
+          this._clearWetStroke();
+          if (PEN) PEN.sendInput({ type: 'cancel' });
+        }
+        this._scheduleComposite();
+      });
       cv.addEventListener('pointerleave', e => {
         if (this.pointers.has(e.pointerId)) this.pointers.delete(e.pointerId);
         if (this.stroking) return;
@@ -631,6 +965,14 @@
           // hold space for ad-hoc pan -- standard across drawing apps
           if (!this._spaceHeld) { this._spaceHeld = true; this._togglePan(); }
           ev.preventDefault();
+        }
+        else if (k === 'enter' && this.state.tool.transform && this.state.tool.transform.armed) {
+          ev.preventDefault();
+          this._cmd({ type: 'lasso-mode', mode: 'commit' });
+        }
+        else if (k === 'escape' && this.state.tool.transform && this.state.tool.transform.armed) {
+          ev.preventDefault();
+          this._cmd({ type: 'lasso-mode', mode: 'cancel' });
         }
       });
       window.addEventListener('keyup', ev => {
