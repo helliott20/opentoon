@@ -48,7 +48,7 @@
         palette: [],
         activeLayerId: null,
         frame: 0,
-        tool: { name: 'brush', color: '#222222', toolSize: 6, toolOpacity: 1, pencil: false, brushFrac: 0.02, toolRadius: 0, activeLayerKind: null, sel: {}, transform: {} },
+        tool: { name: 'brush', color: '#222222', toolSize: 6, toolOpacity: 1, pencil: false, brushFrac: 0.02, toolRadius: 0, tol: 0.4, snapDist: 0, inkDynamics: false, autoClose: false, activeLayerKind: null, sel: {}, transform: {} },
         wetStroke: null
       };
       this.fit = { x: 0, y: 0, w: 0, h: 0 };
@@ -435,6 +435,12 @@
       if (typeof meta.toolSize === 'number') t.toolSize = meta.toolSize;
       if (typeof meta.toolOpacity === 'number') t.toolOpacity = meta.toolOpacity;
       if (typeof meta.pencil === 'boolean') t.pencil = meta.pencil;
+      // Finalize params (Task 4): pen-side wet stroke uses these to call
+      // OT.StrokeFinalize.finalize() with the same inputs main uses.
+      if (typeof meta.tol === 'number') t.tol = meta.tol;
+      if (typeof meta.snapDist === 'number') t.snapDist = meta.snapDist;
+      if (typeof meta.inkDynamics === 'boolean') t.inkDynamics = meta.inkDynamics;
+      if (typeof meta.autoClose === 'boolean') t.autoClose = meta.autoClose;
       if (meta.sel) t.sel = meta.sel;
       if (meta.transform) t.transform = meta.transform;
       if (typeof meta.activeLayerKind === 'string') t.activeLayerKind = meta.activeLayerKind;

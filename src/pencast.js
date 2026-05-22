@@ -293,6 +293,13 @@
         toolRadius: radProj,
         // ^ project-px radius — pen window prefers this for the local cursor
         // indicator (brushFrac is awkward to invert without main's st.cw).
+        // Finalize params -- pen side calls OT.StrokeFinalize.finalize()
+        // with these so its wet stroke equals what main will commit.
+        // (smooth fallback to 0 so older settings shapes still work.)
+        tol: 0.4 + ((a.settings && a.settings.smoothing) || 0) * 0.8,
+        snapDist: (a.settings && a.settings.snapDist) || 0,
+        inkDynamics: !!(a.settings && a.settings.inkDynamics),
+        autoClose: !!(a.settings && a.settings.autoClose),
         frame: a.frame + 1,
         frameCount: a.project.frameCount,
         zoom: Math.round(st.view.zoom * 100),
