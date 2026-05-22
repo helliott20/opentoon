@@ -127,6 +127,8 @@ on both windows."
 
 - [ ] **Step 1.1: Create the new shared module**
 
+> **Note (post-implementation):** The code block below is the original draft. During code review the opts `skipVideo`/`skipLassoHidden` were renamed to `includeVideo`/`includeLassoHidden` (opt-out defaults that preserve the original `Stage.compositeStage` semantics — videos render and `_lassoHidden` strokes are skipped when no opt is passed). The final source landed at commit `8fd8611` — use `git show 8fd8611:src/composite.js` as the canonical reference if re-running this step.
+
 Create `C:\Users\harry\Documents\Projects\opentoon\src\composite.js`:
 
 ```js
