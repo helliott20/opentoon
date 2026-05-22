@@ -413,7 +413,23 @@
       const s = Object.assign({}, st);
       s.id = U.uid();
       s.closed = false;
-      s.pts = simplify(run, 1.1);
+      // Use the run's first/last (interpolated cut endpoints) plus the
+      // ORIGINAL polyline vertices that fell inside the run. The original
+      // st.pts were already simplified at commit time, so re-simplifying
+      // the densified run produces a different point set -- and a
+      // different smoothed curve, which the artist sees as the line
+      // "morphing" on release. Reusing the original interior points
+      // means samplesOf produces the same smoothed curve away from the
+      // cut; only the cut endpoint's neighbourhood necessarily differs.
+      const out = [
+        { x: run[0].x, y: run[0].y, p: run[0].p }
+      ];
+      for (let i = 1; i < run.length - 1; i++) {
+        if (run[i].orig) out.push({ x: run[i].x, y: run[i].y, p: run[i].p });
+      }
+      const tail = run[run.length - 1];
+      out.push({ x: tail.x, y: tail.y, p: tail.p });
+      s.pts = out;
       return s;
     });
   }
