@@ -513,8 +513,26 @@
       // owns drawOverlay during the morph, see drawOverlay for the snap
       // branch.
       if (this._snapAnim || this._snapPreview) return;
+      // Append _liveTip so finalize sees the same input shape _vUp will:
+      // _vUp pushes the actual release point onto this.raw BEFORE
+      // finalizing (tools.js: this.raw.push({x:pt.x, y:pt.y, ...})).
+      // Without this here, wet preview only sees the One-Euro-smoothed
+      // rope (~13 px behind cursor) while commit sees an extra point at
+      // the cursor -- producing the visible "shift on release" the user
+      // experienced. Concatenating _liveTip both makes the wet preview
+      // reach the cursor AND eliminates the geometric diff on commit.
+      let raw = this.raw;
+      if (this._liveTip && !this.straight) {
+        const tail = raw[raw.length - 1];
+        if (tail.x !== this._liveTip.x || tail.y !== this._liveTip.y) {
+          raw = raw.concat([{
+            x: this._liveTip.x, y: this._liveTip.y,
+            p: this._liveTip.p, t: performance.now()
+          }]);
+        }
+      }
       const tol = 0.4 + (this.smooth || 0) * 0.8;
-      const fin = OT.StrokeFinalize.finalize(this.raw, {
+      const fin = OT.StrokeFinalize.finalize(raw, {
         tol,
         snapDist: app.settings.snapDist || 0,
         inkDynamics: !!app.settings.inkDynamics,
@@ -1135,8 +1153,24 @@
       // owns drawOverlay during the morph, see drawOverlay for the snap
       // branch.
       if (this._snapAnim || this._snapPreview) return;
+      // Append _liveTip so finalize sees the same input shape pointerUp
+      // will: pointerUp pushes the actual release point onto this.raw
+      // BEFORE finalizing. Without this, wet preview only sees the
+      // One-Euro-smoothed rope (~13 px behind cursor) while commit sees
+      // an extra point at the cursor -- producing a visible shift on
+      // release. Same fix as PaintTool._computePreview.
+      let raw = this.raw;
+      if (this._liveTip && !this.straight) {
+        const tail = raw[raw.length - 1];
+        if (tail.x !== this._liveTip.x || tail.y !== this._liveTip.y) {
+          raw = raw.concat([{
+            x: this._liveTip.x, y: this._liveTip.y,
+            p: this._liveTip.p, t: performance.now()
+          }]);
+        }
+      }
       const tol = 0.4 + (this.smooth || 0) * 0.8;
-      const fin = OT.StrokeFinalize.finalize(this.raw, {
+      const fin = OT.StrokeFinalize.finalize(raw, {
         tol,
         snapDist: app.settings.snapDist || 0,
         inkDynamics: !!app.settings.inkDynamics,
