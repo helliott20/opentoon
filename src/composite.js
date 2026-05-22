@@ -58,6 +58,11 @@
       for (const a of layerAncestors(layer)) if (!a.visible) return false;
       return true;
     };
+    // Tracks whether the wet stroke got rendered during the layer loop
+    // (i.e. wetLayerId matched a vector layer). If not, the post-loop
+    // fallback draws it so the artist still sees their wet ink in the
+    // edge case where activeLayerId isn't known yet on the pen side.
+    let wetRendered = false;
 
     for (const layer of project.layers) {
       if (layer.type === 'group') continue;       // folders don't render
@@ -104,7 +109,7 @@
         // Wet stroke renders ON TOP of committed strokes, for the active
         // layer only. Pen window uses this; main canvas leaves wetStroke
         // unset and this is a no-op.
-        if (isActive && wetStroke) V.renderStroke(ctx, wetStroke);
+        if (isActive && wetStroke) { V.renderStroke(ctx, wetStroke); wetRendered = true; }
       } else if (cel.canvas) {
         // Defensive guard against missing cel.canvas (the original always
         // assumed it existed; on the pen-window raster placeholder it can
@@ -113,6 +118,14 @@
         ctx.drawImage(cel.canvas, 0, 0, project.width, project.height);
       }
       ctx.restore();
+    }
+    // Fallback wet render: if wetStroke was provided but no layer matched
+    // wetLayerId (e.g. pen window's first stroke fires before init has
+    // populated activeLayerId), render it anyway in project coords so the
+    // artist sees their wet ink. Better a tiny mis-transform than total
+    // invisibility on the first stroke.
+    if (wetStroke && !wetRendered && OT.Vector) {
+      OT.Vector.renderStroke(ctx, wetStroke);
     }
     ctx.globalAlpha = 1;
   }

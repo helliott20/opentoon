@@ -556,8 +556,15 @@
     /* ---------------- wet stroke lifecycle ---------------- */
     _wetEligible() {
       const t = this.state.tool;
-      return t.activeLayerKind === 'vector'
-        && (t.name === 'brush' || t.name === 'pencil');
+      if (t.name !== 'brush' && t.name !== 'pencil') return false;
+      // activeLayerKind is null at startup before any tool-meta has been
+      // processed. If the user's first pointerdown beats the init op's
+      // toolMeta (a timing race on initial pen-window open), seeding
+      // would be incorrectly skipped and they'd see no wet preview
+      // until the second stroke. Treat null as "unknown, assume vector"
+      // -- _applyToolMeta clears any stale wet stroke if a later
+      // tool-meta arrives with a non-vector activeLayerKind.
+      return t.activeLayerKind === 'vector' || t.activeLayerKind == null;
     }
     _seedWetStroke(id, projPt) {
       const t = this.state.tool;
