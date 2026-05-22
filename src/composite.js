@@ -125,7 +125,14 @@
           // without us having to ship the rasterised cel.
           const temp = getEraserTempCanvas(project.width, project.height);
           const tctx = temp.getContext('2d');
+          // Reset state -- the temp canvas is shared across renders and
+          // we WILL leave globalCompositeOperation = 'destination-out'
+          // below. Without this reset the next render's stroke pass would
+          // punch out into an empty canvas (rendering nothing) and the
+          // whole layer would visibly disappear during the drag.
           tctx.setTransform(1, 0, 0, 1, 0, 0);
+          tctx.globalCompositeOperation = 'source-over';
+          tctx.globalAlpha = 1;
           tctx.clearRect(0, 0, project.width, project.height);
           for (const st of cel.strokes)
             if (st.type === 'fill' && (includeLassoHidden || !st._lassoHidden))
