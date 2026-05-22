@@ -1036,6 +1036,11 @@
       // Timestamps on every point enable the Procreate-style hold-to-snap
       // gesture in shape recognition (see _maybeSnapShape).
       this.raw = [{ x: pt.x, y: pt.y, t: performance.now() }];
+      // _previewPts is the finalize output for the current in-progress
+      // stroke, recomputed per rAF in _schedule. drawOverlay renders this
+      // (NOT this.raw) so the wet line equals what will commit.
+      this._previewPts = null;
+      this._previewClosed = false;
       // Shift-constrain: lock the stroke to a straight line from this.startPt.
       // Re-read e.shiftKey on every move so the user can toggle mid-stroke.
       this.straight = !!(e && e.shiftKey);
@@ -1107,11 +1112,39 @@
         const inRefine = this.vec && this._snapPreview
           && this._snapPreview.kind === 'line' && !this._snapAnim;
         if (this.vec && !inRefine) this._snapPreview = this._maybeSnapShape(app);
-        // Vector preview: drawOverlay reads this.raw[] every overlayrender,
-        // so the only thing we need is to ask the overlay to repaint.
-        if (this.vec) app.emit('overlayrender');
+        // Vector preview: drawOverlay reads this._previewPts every overlayrender,
+        // so compute it here before emitting the render.
+        if (this.vec) {
+          this._computePreview(app);
+          app.emit('overlayrender');
+        }
         else this._render(app);
       });
+    }
+    // Compute the would-commit pts from this.raw via OT.StrokeFinalize.
+    // Cached as this._previewPts; drawOverlay renders this instead of
+    // this.raw. Called per rAF from _schedule and once more at pointerUp so
+    // the committed pts equals the last preview pts.
+    _computePreview(app) {
+      if (!this.raw || !this.raw.length || !this.t) {
+        this._previewPts = null;
+        this._previewClosed = false;
+        return;
+      }
+      // Skip while shape-snap animation is running -- the snap preview
+      // owns drawOverlay during the morph, see drawOverlay for the snap
+      // branch.
+      if (this._snapAnim || this._snapPreview) return;
+      const tol = 0.4 + (this.smooth || 0) * 0.8;
+      const fin = OT.StrokeFinalize.finalize(this.raw, {
+        tol,
+        snapDist: app.settings.snapDist || 0,
+        inkDynamics: !!app.settings.inkDynamics,
+        autoClose: !!(app.settings && app.settings.autoClose),
+        cel: this.t.cel
+      });
+      this._previewPts = fin.pts;
+      this._previewClosed = fin.closed;
     }
     // Live preview of the in-progress pencil stroke, on the overlay.
     drawOverlay(ctx, app) {
@@ -1152,20 +1185,17 @@
         ctx.restore();
         return;
       }
-      // Fresh array each frame — see PaintTool.drawOverlay for rationale.
-      // Append _liveTip so the preview reaches the actual cursor instead of
-      // ending at the rope-lagged smoothed tip.
-      const pts = this.raw.slice();
-      if (this._liveTip && !this.straight) {
-        const t = pts[pts.length - 1];
-        if (t.x !== this._liveTip.x || t.y !== this._liveTip.y) pts.push(this._liveTip);
-      }
-      // Predicted-events draw-ahead disabled — see PaintTool.drawOverlay
-      // for the rationale (frame-to-frame tail length flicker).
+      // Render the FINALIZE output (= the would-commit pts), not this.raw.
+      // The finalize pipeline runs per rAF in _computePreview, so what the
+      // artist sees is exactly what pointerUp will push to cel.strokes. The
+      // _liveTip workaround is no longer needed -- finalize-per-frame
+      // keeps the preview within ~one frame of the cursor.
+      const pts = this._previewPts;
+      if (!pts || pts.length === 0) { ctx.restore(); return; }
       const stroke = {
         type: 'line', pencil: true,
         color: this.color, width: this.size, opacity: this.opacity,
-        pts: pts, closed: false
+        pts: pts, closed: this._previewClosed
       };
       V().renderStroke(ctx, stroke);
       ctx.restore();
@@ -1202,23 +1232,15 @@
           pts = snapped.pts;
           closed = snapped.closed;
         } else {
-          const tol = 0.4 + this.smooth * 0.8;
-          pts = V().simplify(this.raw, tol);
-          if (pts.length < 2) pts = this.raw.slice(0, 2);
-          const snap = app.settings.snapDist;
-          const s0 = V().snapPoint(cel, pts[0].x, pts[0].y, snap);
-          if (s0) pts[0] = { x: s0.x, y: s0.y };
-          const li = pts.length - 1;
-          const s1 = V().snapPoint(cel, pts[li].x, pts[li].y, snap);
-          if (s1) pts[li] = { x: s1.x, y: s1.y };
-          closed = false;
-          // Same opt-in guard as PaintTool: auto-close traps tick strokes into
-          // unintended closed loops unless the user explicitly opts in.
-          const autoClose = !!(app.settings && app.settings.autoClose);
-          if (autoClose && pts.length > 3 &&
-              U.dist(pts[0].x, pts[0].y, pts[li].x, pts[li].y) < snap * 1.3) {
-            pts[li] = { x: pts[0].x, y: pts[0].y }; closed = true;
-          }
+          const fin = OT.StrokeFinalize.finalize(this.raw, {
+            tol: 0.4 + (this.smooth || 0) * 0.8,
+            snapDist: app.settings.snapDist || 0,
+            inkDynamics: !!app.settings.inkDynamics,
+            autoClose: !!(app.settings && app.settings.autoClose),
+            cel: cel
+          });
+          pts = fin.pts;
+          closed = fin.closed;
         }
         // pendingStrokeId comes from a pen-window 'down' message; honour it
         // so the committed stroke matches the wet stroke the pen is showing.
@@ -1249,6 +1271,8 @@
       cel._liveDrawing = false;
       app.history.pushCelEdit('pencil', cel, this.before);
       this.raw = null;
+      this._previewPts = null;
+      this._previewClosed = false;
       this._liveTip = null;
       this._predictedPts = null;
       this._snapPreview = null;
