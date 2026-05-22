@@ -563,10 +563,18 @@
     }
     // predictedPts is accepted but ignored for forward compatibility -- D1
     // does not render predicted touches (see _seedWetStroke comment).
+    //
+    // We MUST replace pts with a fresh array reference (not push in place):
+    // OT.Vector.samplesOf caches smoothed samples in a WeakMap keyed by the
+    // pts array reference. Mutating the array in place leaves the cache
+    // pointing at stale samples (e.g. the just-seeded one-point stroke),
+    // and the renderer draws only those samples no matter how many new
+    // points we add. Building a new array on every extend invalidates the
+    // cache; smoothPath is O(N) and N stays small for in-progress strokes.
     _extendWetStroke(actualPts, predictedPts) {
       const ws = this.state.wetStroke;
-      if (!ws) return;
-      for (const p of actualPts) ws.pts.push(p);
+      if (!ws || !actualPts || !actualPts.length) return;
+      ws.pts = ws.pts.concat(actualPts);
     }
     // Defensive timer: started on pointerup, NOT on seed. While the artist
     // is still dragging, the wet stroke must stay alive arbitrarily long.
