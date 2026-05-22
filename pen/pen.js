@@ -48,7 +48,7 @@
         palette: [],
         activeLayerId: null,
         frame: 0,
-        tool: { name: 'brush', color: '#222222', toolSize: 6, toolOpacity: 1, pencil: false, brushFrac: 0.02, activeLayerKind: null, sel: {}, transform: {} },
+        tool: { name: 'brush', color: '#222222', toolSize: 6, toolOpacity: 1, pencil: false, brushFrac: 0.02, toolRadius: 0, activeLayerKind: null, sel: {}, transform: {} },
         wetStroke: null
       };
       this.fit = { x: 0, y: 0, w: 0, h: 0 };
@@ -57,6 +57,10 @@
       this.toolBtns = {};
       this._lastHover = 0;
       this._wetTimer = null;
+      // Cursor position in pen-canvas CSS-px (screen space, before DPR
+      // scaling). Updated on pointermove/hover, cleared on pointerleave.
+      // Used by _compositeStage to draw the cursor circle indicator.
+      this._cursorCss = null;
 
       this._buildBar();
       this._buildLassoTb();
@@ -422,6 +426,12 @@
       if (meta.tool || meta.name) t.name = meta.name || meta.tool;
       if (meta.color) t.color = meta.color;
       if (typeof meta.brushFrac === 'number') t.brushFrac = meta.brushFrac;
+      // toolRadius is the cursor radius in *project px* (before main-side
+      // viewport zoom). Preferred over brushFrac for drawing the cursor
+      // circle on the pen, since brushFrac is normalised against the main
+      // canvas's CSS width and is awkward to invert here. Both fields
+      // coexist; older builds may only ship brushFrac.
+      if (typeof meta.toolRadius === 'number') t.toolRadius = meta.toolRadius;
       if (typeof meta.toolSize === 'number') t.toolSize = meta.toolSize;
       if (typeof meta.toolOpacity === 'number') t.toolOpacity = meta.toolOpacity;
       if (typeof meta.pencil === 'boolean') t.pencil = meta.pencil;
@@ -536,6 +546,10 @@
     }
     _seedWetStroke(id, projPt) {
       const t = this.state.tool;
+      // No `predicted` field: D1 drops predicted touches entirely. They
+      // caused leading-edge shimmer because their extrapolation flickered
+      // frame-to-frame, and the `pts.concat(predicted)` produced a fresh
+      // array each render -- defeating OT.Vector.samplesOf's cache.
       this.state.wetStroke = {
         id: id, type: 'line',
         pencil: t.name === 'pencil',
@@ -543,16 +557,16 @@
         width: t.toolSize || 6,
         opacity: t.toolOpacity == null ? 1 : t.toolOpacity,
         closed: false,
-        pts: [projPt],
-        predicted: []          // rendered alongside pts; cleared on each move
+        pts: [projPt]
       };
       if (this._wetTimer) { clearTimeout(this._wetTimer); this._wetTimer = null; }
     }
+    // predictedPts is accepted but ignored for forward compatibility -- D1
+    // does not render predicted touches (see _seedWetStroke comment).
     _extendWetStroke(actualPts, predictedPts) {
       const ws = this.state.wetStroke;
       if (!ws) return;
       for (const p of actualPts) ws.pts.push(p);
-      ws.predicted = predictedPts || [];
     }
     // Defensive timer: started on pointerup, NOT on seed. While the artist
     // is still dragging, the wet stroke must stay alive arbitrarily long.
@@ -563,6 +577,10 @@
       this._wetTimer = setTimeout(() => this._clearWetStroke(), 2000);
     }
     _clearWetStroke() {
+      if (this.state.wetStroke) {
+        // D1 diagnostic — temporary, remove once symptom B is confirmed fixed
+        console.log('[pen] clearWet from:', new Error().stack.split('\n').slice(2, 5).join(' | '));
+      }
       this.state.wetStroke = null;
       if (this._wetTimer) { clearTimeout(this._wetTimer); this._wetTimer = null; }
     }
@@ -619,22 +637,13 @@
         const projScale = this.fit.w / Math.max(1, s.project.width);
         c.translate(this.fit.x, this.fit.y);
         c.scale(projScale, projScale);
-        // wet stroke renderer: concatenate predicted onto pts inside a
-        // synthetic stroke object (don't mutate the canonical wetStroke).
-        const wet = s.wetStroke;
-        let wetForRender = null;
-        if (wet) {
-          if (wet.predicted && wet.predicted.length) {
-            wetForRender = Object.assign({}, wet, {
-              pts: wet.pts.concat(wet.predicted)
-            });
-          } else {
-            wetForRender = wet;
-          }
-        }
+        // Pass the wet stroke straight through. Its `pts` array reference
+        // is stable across renders (mutated by push only) which keeps
+        // OT.Vector.samplesOf's WeakMap cache hot. No predicted touches
+        // are appended — see _seedWetStroke for the rationale.
         OT.compositeStage(s.project, s.frame, c, {
           bg: true,
-          wetStroke: wetForRender,
+          wetStroke: s.wetStroke || null,
           wetLayerId: s.activeLayerId,
           includeVideo: false          // D1: pen has no <video> element
           // includeLassoHidden defaults to false (skip transform-drag
@@ -644,6 +653,42 @@
         });
       }
       c.restore();   // local view
+      // Cursor circle — drawn in screen-space (after restore), so the
+      // 1px stroke stays crisp regardless of the local view zoom. We're
+      // currently in DPR-scaled coords (setTransform above), and
+      // _cursorCss is in CSS-px, so the existing transform handles DPR.
+      this._drawCursor(c);
+    }
+
+    _drawCursor(c) {
+      const cur = this._cursorCss;
+      if (!cur) return;
+      const t = this.state.tool;
+      if (!t) return;
+      const name = t.name;
+      if (name !== 'brush' && name !== 'pencil' && name !== 'eraser') return;
+      // Prefer the project-space radius shipped in tool-meta. Fall back to
+      // brushFrac * fit.w (an approximation) if an older main hasn't
+      // published toolRadius yet.
+      let radiusCss = 0;
+      if (t.toolRadius && this.state.project.width > 0 && this.fit.w > 0) {
+        const radiusProj = t.toolRadius;
+        radiusCss = radiusProj * (this.fit.w / this.state.project.width) * this.view.scale;
+      } else if (t.brushFrac && this.fit.w > 0) {
+        radiusCss = t.brushFrac * this.fit.w * this.view.scale;
+      }
+      if (!(radiusCss > 0.5)) return;
+      c.save();
+      c.lineWidth = 1;
+      c.beginPath();
+      c.arc(cur.x, cur.y, radiusCss, 0, Math.PI * 2);
+      c.strokeStyle = 'rgba(0,0,0,0.85)';
+      c.stroke();
+      c.beginPath();
+      c.arc(cur.x, cur.y, radiusCss + 1, 0, Math.PI * 2);
+      c.strokeStyle = 'rgba(255,255,255,0.85)';
+      c.stroke();
+      c.restore();
     }
 
     /* ---------------- pointer input ---------------- */
@@ -814,6 +859,10 @@
           const p = this.pointers.get(e.pointerId);
           p.x = e.clientX - r.left; p.y = e.clientY - r.top;
         }
+        // Track the cursor in CSS-px for the local cursor-circle indicator.
+        // Updated for both drawing and hover (so the artist sees the circle
+        // even before they put the pen down).
+        this._cursorCss = { x: e.clientX - r.left, y: e.clientY - r.top };
         // A touch that is still in its palm-rejection grace window must not
         // pan, draw, or emit hover events -- it's quarantined until promoted.
         if (this._pendingTouch.has(e.pointerId)) return;
@@ -838,22 +887,22 @@
             actualPts.push(toProjPt(n, pr));
             wirePts.push({ nx: n.nx, ny: n.ny, pressure: pr });
           }
-          // predicted points -- never sent on the wire, never persist
-          let predictedPts = [];
-          if (e.getPredictedEvents) {
-            const predicted = e.getPredictedEvents();
-            for (const pe of predicted) {
-              const n = norm(pe.clientX, pe.clientY, r);
-              const pr = pe.pointerType === 'pen' ? pe.pressure : 1;
-              predictedPts.push(toProjPt(n, pr));
-            }
-          }
+          // D1: predicted touches deliberately disabled. They caused
+          // leading-edge shimmer (re-extrapolated every frame) and broke
+          // OT.Vector.samplesOf's cache. May be re-added later with proper
+          // opacity/limiting if perceived latency demands it.
           if (this.state.wetStroke) {
-            this._extendWetStroke(actualPts, predictedPts);
+            this._extendWetStroke(actualPts);
+            this._scheduleComposite();
+          } else {
+            // Still schedule a composite so the cursor circle tracks the pen.
             this._scheduleComposite();
           }
           if (PEN) PEN.sendInput(Object.assign({ type: 'move', pts: wirePts }, mods(e)));
         } else {
+          // Hover: schedule a redraw so the cursor circle follows the pen
+          // before any pointerdown. Throttle wire chatter, not the redraw.
+          this._scheduleComposite();
           const now = performance.now();
           if (now - this._lastHover < 55) return;
           this._lastHover = now;
@@ -888,12 +937,11 @@
         }
         if (!this.stroking) return;
         this.stroking = false;
-        // Clear predicted on the wet (no more predicting past finished input)
-        // and arm the 2-second defensive cleanup so the wet eventually goes
-        // away even if the commit message never arrives.
+        // Arm the 2-second defensive cleanup so the wet eventually goes
+        // away even if the commit message never arrives. (D1 no longer
+        // tracks predicted touches, so there's nothing to clear here.)
         const id = this.state.wetStroke ? this.state.wetStroke.id : null;
         if (this.state.wetStroke) {
-          this.state.wetStroke.predicted = [];
           this._armWetTimer();
           this._scheduleComposite();
         }
@@ -921,10 +969,15 @@
           this._clearWetStroke();
           if (PEN) PEN.sendInput({ type: 'cancel' });
         }
+        this._cursorCss = null;
         this._scheduleComposite();
       });
       cv.addEventListener('pointerleave', e => {
         if (this.pointers.has(e.pointerId)) this.pointers.delete(e.pointerId);
+        // Cursor left the canvas — drop the indicator so it doesn't ghost
+        // against the bezel. Repainted by the next pointermove / hover.
+        this._cursorCss = null;
+        this._scheduleComposite();
         if (this.stroking) return;
         if (PEN) PEN.sendInput({ type: 'leave' });
       });

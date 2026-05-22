@@ -250,7 +250,12 @@
 
     _meta() {
       const a = this.app, st = a.stage, t = a.tools.active;
-      const rad = (t && t.cursorRadius ? (t.cursorRadius(a) || 0) : 0) * st.view.zoom;
+      // radProj: cursor radius in *project px* (no viewport zoom). The pen
+      // window scales this into pen-fit space itself; it's simpler than
+      // inverting brushFrac (which is normalised against the main canvas's
+      // CSS width, which the pen doesn't know about).
+      const radProj = (t && t.cursorRadius) ? (t.cursorRadius(a) || 0) : 0;
+      const rad = radProj * st.view.zoom;
       // selection HUD + transform-armed flags
       let selName = '', selCount = 0, selIsGroup = false, selHasXform = false, selColor = '';
       const sel = a.selectedLayers;
@@ -285,6 +290,9 @@
         toolOpacity: t && t.opacity != null ? t.opacity : 1,
         pencil: t ? t.name === 'pencil' : false,
         brushFrac: st.cw ? rad / st.cw : 0.02,
+        toolRadius: radProj,
+        // ^ project-px radius — pen window prefers this for the local cursor
+        // indicator (brushFrac is awkward to invert without main's st.cw).
         frame: a.frame + 1,
         frameCount: a.project.frameCount,
         zoom: Math.round(st.view.zoom * 100),
