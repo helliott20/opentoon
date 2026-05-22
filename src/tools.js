@@ -184,40 +184,9 @@
     return { x: sx, y: sy, p: sp };
   }
 
-  // Ink-pen velocity dynamics: scale each point's pressure by a factor that
-  // shrinks with stroke speed. Real fountain/dip pens lay down more ink when
-  // dragged slowly (more dwell time per dab) and less when whipped, so this
-  // gives the brush a natural calligraphic feel. Operates in place — mutates
-  // the `p` field on every point in `raw`. Requires `.t` timestamps in ms.
-  function applyInkDynamics(raw) {
-    const n = raw.length;
-    if (n < 3) return;
-    // Per-point speed in screen-px / ms via centered differences on neighbors.
-    const speed = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
-      const a = raw[Math.max(0, i - 1)], b = raw[Math.min(n - 1, i + 1)];
-      const dt = (b.t - a.t) || 1;
-      const d = Math.hypot(b.x - a.x, b.y - a.y);
-      speed[i] = d / Math.max(0.5, dt);
-    }
-    // Light 3-tap smoothing so per-frame jitter doesn't cause width spikes.
-    const sm = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
-      const a = speed[Math.max(0, i - 1)], b = speed[i], c = speed[Math.min(n - 1, i + 1)];
-      sm[i] = (a + 2 * b + c) * 0.25;
-    }
-    // Convert speed to width multiplier: clamp(1 - k*speed, lo, 1).
-    // Typical stylus speeds: idle <0.1 px/ms, normal 0.3–0.8 px/ms, brisk
-    // 1.5–2 px/ms, whip flick 4+ px/ms. k=0.2 gives ~0.9 at normal, ~0.7 at
-    // brisk, and bottoms at the floor for whip-fast strokes.
-    const k = 0.2, lo = 0.45;
-    for (let i = 0; i < n; i++) {
-      const m = Math.max(lo, Math.min(1, 1 - k * sm[i]));
-      const p = raw[i].p == null ? 1 : raw[i].p;
-      raw[i].p = p * m;
-    }
-  }
-  OT.applyInkDynamics = applyInkDynamics;
+  // (Ink-pen velocity dynamics now lives in OT.StrokeFinalize.applyInkDynamics
+  // — see src/stroke-finalize.js. Pen window and main both call it via
+  // OT.StrokeFinalize.finalize() so wet preview matches commit.)
 
   // Detect a Procreate-style "hold at end" gesture. Walks back from the last
   // sample looking for the earliest point that's still within `holdPx` of the
@@ -523,9 +492,37 @@
         if (!this.t) return;
         // Shape-snap detection lives in _startSnapLoop's RAF, not here, so
         // detection runs even when the mouse is fully stopped.
-        if (this.vec) app.emit('overlayrender');
+        if (this.vec) {
+          this._computePreview(app);
+          app.emit('overlayrender');
+        }
         else app.emit('render');
       });
+    }
+    // Compute the would-commit pts from this.raw via OT.StrokeFinalize.
+    // Cached as this._previewPts; drawOverlay renders this instead of
+    // this.raw. Called per rAF from _rafEmit and once more at _vUp so
+    // the committed pts equals the last preview pts.
+    _computePreview(app) {
+      if (!this.raw || !this.raw.length || !this.t) {
+        this._previewPts = null;
+        this._previewClosed = false;
+        return;
+      }
+      // Skip while shape-snap animation is running -- the snap preview
+      // owns drawOverlay during the morph, see drawOverlay for the snap
+      // branch.
+      if (this._snapAnim || this._snapPreview) return;
+      const tol = 0.4 + (this.smooth || 0) * 0.8;
+      const fin = OT.StrokeFinalize.finalize(this.raw, {
+        tol,
+        snapDist: app.settings.snapDist || 0,
+        inkDynamics: !!app.settings.inkDynamics,
+        autoClose: !!(app.settings && app.settings.autoClose),
+        cel: this.t.cel
+      });
+      this._previewPts = fin.pts;
+      this._previewClosed = fin.closed;
     }
     // Live preview of the in-progress vector brush stroke, rendered on the
     // overlay so it stays crisp at any zoom (the alternative — stamping
@@ -573,28 +570,17 @@
         ctx.restore();
         return;
       }
-      // Fresh array each frame: V().samplesOf caches the smoothed path keyed
-      // by pts array identity. _vMove mutates this.raw in place, so reusing
-      // the same reference returned a stale (1-point) sampling on every move
-      // — the live preview never extended past the first dot.
-      // Append _liveTip (raw cursor) so the preview reaches the pen even
-      // though raw[] only holds rope-lagged smoothed points.
-      const pts = this.raw.slice();
-      if (this._liveTip && !this.straight) {
-        const t = pts[pts.length - 1];
-        if (t.x !== this._liveTip.x || t.y !== this._liveTip.y) pts.push(this._liveTip);
-      }
-      // Predicted-events draw-ahead is intentionally NOT appended here.
-      // The browser predicts a variable number of forward samples each
-      // frame, so the rendered tail grows/shrinks frame-to-frame and the
-      // preview visibly flickers (especially on slow strokes). The
-      // _predictedPts plumbing is kept dormant; re-enable when we have a
-      // way to dampen the transition (e.g. fixed-count tail at reduced
-      // alpha). See MDN PointerEvent/getPredictedEvents.
+      // Render the FINALIZE output (= the would-commit pts), not this.raw.
+      // The finalize pipeline runs per rAF in _computePreview, so what the
+      // artist sees is exactly what _vUp will push to cel.strokes. The
+      // _liveTip workaround is no longer needed -- finalize-per-frame
+      // keeps the preview within ~one frame of the cursor.
+      const pts = this._previewPts;
+      if (!pts || pts.length === 0) { ctx.restore(); return; }
       const stroke = {
         type: 'line', pencil: false,
         color: this.color, width: this.size, opacity: this.opacity,
-        pts: pts, closed: false
+        pts: pts, closed: this._previewClosed
       };
       V().renderStroke(ctx, stroke);
       ctx.restore();
@@ -669,6 +655,11 @@
       // need that snapshot any more.
       const t0 = performance.now();
       this.raw = [{ x: pt.x, y: pt.y, p: pt.pressure, t: t0 }];
+      // _previewPts is the finalize output for the current in-progress
+      // stroke, recomputed per rAF in _vMove. drawOverlay renders this
+      // (NOT this.raw) so the wet line equals what will commit.
+      this._previewPts = null;
+      this._previewClosed = false;
       this.sm = { x: pt.x, y: pt.y };
       this.lastStamp = { x: pt.x, y: pt.y, p: pt.pressure };
       this._initOneEuro(pt);
@@ -720,10 +711,12 @@
       this.sm.x = sm.x; this.sm.y = sm.y;
       this.raw.push({ x: this.sm.x, y: this.sm.y, p: sm.p, t: performance.now() });
       this.lastStamp = { x: this.sm.x, y: this.sm.y, p: sm.p };
-      // Track the true cursor separately so drawOverlay can extend the live
-      // preview all the way up to the pointer — otherwise the rope lag is
-      // visible as a gap between the cursor and the wet ink (especially on
-      // slow strokes).
+      // Track the true cursor for the line-snap drag-to-refine path
+      // (see _startSnapLoop): once a line snaps, pts[1] tracks _liveTip
+      // so the snapped line follows the cursor instead of running snap
+      // detection again. (drawOverlay no longer needs _liveTip now that
+      // finalize runs per rAF and the preview reaches the cursor on its
+      // own.)
       this._liveTip = { x: pt.x, y: pt.y, p: pt.pressure };
       // No cel.canvas stamping — drawOverlay renders the live stroke as a
       // proper vector path on the overlay each frame, which stays crisp at
@@ -772,36 +765,24 @@
       // so re-running detection here would miss snaps that the loop had
       // already locked in.
       const snapped = snapAtRelease || this._maybeSnapShape(app);
-      // Ink-pen dynamics: skip when shape-snap fired — clean shapes look
-      // wrong with velocity-thinned tips.
-      if (!snapped && app.settings.inkDynamics && this.raw.length >= 3) {
-        applyInkDynamics(this.raw);
-      }
       let pts, closed;
       if (snapped) {
+        // Shape-snap path is unaffected: it produced a clean primitive
+        // shape and bypasses the inkDynamics/snap/autoClose stack on
+        // purpose. (See applyInkDynamics docs: clean shapes look wrong
+        // with velocity-thinned tips.)
         pts = snapped.pts;
         closed = snapped.closed;
       } else {
-        const tol = 0.4 + this.smooth * 0.8;
-        pts = V().simplify(this.raw, tol);
-        if (pts.length < 2) pts = this.raw.slice(0, 2);
-        // endpoint auto-connect
-        const snap = app.settings.snapDist;
-        const s0 = V().snapPoint(cel, pts[0].x, pts[0].y, snap);
-        if (s0) { pts[0] = { x: s0.x, y: s0.y, p: pts[0].p }; }
-        const li = pts.length - 1;
-        const s1 = V().snapPoint(cel, pts[li].x, pts[li].y, snap);
-        if (s1) { pts[li] = { x: s1.x, y: s1.y, p: pts[li].p }; }
-        closed = false;
-        // Auto-close is opt-in. Without this guard a quick tick mark that
-        // happens to start and end within ~18 px is silently turned into a
-        // closed loop, which traps fill operations the artist never intended.
-        const autoClose = !!(app.settings && app.settings.autoClose);
-        if (autoClose && pts.length > 3 &&
-            U.dist(pts[0].x, pts[0].y, pts[li].x, pts[li].y) < snap * 1.3) {
-          pts[li] = { x: pts[0].x, y: pts[0].y, p: pts[li].p };
-          closed = true;
-        }
+        const fin = OT.StrokeFinalize.finalize(this.raw, {
+          tol: 0.4 + this.smooth * 0.8,
+          snapDist: app.settings.snapDist || 0,
+          inkDynamics: !!app.settings.inkDynamics,
+          autoClose: !!(app.settings && app.settings.autoClose),
+          cel: cel
+        });
+        pts = fin.pts;
+        closed = fin.closed;
       }
       // pendingStrokeId comes from a pen-window 'down' message; honour it
       // so the committed stroke matches the wet stroke the pen is showing.
@@ -826,6 +807,8 @@
       // Drop the in-progress raw[] so drawOverlay stops drawing a ghost on
       // top of the now-committed stroke.
       this.raw = null;
+      this._previewPts = null;
+      this._previewClosed = false;
       this._liveTip = null;
       this._predictedPts = null;
       this._snapPreview = null;
