@@ -7,21 +7,6 @@
 (function (OT) {
   'use strict';
 
-  // Lazy temp canvas used by the pen-window eraser-overlay render path.
-  // One instance shared across renders -- cheap to keep around (~8 MB at
-  // 1920x1080) and avoids per-frame allocation on every eraser drag tick.
-  // Only allocated on first use; main canvas never touches it because
-  // main passes no eraserOverlay opt.
-  let _eraserTemp = null;
-  function getEraserTempCanvas(w, h) {
-    if (!_eraserTemp) _eraserTemp = document.createElement('canvas');
-    if (_eraserTemp.width !== w || _eraserTemp.height !== h) {
-      _eraserTemp.width = w;
-      _eraserTemp.height = h;
-    }
-    return _eraserTemp;
-  }
-
   // Draw bg + all visible layers at `frame` into ctx (already in project
   // coords).
   //
@@ -116,43 +101,33 @@
           && !opts.useRaster && !cel._liveDrawing) {
         const V = OT.Vector;
         if (eraserLayer) {
-          // Pen-window live-eraser path: render this layer's strokes onto
-          // a temp canvas in project coords, apply destination-out at each
-          // sample, then blit the cut-out result over the parent ctx.
-          // Doing destination-out on the parent ctx would punch through
-          // every layer below; the temp canvas isolates the punch to this
-          // layer only -- matching main's per-cel cel.canvas behaviour
-          // without us having to ship the rasterised cel.
-          const temp = getEraserTempCanvas(project.width, project.height);
-          const tctx = temp.getContext('2d');
-          // Reset state -- the temp canvas is shared across renders and
-          // we WILL leave globalCompositeOperation = 'destination-out'
-          // below. Without this reset the next render's stroke pass would
-          // punch out into an empty canvas (rendering nothing) and the
-          // whole layer would visibly disappear during the drag.
-          tctx.setTransform(1, 0, 0, 1, 0, 0);
-          tctx.globalCompositeOperation = 'source-over';
-          tctx.globalAlpha = 1;
-          tctx.clearRect(0, 0, project.width, project.height);
+          // Pen-window live-eraser path: clip the strokes against the
+          // eraser circles using vector clipping, so the rendered output
+          // stays SHARP at any zoom (no raster scaling). Even-odd rule
+          // with the project rect + each circle as a subpath: inside-rect
+          // AND outside-circles wins (1 crossing = odd = inside), inside
+          // a circle gets 2 crossings = even = outside the clip region.
+          // The clip stays scoped to this save/restore so other layers
+          // are unaffected.
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(0, 0, project.width, project.height);
+          for (const s of opts.eraserOverlay.samples) {
+            // moveTo before arc starts a new subpath -- without it the
+            // arc would draw a line from the previous subpath's last
+            // point, polluting the clip.
+            ctx.moveTo(s.x + s.r, s.y);
+            ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+          }
+          ctx.clip('evenodd');
           for (const st of cel.strokes)
             if (st.type === 'fill' && (includeLassoHidden || !st._lassoHidden))
-              V.renderStroke(tctx, st);
+              V.renderStroke(ctx, st);
           for (const st of cel.strokes)
             if (st.type !== 'fill' && (includeLassoHidden || !st._lassoHidden))
-              V.renderStroke(tctx, st);
-          if (isActive && wetStroke) { V.renderStroke(tctx, wetStroke); wetRendered = true; }
-          tctx.globalCompositeOperation = 'destination-out';
-          tctx.fillStyle = '#000';
-          for (const s of opts.eraserOverlay.samples) {
-            tctx.beginPath();
-            tctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-            tctx.fill();
-          }
-          // The parent ctx is in cel-local coords (after applyWorldXform),
-          // so drawing the temp at (0, 0, project.width, project.height)
-          // lands it correctly. The temp's own transform was reset, so it
-          // holds project-space content regardless of zoom.
-          ctx.drawImage(temp, 0, 0);
+              V.renderStroke(ctx, st);
+          if (isActive && wetStroke) { V.renderStroke(ctx, wetStroke); wetRendered = true; }
+          ctx.restore();
         } else {
           // Skip strokes flagged _lassoHidden - the lasso tool renders them
           // separately via the overlay as a pre-rasterised snippet during
