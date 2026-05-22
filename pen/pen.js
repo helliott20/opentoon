@@ -960,6 +960,13 @@
         const n = norm(e.clientX, e.clientY, r);
         const pressure = e.pointerType === 'pen' ? e.pressure : 1;
         this.stroking = true;
+        // A new gesture invalidates any leftover eraser overlay. Main only
+        // emits celchange on eraser pointerUp if `this.changed` is true
+        // (i.e. some stroke was actually intersected) -- so a quick eraser
+        // tap that didn't cross a line leaves the overlay set on pen, and
+        // the NEXT brush stroke's wet preview would render through that
+        // stale clip. Clearing on pointerdown is the simplest fix.
+        if (this.state.eraserOverlay) this.state.eraserOverlay = null;
         // Client-generated UUID flows to the main side as the stroke id;
         // the main side's brush/pencil tool honours pendingStrokeId so the
         // committed stroke matches the wet one we render locally.

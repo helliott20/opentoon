@@ -7,6 +7,20 @@
 (function (OT) {
   'use strict';
 
+  // Lazy temp canvas for the pen-window eraser-overlay render path.
+  // Sized to match the parent ctx's backing-store dimensions so strokes
+  // can be rendered at pen-display resolution (sharp, no upscale blur)
+  // and blitted pixel-perfect. Reused across renders; resizes on demand.
+  let _eraserTemp = null;
+  function getEraserTempCanvas(w, h) {
+    if (!_eraserTemp) _eraserTemp = document.createElement('canvas');
+    if (_eraserTemp.width !== w || _eraserTemp.height !== h) {
+      _eraserTemp.width = w;
+      _eraserTemp.height = h;
+    }
+    return _eraserTemp;
+  }
+
   // Draw bg + all visible layers at `frame` into ctx (already in project
   // coords).
   //
@@ -101,32 +115,66 @@
           && !opts.useRaster && !cel._liveDrawing) {
         const V = OT.Vector;
         if (eraserLayer) {
-          // Pen-window live-eraser path: clip the strokes against the
-          // eraser circles using vector clipping, so the rendered output
-          // stays SHARP at any zoom (no raster scaling). Even-odd rule
-          // with the project rect + each circle as a subpath: inside-rect
-          // AND outside-circles wins (1 crossing = odd = inside), inside
-          // a circle gets 2 crossings = even = outside the clip region.
-          // The clip stays scoped to this save/restore so other layers
-          // are unaffected.
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(0, 0, project.width, project.height);
-          for (const s of opts.eraserOverlay.samples) {
-            // moveTo before arc starts a new subpath -- without it the
-            // arc would draw a line from the previous subpath's last
-            // point, polluting the clip.
-            ctx.moveTo(s.x + s.r, s.y);
-            ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-          }
-          ctx.clip('evenodd');
+          // Pen-window live-eraser path: render this layer's strokes onto
+          // a temp canvas sized to the PARENT BACKING STORE (not project
+          // pixels), apply destination-out at each sample, then blit the
+          // result pixel-perfect onto the parent ctx.
+          //
+          // Why this shape:
+          //   * Vector clip(evenodd) with N sample subpaths was O(N)+
+          //     per render AND repeated every frame; long drags
+          //     accumulated samples and the renderer choked.
+          //   * Project-sized temp + upscaled drawImage blurred the
+          //     layer (raster scaling) and produced sub-pixel shifts
+          //     at commit.
+          //   * Temp at parent-backing-store size means strokes render
+          //     at pen-display resolution -- sharp. We copy the parent's
+          //     current transform onto the temp ctx so cel-local coords
+          //     map to the same pen-display pixels they would on the
+          //     parent. destination-out punches the rendered active
+          //     layer only (no leak to bg). Blit happens at identity
+          //     transform = 1:1 pixel copy.
+          //   * Per-frame cost is roughly: clearRect + render strokes
+          //     (same as the non-eraser path) + O(samples) circle fills
+          //     + one drawImage. Constant in clip complexity.
+          const tempW = ctx.canvas.width;
+          const tempH = ctx.canvas.height;
+          const temp = getEraserTempCanvas(tempW, tempH);
+          const tctx = temp.getContext('2d');
+          // Reset state -- the temp is shared across renders and we will
+          // leave globalCompositeOperation = 'destination-out' below.
+          tctx.setTransform(1, 0, 0, 1, 0, 0);
+          tctx.globalCompositeOperation = 'source-over';
+          tctx.globalAlpha = 1;
+          tctx.clearRect(0, 0, tempW, tempH);
+          // Adopt the parent's current transform so strokes drawn on the
+          // temp end up at the same pen-display pixels they would on the
+          // parent ctx. (getTransform/setTransform: DOMMatrix, supported
+          // in all Chromium versions we target.)
+          tctx.setTransform(ctx.getTransform());
           for (const st of cel.strokes)
             if (st.type === 'fill' && (includeLassoHidden || !st._lassoHidden))
-              V.renderStroke(ctx, st);
+              V.renderStroke(tctx, st);
           for (const st of cel.strokes)
             if (st.type !== 'fill' && (includeLassoHidden || !st._lassoHidden))
-              V.renderStroke(ctx, st);
-          if (isActive && wetStroke) { V.renderStroke(ctx, wetStroke); wetRendered = true; }
+              V.renderStroke(tctx, st);
+          if (isActive && wetStroke) { V.renderStroke(tctx, wetStroke); wetRendered = true; }
+          tctx.globalCompositeOperation = 'destination-out';
+          tctx.fillStyle = '#000';
+          for (const s of opts.eraserOverlay.samples) {
+            tctx.beginPath();
+            tctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+            tctx.fill();
+          }
+          // Blit pixel-perfect onto parent ctx. setTransform(identity)
+          // bypasses the parent's projection/zoom/layer xform stack so
+          // drawImage(temp, 0, 0) copies temp pixels 1:1 onto parent.
+          // The parent's globalAlpha is preserved across setTransform
+          // and still applies to drawImage -- so worldOpacity(layer)
+          // multiplies through, same as the direct-render path.
+          ctx.save();
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.drawImage(temp, 0, 0);
           ctx.restore();
         } else {
           // Skip strokes flagged _lassoHidden - the lasso tool renders them
