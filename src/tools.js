@@ -939,11 +939,16 @@
       if (changed) {
         pending.cel.strokes = strokes;
         this.changed = true;
-        // Pen window mirrors cel.strokes; emit celchange so pencast can
-        // republish the live mid-drag state. Without this, the pen only
-        // sees the eraser's effect after pointerUp (pencast was last
-        // told celchange on the previous commit, not this in-flight one).
-        pending.app.emit('celchange');
+        // Note: we deliberately do NOT emit celchange here. On main the
+        // eraser is visually live via cel.canvas destination-out punches
+        // (see Pass 1 above), but the vector-level cut fragments produced
+        // by V.eraseStroke render visibly differently from the original
+        // strokes (different smoothing through the cut points), so
+        // re-publishing cel.strokes mid-drag made the pen window's lines
+        // visibly morph mid-erase. Pen waits until pointerUp commits to
+        // see the cut fragments. Cursor circle still tracks during drag.
+        // (TODO: ship eraser samples as a separate "erase-overlay" op so
+        // pen can apply destination-out locally without mutating strokes.)
       }
       pending.app.emit('render');
     }

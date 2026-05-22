@@ -283,10 +283,19 @@
       // active-layer kind: vector / drawing(raster) / group / video
       const al = a.activeLayer && a.activeLayer();
       const activeLayerKind = al ? al.type : null;
+      // toolSize comes from the tool's cursorRadius (canonical per tool:
+      // brush=brushSize/2, pencil=pencilSize/2, eraser=eraserSize/2) so
+      // the pen window's wet-stroke width is correct even on the very
+      // first stroke after the pen opens. t.size is set in pointerDown,
+      // so reading it directly gave the previous tool's size (or the
+      // brushSize fallback) before the first stroke -- pencil came
+      // through as brush-thick on its first stroke.
+      const canonicalSize = radProj * 2;
       return {
         tool: t ? t.name : 'brush',
         color: a.color,
-        toolSize: t && t.size != null ? t.size : (a.settings.brushSize || 6),
+        toolSize: canonicalSize > 0 ? canonicalSize
+          : (t && t.size != null ? t.size : (a.settings.brushSize || 6)),
         toolOpacity: t && t.opacity != null ? t.opacity : 1,
         pencil: t ? t.name === 'pencil' : false,
         brushFrac: st.cw ? rad / st.cw : 0.02,
