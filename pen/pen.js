@@ -48,7 +48,7 @@
         palette: [],
         activeLayerId: null,
         frame: 0,
-        tool: { name: 'brush', color: '#222222', toolSize: 6, toolOpacity: 1, pencil: false, brushFrac: 0.02, toolRadius: 0, tol: 0.4, snapDist: 0, inkDynamics: false, autoClose: false, activeLayerKind: null, sel: {}, transform: {} },
+        tool: { name: 'brush', color: '#222222', toolSize: 6, toolOpacity: 1, pencil: false, brushFrac: 0.02, toolRadius: 0, tol: 0.4, snapDist: 0, inkDynamics: false, autoClose: false, smoothing: 0, activeLayerKind: null, sel: {}, transform: {} },
         wetStroke: null
       };
       this.fit = { x: 0, y: 0, w: 0, h: 0 };
@@ -437,10 +437,13 @@
       if (typeof meta.pencil === 'boolean') t.pencil = meta.pencil;
       // Finalize params (Task 4): pen-side wet stroke uses these to call
       // OT.StrokeFinalize.finalize() with the same inputs main uses.
+      // `smoothing` drives the One Euro filter the pen applies BEFORE
+      // finalize, so pen's raw matches main's (One-Euro-smoothed) raw.
       if (typeof meta.tol === 'number') t.tol = meta.tol;
       if (typeof meta.snapDist === 'number') t.snapDist = meta.snapDist;
       if (typeof meta.inkDynamics === 'boolean') t.inkDynamics = meta.inkDynamics;
       if (typeof meta.autoClose === 'boolean') t.autoClose = meta.autoClose;
+      if (typeof meta.smoothing === 'number') t.smoothing = meta.smoothing;
       if (meta.sel) t.sel = meta.sel;
       if (meta.transform) t.transform = meta.transform;
       if (typeof meta.activeLayerKind === 'string') t.activeLayerKind = meta.activeLayerKind;
@@ -552,21 +555,34 @@
     }
     _seedWetStroke(id, projPt) {
       const t = this.state.tool;
-      // wet.rawPts is the append-only raw input -- post-pointer-event,
-      // pre-finalize. wet.pts is the finalize output that the renderer
-      // sees. Both start with the single seed point because finalize on
-      // a 1-pt array returns that 1-pt array.
-      const rawPts = [projPt];
-      this.state.wetStroke = {
+      // wet.rawPts is the append-only One-Euro-smoothed input -- the same
+      // shape main's tools accumulate via _vMove. wet.pts is the finalize
+      // output that the renderer sees. Both start with the single seed
+      // point because finalize on a 1-pt array returns that 1-pt array.
+      //
+      // The One Euro filter state lives ON the wetStroke (not the
+      // PenWindow) so it dies with the stroke automatically and a new
+      // stroke gets a fresh filter set.
+      const wet = {
         id: id, type: 'line',
         pencil: t.name === 'pencil',
         color: t.color || '#222222',
         width: t.toolSize || 6,
         opacity: t.toolOpacity == null ? 1 : t.toolOpacity,
         closed: false,
-        rawPts: rawPts,
-        pts: rawPts
+        rawPts: null,            // set after filter init below
+        pts: null,
+        smooth: t.smoothing || 0  // drives One Euro params; updated per-extend
       };
+      // Initialize the 3-axis One Euro filter with the seed point so the
+      // first applyOneEuro call has prior state.
+      OT.StrokeFinalize.initOneEuro(wet, {
+        x: projPt.x, y: projPt.y, pressure: projPt.p
+      });
+      const seedSmoothed = { x: projPt.x, y: projPt.y, p: projPt.p, t: performance.now() };
+      wet.rawPts = [seedSmoothed];
+      wet.pts = wet.rawPts;
+      this.state.wetStroke = wet;
       if (this._wetTimer) { clearTimeout(this._wetTimer); this._wetTimer = null; }
     }
     // predictedPts is accepted but ignored for forward compatibility -- D1
@@ -582,12 +598,25 @@
     _extendWetStroke(actualPts, predictedPts) {
       const ws = this.state.wetStroke;
       if (!ws || !actualPts || !actualPts.length) return;
-      // Append to rawPts (the input), then run finalize() to get the
-      // would-commit pts (the output the renderer uses). Building a
-      // new rawPts array invalidates OT.Vector.samplesOf's per-array
-      // cache; finalize then produces a fresh result pts as well.
-      ws.rawPts = ws.rawPts.concat(actualPts);
       const t = this.state.tool;
+      // Keep ws.smooth current so the slider taking effect mid-stroke
+      // re-tunes the One Euro filter on the next applyOneEuro call.
+      ws.smooth = t.smoothing || 0;
+      // One Euro filter every incoming raw cursor sample BEFORE pushing
+      // to rawPts -- this matches what main's _vMove does on its end.
+      // Without this, pen's rawPts is raw cursor and main's is smoothed,
+      // and finalize on either side produces a different stroke shape.
+      const smoothed = [];
+      const now = performance.now();
+      for (const p of actualPts) {
+        const sm = OT.StrokeFinalize.applyOneEuro(ws, {
+          x: p.x, y: p.y, pressure: p.p
+        });
+        smoothed.push({ x: sm.x, y: sm.y, p: sm.p, t: now });
+      }
+      // Fresh array reference -- invalidates OT.Vector.samplesOf cache;
+      // finalize then produces a fresh output array too.
+      ws.rawPts = ws.rawPts.concat(smoothed);
       const layer = this.state.layersById.get(this.state.activeLayerId);
       const cel = layer ? layer.celAt(this.state.frame) : null;
       const fin = OT.StrokeFinalize.finalize(ws.rawPts, {

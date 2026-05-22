@@ -98,90 +98,16 @@
   //   cutoff = mincutoff + beta * |speed_smoothed|
   //
   // One instance per axis (x, y, pressure) since each tracks its own
-  // history. The filter is parameterised at construction or via setParams.
-  class OneEuroFilter {
-    constructor(mincutoff, beta, dcutoff) {
-      this.mincutoff = mincutoff != null ? mincutoff : 1.0;
-      this.beta = beta != null ? beta : 0.0;
-      this.dcutoff = dcutoff != null ? dcutoff : 1.0;
-      this.xPrev = null; this.dxPrev = 0; this.tPrev = null;
-    }
-    setParams(mincutoff, beta, dcutoff) {
-      this.mincutoff = mincutoff;
-      this.beta = beta;
-      if (dcutoff != null) this.dcutoff = dcutoff;
-    }
-    reset(x, t) {
-      this.xPrev = x;
-      this.dxPrev = 0;
-      this.tPrev = t;
-    }
-    _alpha(cutoff, dt) {
-      const tau = 1.0 / (2 * Math.PI * cutoff);
-      return 1.0 / (1.0 + tau / dt);
-    }
-    filter(x, t) {
-      if (this.xPrev == null || this.tPrev == null) {
-        this.xPrev = x; this.tPrev = t; this.dxPrev = 0;
-        return x;
-      }
-      // Clamp dt to a sane minimum so a duplicate-timestamp event (dt = 0)
-      // doesn't blow up the alpha calculation. 0.5 ms is below any real
-      // tablet rate, so this only affects pathological cases.
-      let dt = t - this.tPrev;
-      if (!(dt > 0)) dt = 0.016;
-      if (dt < 0.0005) dt = 0.0005;
-      const dxRaw = (x - this.xPrev) / dt;
-      const aD = this._alpha(this.dcutoff, dt);
-      const dxSmoothed = aD * dxRaw + (1 - aD) * this.dxPrev;
-      const cutoff = this.mincutoff + this.beta * Math.abs(dxSmoothed);
-      const aX = this._alpha(cutoff, dt);
-      const xSmoothed = aX * x + (1 - aX) * this.xPrev;
-      this.xPrev = xSmoothed;
-      this.dxPrev = dxSmoothed;
-      this.tPrev = t;
-      return xSmoothed;
-    }
-  }
-
-  // Map [0..1] smoothing slider to One Euro params.
-  //   mincutoff (Hz) -- lower = more smoothing at rest
-  //   beta           -- higher = less lag on fast moves
-  function oneEuroParams(smooth) {
-    const s = smooth || 0;
-    const mincutoff = U.lerp(2.0, 0.3, s);
-    const beta = U.lerp(0.05, 0.005, s);
-    return { mincutoff: mincutoff, beta: beta, dcutoff: 1.0 };
-  }
-  // Expose for testing.
-  OT.OneEuroFilter = OneEuroFilter;
-  OT.oneEuroParams = oneEuroParams;
-
-  // Shared lifecycle helpers for tools that smooth (x, y, pressure) through
-  // a One Euro filter per axis. The tool owns _oneEuroX / _oneEuroY /
-  // _oneEuroP fields and a `smooth` number in [0, 1].
+  // history. (Implementation now lives in src/stroke-finalize.js so the
+  // pen window can apply the same filter on its raw input -- the back-
+  // compat OT.OneEuroFilter / OT.oneEuroParams exports are still
+  // there for any callers that imported them directly. Local helpers
+  // delegate to OT.StrokeFinalize.initOneEuro / applyOneEuro.)
   function initOneEuro(tool, pt) {
-    const t = performance.now() / 1000;
-    const params = oneEuroParams(tool.smooth);
-    tool._oneEuroX = new OneEuroFilter(params.mincutoff, params.beta, params.dcutoff);
-    tool._oneEuroY = new OneEuroFilter(params.mincutoff, params.beta, params.dcutoff);
-    tool._oneEuroP = new OneEuroFilter(params.mincutoff, params.beta, params.dcutoff);
-    tool._oneEuroX.reset(pt.x, t);
-    tool._oneEuroY.reset(pt.y, t);
-    tool._oneEuroP.reset(pt.pressure != null ? pt.pressure : 1, t);
+    OT.StrokeFinalize.initOneEuro(tool, pt);
   }
-  // Apply current smoothing params to all three axis filters. Called every
-  // move so a slider tweak mid-stroke takes effect immediately.
   function applyOneEuro(tool, pt) {
-    const t = performance.now() / 1000;
-    const params = oneEuroParams(tool.smooth);
-    tool._oneEuroX.setParams(params.mincutoff, params.beta, params.dcutoff);
-    tool._oneEuroY.setParams(params.mincutoff, params.beta, params.dcutoff);
-    tool._oneEuroP.setParams(params.mincutoff, params.beta, params.dcutoff);
-    const sx = tool._oneEuroX.filter(pt.x, t);
-    const sy = tool._oneEuroY.filter(pt.y, t);
-    const sp = tool._oneEuroP.filter(pt.pressure != null ? pt.pressure : 1, t);
-    return { x: sx, y: sy, p: sp };
+    return OT.StrokeFinalize.applyOneEuro(tool, pt);
   }
 
   // (Ink-pen velocity dynamics now lives in OT.StrokeFinalize.applyInkDynamics

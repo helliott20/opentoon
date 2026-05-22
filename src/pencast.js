@@ -296,6 +296,12 @@
         // Finalize params -- pen side calls OT.StrokeFinalize.finalize()
         // with these so its wet stroke equals what main will commit.
         // (smooth fallback to 0 so older settings shapes still work.)
+        //
+        // smoothing is also sent raw so the pen can run the SAME One Euro
+        // filter on its raw cursor input before finalizing. Without this,
+        // pen feeds raw cursor to finalize while main feeds One-Euro
+        // -smoothed -- different inputs, visible shift on commit.
+        smoothing: (a.settings && a.settings.smoothing) || 0,
         tol: 0.4 + ((a.settings && a.settings.smoothing) || 0) * 0.8,
         snapDist: (a.settings && a.settings.snapDist) || 0,
         inkDynamics: !!(a.settings && a.settings.inkDynamics),
