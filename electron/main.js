@@ -38,7 +38,15 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      preload: path.join(__dirname, 'preload.js')
+      preload: path.join(__dirname, 'preload.js'),
+      // CRITICAL for the pen-display setup: when the pen window is focused
+      // (the artist drawing on it), the main window goes into the background
+      // and Chromium throttles its requestAnimationFrame to ~1 Hz. Pencast
+      // RAFs are what flush the live-stroke state batch — without this
+      // setting, every brush move's extend op piles up in _pendingOps until
+      // the artist lifts the pen, at which point live-end clears the stroke
+      // before the extends get to render. Result: nothing shows during drag.
+      backgroundThrottling: false
     }
   });
 
@@ -54,6 +62,21 @@ function createWindow() {
   if (isDev) win.webContents.openDevTools({ mode: 'detach' });
   // re-created via 'activate' after startup -> no splash to wait on
   if (revealed) win.show();
+
+  // After the renderer (re)loads — including dev hot-reload — re-fire the
+  // pen-attach handshake if a pen window is already open. Without this, a
+  // main-side reload silently disconnects the existing pen window: the new
+  // PenCast instance has nothing telling it the pen is there.
+  win.webContents.on('did-finish-load', () => {
+    if (penWin && !penWin.isDestroyed() && win && !win.isDestroyed()) {
+      // Slight delay so the renderer finishes its app.start() bootstrap
+      // before the attach event arrives.
+      setTimeout(() => {
+        if (win && !win.isDestroyed())
+          win.webContents.send('opentoon:pen-attach');
+      }, 250);
+    }
+  });
 
   // closing the main window also closes its pen-display companion
   win.on('closed', () => {
@@ -93,10 +116,14 @@ function createPenWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      preload: path.join(__dirname, 'pen-preload.js')
+      preload: path.join(__dirname, 'pen-preload.js'),
+      // Same reason as the main window's setting — RAF on either side
+      // must keep ticking when the other window is focused.
+      backgroundThrottling: false
     }
   });
   penWin.loadFile(path.join(__dirname, '..', 'pen', 'pen.html'));
+  if (isDev) penWin.webContents.openDevTools({ mode: 'detach' });
   penWin.on('closed', () => {
     penWin = null;
     if (win && !win.isDestroyed()) win.webContents.send('opentoon:pen-detach');
@@ -175,13 +202,25 @@ function watchForDev() {
   let timer = null;
   const reload = () => {
     clearTimeout(timer);
-    timer = setTimeout(() => { if (win) win.webContents.reloadIgnoringCache(); }, 150);
+    timer = setTimeout(() => {
+      if (win) win.webContents.reloadIgnoringCache();
+      // Pen window has its own JS bundle; reload it too so its renderer
+      // stays in sync with the main side. Without this the pen keeps
+      // running stale code after a src/ edit and silently drops new IPC
+      // ops the new main side knows about.
+      if (penWin && !penWin.isDestroyed()) penWin.webContents.reloadIgnoringCache();
+    }, 150);
   };
   for (const d of dirs) {
     try { fs.watch(d, { recursive: true }, reload); } catch (e) { /* ignore */ }
   }
   try {
     fs.watch(path.join(__dirname, '..', 'index.html'), reload);
+  } catch (e) { /* ignore */ }
+  // Watch pen/ too so edits to pen.html / pen.js reload the pen window.
+  try {
+    const penDir = path.join(__dirname, '..', 'pen');
+    fs.watch(penDir, { recursive: true }, reload);
   } catch (e) { /* ignore */ }
 }
 
@@ -304,20 +343,27 @@ function setupIpc() {
     return f;
   });
 
-  /* ---- secondary pen-display window: open + relay frames / input ---- */
+  /* ---- secondary pen-display window: open + IPC relay ---- */
   ipcMain.handle('opentoon:pen-open', () => {
     const existed = !!(penWin && !penWin.isDestroyed());
     createPenWindow();
     return { ok: true, focused: existed };
   });
-  // the pen window finished loading -> tell the main window to start streaming
+  // the pen window finished loading -> tell the main window to start publishing
   ipcMain.on('opentoon:pen-ready', () => {
     if (win && !win.isDestroyed()) win.webContents.send('opentoon:pen-attach');
   });
-  // main -> pen : a composited stage frame (WebP ArrayBuffer + meta)
-  ipcMain.on('opentoon:pen-frame', (_e, buf, meta) => {
+  // main -> pen : tiny JSON state ops (project / cel / layer / tool).
+  // Kept on its own channel so heavy renderer traffic in later phases
+  // (raster cel blits) can't starve these.
+  ipcMain.on('opentoon:pen-state', (_e, msg) => {
     if (penWin && !penWin.isDestroyed())
-      penWin.webContents.send('opentoon:pen-frame', buf, meta);
+      penWin.webContents.send('opentoon:pen-state', msg);
+  });
+  // pen -> main : ack of last applied state seq (drift detection)
+  ipcMain.on('opentoon:pen-state-ack', (_e, seq) => {
+    if (win && !win.isDestroyed())
+      win.webContents.send('opentoon:pen-state-ack', seq);
   });
   // pen -> main : forwarded pointer input
   ipcMain.on('opentoon:pen-input', (_e, msg) => {

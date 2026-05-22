@@ -5,8 +5,11 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('OpenToonPen', {
-  // a freshly composited stage frame: WebP ArrayBuffer + meta {tool,color,...}
-  onFrame: cb => ipcRenderer.on('opentoon:pen-frame', (_e, buf, meta) => cb(buf, meta)),
+  // STATE CHANNEL — project / cel / layer / tool / live-stroke ops. Tiny
+  // JSON messages, ride a different IPC channel so they aren't starved by
+  // the heavy bitmap encoder.
+  onState: cb => ipcRenderer.on('opentoon:pen-state', (_e, msg) => cb(msg)),
+  sendStateAck: seq => ipcRenderer.send('opentoon:pen-state-ack', seq),
   // forward pen / mouse pointer input to the main window
   sendInput: msg => ipcRenderer.send('opentoon:pen-input', msg),
   // forward a toolbar command (tool / colour / undo / ...) to the main window

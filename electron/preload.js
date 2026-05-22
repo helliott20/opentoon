@@ -22,7 +22,11 @@ contextBridge.exposeInMainWorld('OpenToonDesktop', {
   openPenWindow: () => ipcRenderer.invoke('opentoon:pen-open'),
   onPenAttach: cb => ipcRenderer.on('opentoon:pen-attach', () => cb()),
   onPenDetach: cb => ipcRenderer.on('opentoon:pen-detach', () => cb()),
-  sendPenFrame: (buf, meta) => ipcRenderer.send('opentoon:pen-frame', buf, meta),
+  // STATE CHANNEL for the pen window — see pen-preload.js. Tiny JSON ops
+  // (project/cel/layer/tool/live-stroke). Acks ride back so the publisher
+  // can detect divergence and resync.
+  sendPenState: msg => ipcRenderer.send('opentoon:pen-state', msg),
+  onPenStateAck: cb => ipcRenderer.on('opentoon:pen-state-ack', (_e, seq) => cb(seq)),
   onPenInput: cb => ipcRenderer.on('opentoon:pen-input', (_e, msg) => cb(msg)),
   onPenCommand: cb => ipcRenderer.on('opentoon:pen-command', (_e, msg) => cb(msg)),
   // real file IO for the desktop app: native dialogs, save-in-place, autosave
