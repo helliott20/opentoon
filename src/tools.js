@@ -803,15 +803,18 @@
           closed = true;
         }
       }
+      // pendingStrokeId comes from a pen-window 'down' message; honour it
+      // so the committed stroke matches the wet stroke the pen is showing.
       const stroke = snapped ? {
-        id: U.uid(), type: 'line', pencil: false, sharp: true, taper: false,
+        id: this.pendingStrokeId || U.uid(), type: 'line', pencil: false, sharp: true, taper: false,
         color: this.color, width: this.size, opacity: this.opacity,
         pts: pts, closed: closed
       } : {
-        id: U.uid(), type: 'line', pencil: false,
+        id: this.pendingStrokeId || U.uid(), type: 'line', pencil: false,
         color: this.color, width: this.size, opacity: this.opacity,
         pts: pts, closed: closed
       };
+      this.pendingStrokeId = null;
       cel.strokes.push(stroke);
       if (app.symmetry && app.symmetry.on) {
         cel.strokes.push(V().mirrorStroke(stroke, app.symmetry.axis,
@@ -1234,15 +1237,18 @@
             pts[li] = { x: pts[0].x, y: pts[0].y }; closed = true;
           }
         }
+        // pendingStrokeId comes from a pen-window 'down' message; honour it
+        // so the committed stroke matches the wet stroke the pen is showing.
         const stroke = snapped ? {
-          id: U.uid(), type: 'line', pencil: true, sharp: true,
+          id: this.pendingStrokeId || U.uid(), type: 'line', pencil: true, sharp: true,
           color: this.color, width: this.size, opacity: this.opacity,
           pts: pts, closed: closed
         } : {
-          id: U.uid(), type: 'line', pencil: true,
+          id: this.pendingStrokeId || U.uid(), type: 'line', pencil: true,
           color: this.color, width: this.size, opacity: this.opacity,
           pts: pts, closed: closed
         };
+        this.pendingStrokeId = null;
         cel.strokes.push(stroke);
         if (app.symmetry && app.symmetry.on) {
           cel.strokes.push(V().mirrorStroke(stroke, app.symmetry.axis,
