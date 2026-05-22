@@ -7,6 +7,21 @@
 (function (OT) {
   'use strict';
 
+  // Lazy temp canvas used by the pen-window eraser-overlay render path.
+  // One instance shared across renders -- cheap to keep around (~8 MB at
+  // 1920x1080) and avoids per-frame allocation on every eraser drag tick.
+  // Only allocated on first use; main canvas never touches it because
+  // main passes no eraserOverlay opt.
+  let _eraserTemp = null;
+  function getEraserTempCanvas(w, h) {
+    if (!_eraserTemp) _eraserTemp = document.createElement('canvas');
+    if (_eraserTemp.width !== w || _eraserTemp.height !== h) {
+      _eraserTemp.width = w;
+      _eraserTemp.height = h;
+    }
+    return _eraserTemp;
+  }
+
   // Draw bg + all visible layers at `frame` into ctx (already in project
   // coords).
   //
@@ -89,6 +104,9 @@
       applyWorldXform(ctx, layer, frame, project, layerAncestors);
 
       const isActive = wetLayerId && layer.id === wetLayerId;
+      const eraserLayer = opts.eraserOverlay
+        && opts.eraserOverlay.samples && opts.eraserOverlay.samples.length > 0
+        && layer.id === opts.eraserOverlay.layerId;
 
       // Vector cels: re-render strokes directly so linework stays crisp at
       // any zoom. Skip if the cel is mid-live-stroke (raster cache owns
@@ -97,19 +115,52 @@
       if (cel.kind === 'vector' && cel.strokes && OT.Vector
           && !opts.useRaster && !cel._liveDrawing) {
         const V = OT.Vector;
-        // Skip strokes flagged _lassoHidden - the lasso tool renders them
-        // separately via the overlay as a pre-rasterised snippet during
-        // transform drags (huge perf win for large selections).
-        for (const st of cel.strokes)
-          if (st.type === 'fill' && (includeLassoHidden || !st._lassoHidden))
-            V.renderStroke(ctx, st);
-        for (const st of cel.strokes)
-          if (st.type !== 'fill' && (includeLassoHidden || !st._lassoHidden))
-            V.renderStroke(ctx, st);
-        // Wet stroke renders ON TOP of committed strokes, for the active
-        // layer only. Pen window uses this; main canvas leaves wetStroke
-        // unset and this is a no-op.
-        if (isActive && wetStroke) { V.renderStroke(ctx, wetStroke); wetRendered = true; }
+        if (eraserLayer) {
+          // Pen-window live-eraser path: render this layer's strokes onto
+          // a temp canvas in project coords, apply destination-out at each
+          // sample, then blit the cut-out result over the parent ctx.
+          // Doing destination-out on the parent ctx would punch through
+          // every layer below; the temp canvas isolates the punch to this
+          // layer only -- matching main's per-cel cel.canvas behaviour
+          // without us having to ship the rasterised cel.
+          const temp = getEraserTempCanvas(project.width, project.height);
+          const tctx = temp.getContext('2d');
+          tctx.setTransform(1, 0, 0, 1, 0, 0);
+          tctx.clearRect(0, 0, project.width, project.height);
+          for (const st of cel.strokes)
+            if (st.type === 'fill' && (includeLassoHidden || !st._lassoHidden))
+              V.renderStroke(tctx, st);
+          for (const st of cel.strokes)
+            if (st.type !== 'fill' && (includeLassoHidden || !st._lassoHidden))
+              V.renderStroke(tctx, st);
+          if (isActive && wetStroke) { V.renderStroke(tctx, wetStroke); wetRendered = true; }
+          tctx.globalCompositeOperation = 'destination-out';
+          tctx.fillStyle = '#000';
+          for (const s of opts.eraserOverlay.samples) {
+            tctx.beginPath();
+            tctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+            tctx.fill();
+          }
+          // The parent ctx is in cel-local coords (after applyWorldXform),
+          // so drawing the temp at (0, 0, project.width, project.height)
+          // lands it correctly. The temp's own transform was reset, so it
+          // holds project-space content regardless of zoom.
+          ctx.drawImage(temp, 0, 0);
+        } else {
+          // Skip strokes flagged _lassoHidden - the lasso tool renders them
+          // separately via the overlay as a pre-rasterised snippet during
+          // transform drags (huge perf win for large selections).
+          for (const st of cel.strokes)
+            if (st.type === 'fill' && (includeLassoHidden || !st._lassoHidden))
+              V.renderStroke(ctx, st);
+          for (const st of cel.strokes)
+            if (st.type !== 'fill' && (includeLassoHidden || !st._lassoHidden))
+              V.renderStroke(ctx, st);
+          // Wet stroke renders ON TOP of committed strokes, for the active
+          // layer only. Pen window uses this; main canvas leaves wetStroke
+          // unset and this is a no-op.
+          if (isActive && wetStroke) { V.renderStroke(ctx, wetStroke); wetRendered = true; }
+        }
       } else if (cel.canvas) {
         // Defensive guard against missing cel.canvas (the original always
         // assumed it existed; on the pen-window raster placeholder it can

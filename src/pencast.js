@@ -152,6 +152,25 @@
         this._publish({ op: 'tool-meta', meta: this._meta() });
         this._schedule();
       });
+      // Mid-drag eraser samples (see PaintTool._processErase). Ship the
+      // raw destruction-out positions+radius to the pen window so it can
+      // render destination-out locally on the rendered active layer --
+      // same visual main gets from cel.canvas, without us republishing
+      // the cut-stroke vector data mid-drag (which would morph the line
+      // shape on re-render). The pen clears the overlay on the next
+      // vector-cel-replace, which is what pointerUp's celchange emit
+      // triggers.
+      app.on('erase-samples', ({ layer, samples, radius }) => {
+        if (!this.active || !layer || !samples || !samples.length) return;
+        const pts = samples.map(s => ({ x: s.x, y: s.y, r: radius }));
+        this._publish({
+          op: 'erase-overlay',
+          layerId: layer.id,
+          frame: app.frame,
+          samples: pts
+        });
+        this._schedule();
+      });
     }
 
     available() { return !!(this.bridge && this.bridge.openPenWindow); }

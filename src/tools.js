@@ -939,16 +939,24 @@
       if (changed) {
         pending.cel.strokes = strokes;
         this.changed = true;
-        // Note: we deliberately do NOT emit celchange here. On main the
-        // eraser is visually live via cel.canvas destination-out punches
-        // (see Pass 1 above), but the vector-level cut fragments produced
-        // by V.eraseStroke render visibly differently from the original
-        // strokes (different smoothing through the cut points), so
-        // re-publishing cel.strokes mid-drag made the pen window's lines
-        // visibly morph mid-erase. Pen waits until pointerUp commits to
-        // see the cut fragments. Cursor circle still tracks during drag.
-        // (TODO: ship eraser samples as a separate "erase-overlay" op so
-        // pen can apply destination-out locally without mutating strokes.)
+      }
+      // Ship the destruction samples to anything that wants to mirror
+      // the live erase visual (pen window via pencast). We do NOT
+      // emit celchange mid-drag -- the cut-stroke fragments
+      // V.eraseStroke produces re-smooth visibly differently from the
+      // originals on re-render, so a vector-cel-replace would morph the
+      // line shape mid-erase. Instead, the consumer is expected to
+      // render destination-out punches on top of the UNCHANGED strokes,
+      // matching what cel.canvas does locally on main. On pointerUp,
+      // _vUp emits celchange for the final commit and the overlay
+      // clears (pen window does this on vector-cel-replace).
+      if (this.t && this.t.layer) {
+        pending.app.emit('erase-samples', {
+          layer: this.t.layer,
+          cel: pending.cel,
+          samples: samples,
+          radius: r
+        });
       }
       pending.app.emit('render');
     }

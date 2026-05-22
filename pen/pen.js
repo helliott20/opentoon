@@ -49,7 +49,11 @@
         activeLayerId: null,
         frame: 0,
         tool: { name: 'brush', color: '#222222', toolSize: 6, toolOpacity: 1, pencil: false, brushFrac: 0.02, toolRadius: 0, tol: 0.4, snapDist: 0, inkDynamics: false, autoClose: false, smoothing: 0, snapShape: null, activeLayerKind: null, sel: {}, transform: {} },
-        wetStroke: null
+        wetStroke: null,
+        // Live eraser destination-out punches (from main mid-drag); cleared
+        // by frame/active-layer change or by the vector-cel-replace that
+        // pointerUp eventually publishes. Shape: { layerId, samples:[{x,y,r}] }.
+        eraserOverlay: null
       };
       this.fit = { x: 0, y: 0, w: 0, h: 0 };
       this.view = { scale: 1, x: 0, y: 0 };
@@ -385,6 +389,26 @@
           const layer = s.layersById.get(op.layerId);
           if (!layer || !op.cel) break;
           this._hydrateCel(layer, op.frame, op.cel);
+          // A commit lands -- if it's on the same layer the eraser overlay
+          // was targeting, the overlay is now redundant (committed cuts
+          // ARE the eraser holes). Clear it.
+          if (s.eraserOverlay && s.eraserOverlay.layerId === op.layerId
+              && op.frame === s.frame) {
+            s.eraserOverlay = null;
+          }
+          break;
+        }
+        case 'erase-overlay': {
+          // Live destination-out punches from the active eraser drag on
+          // main. Accumulate samples; _compositeStage paints them on top
+          // of the rendered active layer (via temp canvas in composite.js)
+          // so the user sees strokes get eaten in real time without us
+          // republishing cut-stroke vectors that would change shape.
+          if (!Array.isArray(op.samples) || !op.samples.length) break;
+          if (!s.eraserOverlay || s.eraserOverlay.layerId !== op.layerId) {
+            s.eraserOverlay = { layerId: op.layerId, samples: [] };
+          }
+          for (const p of op.samples) s.eraserOverlay.samples.push(p);
           break;
         }
         case 'frame-change': {
@@ -392,6 +416,9 @@
           // Drop any in-flight wet stroke — its cel context just changed
           // and rendering it on the new frame's cel would be wrong.
           if (s.wetStroke) this._clearWetStroke();
+          // Same for the eraser overlay -- it was targeting the old frame's
+          // cel content.
+          if (s.eraserOverlay) s.eraserOverlay = null;
           break;
         }
         case 'active-layer': {
@@ -399,6 +426,7 @@
           // Active layer just changed; wet stroke (if any) was targeting
           // the previous active layer's cel.
           if (s.wetStroke) this._clearWetStroke();
+          if (s.eraserOverlay) s.eraserOverlay = null;
           break;
         }
         case 'project-meta': {
@@ -737,9 +765,10 @@
           bg: true,
           wetStroke: wetForRender || null,
           wetLayerId: s.activeLayerId,
-          includeVideo: false          // D1: pen has no <video> element
+          includeVideo: false,         // D1: pen has no <video> element
           // includeLassoHidden defaults to false (skip transform-drag
           // rasterised originals); same as the main canvas.
+          eraserOverlay: s.eraserOverlay   // live destination-out punches
         }, {
           layerAncestors: layer => this._layerAncestors(layer)
         });
