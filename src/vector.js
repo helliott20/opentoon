@@ -304,185 +304,132 @@
 
   /* ----------------------------- editing ----------------------------- */
   // Erase: returns array of surviving strokes, or null if eraser missed.
+  //
+  // Operates on the SMOOTHED curve (samplesOf), not the raw control
+  // points. The fragment's pts then ARE a literal subset of the
+  // original's visible curve, so Catmull-Rom re-smoothing near the cut
+  // can shift the line by at most one smoothed-step (~4-8 px), not by
+  // one original control-point segment (~30 px). Fragments come back
+  // with sharp=true so samplesOf returns them as-is on re-render --
+  // no compounding smooth-on-smooth, no compounding endpoint drift
+  // across successive erase samples during a drag.
   function eraseStroke(st, cx, cy, r) {
     if (st.type === 'fill') {
       for (const p of st.contour)
         if (Math.hypot(p.x - cx, p.y - cy) <= r) return [];
       return pointInPoly(cx, cy, st.contour) ? [] : null;
     }
-    // Fast bbox cull: if the eraser's reach can't touch the stroke's
-    // bounding box, return immediately. With many strokes scattered
-    // across the cel this is the difference between a snappy drag and
-    // a stutter — every miss skips the whole densify-and-trim loop.
-    // The bbox uses the maximum possible reach (linejoin disc at an
-    // original pt = r + wHalf); the per-pt check below is tighter.
     const wHalf = (st.width || 0) / 2;
     const reach = r + wHalf;
-    if (st.pts && st.pts.length) {
-      let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
-      for (const p of st.pts) {
-        if (p.x < minx) minx = p.x; if (p.x > maxx) maxx = p.x;
-        if (p.y < miny) miny = p.y; if (p.y > maxy) maxy = p.y;
-      }
-      if (cx + reach < minx || cx - reach > maxx
-          || cy + reach < miny || cy - reach > maxy) return null;
+    // Source curve we cut against. For an already-cut fragment this is
+    // st.pts directly (sharp=true), so the cumulative cut produces the
+    // same shape regardless of how the eraser path is sampled.
+    const sourcePts = samplesOf(st);
+    const N = sourcePts.length;
+    if (N < 2) return null;
+    // bbox cull
+    let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
+    for (const p of sourcePts) {
+      if (p.x < minx) minx = p.x; if (p.x > maxx) maxx = p.x;
+      if (p.y < miny) miny = p.y; if (p.y > maxy) maxy = p.y;
     }
-    // Densify each segment, tagging each dense pt with the segment unit
-    // direction so we can do a per-pt band-vs-disc check (more accurate
-    // than treating every pt as a disc of radius wHalf).
-    //
-    // The original eraseStroke used reach = r + wHalf everywhere -- a
-    // worst-case disc test that assumed each pt's perpendicular extent
-    // always pointed toward the eraser. For segments that run roughly
-    // perpendicular to the eraser-to-stroke direction (so the band's
-    // perpendicular extent goes ACROSS the stroke, not toward the
-    // eraser), this overcut the stroke by wHalf at the edges, and on
-    // commit users saw the cut go wider than the destination-out hole.
-    //
-    // For interpolated pts (interior of a segment), we now use the
-    // actual band geometry: if perp_dist (perpendicular from eraser to
-    // centerline) <= wHalf the closest band-point is the projection of
-    // the eraser onto the perpendicular line, at along-distance from
-    // the pt -- cut iff along < r. Otherwise the closest band-point is
-    // the perpendicular endpoint w/2 from the centerline, at distance
-    // sqrt(along^2 + (perp - wHalf)^2) -- cut iff that < r.
-    //
-    // For ORIGINAL pts (the polyline corners), lineJoin='round' renders
-    // a disc of radius wHalf at the corner regardless of segment dir,
-    // so we keep the wider reach = r + wHalf disc test there.
-    const P = st.pts, dense = [];
-    const spacing = Math.max(2, r * 0.4);
-    for (let i = 0; i < P.length - 1; i++) {
-      const a = P[i], b = P[i + 1];
+    if (cx + reach < minx || cx - reach > maxx
+        || cy + reach < miny || cy - reach > maxy) return null;
+    // Per-pt unit tangent direction (from neighbours). Used for the
+    // band-vs-disc cut test and for placing tangent endpoints.
+    const dirs = new Array(N);
+    for (let i = 0; i < N; i++) {
+      const a = sourcePts[Math.max(0, i - 1)];
+      const b = sourcePts[Math.min(N - 1, i + 1)];
       const dx = b.x - a.x, dy = b.y - a.y;
-      const dLen = Math.hypot(dx, dy) || 1;
-      const ndx = dx / dLen, ndy = dy / dLen;
-      const n = Math.max(1, Math.ceil(dLen / spacing));
-      const pa = a.p == null ? 1 : a.p, pb = b.p == null ? 1 : b.p;
-      for (let k = 0; k < n; k++) {
-        const t = k / n;
-        dense.push({
-          x: a.x + dx * t, y: a.y + dy * t,
-          p: pa + (pb - pa) * t,
-          dx: ndx, dy: ndy,
-          orig: k === 0      // original polyline vertex
-        });
-      }
+      const len = Math.hypot(dx, dy) || 1;
+      dirs[i] = { dx: dx / len, dy: dy / len };
     }
-    // Final pt: original vertex, direction = last segment's direction.
-    const last = P[P.length - 1];
-    if (P.length >= 2) {
-      const a2 = P[P.length - 2];
-      const dx = last.x - a2.x, dy = last.y - a2.y;
-      const dLen = Math.hypot(dx, dy) || 1;
-      dense.push({
-        x: last.x, y: last.y, p: last.p == null ? 1 : last.p,
-        dx: dx / dLen, dy: dy / dLen, orig: true
-      });
-    } else {
-      dense.push({
-        x: last.x, y: last.y, p: last.p == null ? 1 : last.p,
-        dx: 1, dy: 0, orig: true
-      });
-    }
+    // Bake the original auto-taper envelope into pressure for the
+    // output samples. Fragments come out with sharp=true (so
+    // computeTaperEnv returns null), so we must pre-multiply any taper
+    // factor into pts.p here -- otherwise the taper that the artist
+    // saw on the original stroke would disappear on commit. env is
+    // null when the original stroke shouldn't taper anyway (short,
+    // closed, sharp, st.taper=false).
+    const env = computeTaperEnv(sourcePts, st);
+    // Per-pt cut: band-vs-disc using local tangent.
     let any = false;
-    const keep = dense.map(p => {
+    const keep = new Array(N);
+    for (let i = 0; i < N; i++) {
+      const p = sourcePts[i], d = dirs[i];
       const ex = cx - p.x, ey = cy - p.y;
-      let cut;
-      if (p.orig) {
-        // Round lineJoin disc test.
-        cut = (ex * ex + ey * ey) <= reach * reach;
-      } else {
-        // Band-vs-disc test using segment direction.
-        const perp = Math.abs(ex * (-p.dy) + ey * p.dx);
-        const along = Math.abs(ex * p.dx + ey * p.dy);
-        let bandDist2;
-        if (perp <= wHalf) {
-          bandDist2 = along * along;
-        } else {
-          const dp = perp - wHalf;
-          bandDist2 = along * along + dp * dp;
-        }
-        cut = bandDist2 <= r * r;
-      }
+      const perp = Math.abs(ex * (-d.dy) + ey * d.dx);
+      const along = Math.abs(ex * d.dx + ey * d.dy);
+      let bandDist2;
+      if (perp <= wHalf) bandDist2 = along * along;
+      else { const dp = perp - wHalf; bandDist2 = along * along + dp * dp; }
+      const cut = bandDist2 <= r * r;
       if (cut) any = true;
-      return !cut;
-    });
+      keep[i] = !cut;
+    }
     if (!any) return null;
-    // Build runs of kept dense points, tracking per-end whether the run was
-    // bounded by an actual cut (a removed neighbour in `dense`) or by the
-    // stroke's natural start/end. We need to know which is which so the
-    // output can keep the original taper at natural ends while flattening
-    // (and recessing) at cut ends.
+    // Runs of contiguous kept indices, [start, end] inclusive.
     const runs = [];
-    let cur = [];
-    let curStartCut = false;
-    for (let i = 0; i < dense.length; i++) {
+    let curStart = -1;
+    for (let i = 0; i < N; i++) {
       if (keep[i]) {
-        if (cur.length === 0) curStartCut = i > 0 && !keep[i - 1];
-        cur.push(dense[i]);
+        if (curStart < 0) curStart = i;
       } else {
-        if (cur.length >= 2) runs.push({ pts: cur, startCut: curStartCut, endCut: true });
-        cur = [];
+        if (curStart >= 0 && i - curStart >= 2)
+          runs.push({ start: curStart, end: i - 1 });
+        curStart = -1;
       }
     }
-    if (cur.length >= 2) runs.push({ pts: cur, startCut: curStartCut, endCut: false });
+    if (curStart >= 0 && N - curStart >= 2)
+      runs.push({ start: curStart, end: N - 1 });
     // Place a new fragment endpoint so its stamp cap is EXTERNALLY tangent
     // to the eraser disc. Solves: cap_center_distance_from_eraser = r + rc
-    // where rc = wHalf * lk.p (cap radius at endpoint pressure). The cap
-    // center lies on lk's segment-line on the same side of the foot of
-    // perpendicular as lk (i.e. outside the disc). Without this, the cut
-    // endpoint sits where the densify-and-trim loop happened to drop the
-    // last-kept dense point -- offset by up to spacing/2 from the actual
-    // disc edge, plus wHalf bulge from the round cap -- and the artist
-    // reads it as a sloppy hemisphere rather than a clean circular bite.
-    const tangentEndpoint = (lk) => {
-      const dxs = lk.dx, dys = lk.dy;
+    // where rc = wHalf * lk.p. The cap center lies on lk's local-tangent
+    // line on the same side of the foot of perpendicular as lk (outside
+    // the disc) -- so the cap edge meets the disc edge exactly, no bulge,
+    // no gap.
+    const tangentEndpoint = (lk, dir) => {
+      const dxs = dir.dx, dys = dir.dy;
       const rc = wHalf * (lk.p == null ? 1 : lk.p);
       const alongLk = (lk.x - cx) * dxs + (lk.y - cy) * dys;
       const perpLk  = (lk.x - cx) * (-dys) + (lk.y - cy) * dxs;
       const pPerp = Math.abs(perpLk);
       const radiusSum = r + rc;
       const sqr = radiusSum * radiusSum - pPerp * pPerp;
-      if (sqr <= 0) {
-        // Degenerate: stroke band intersects the disc but the centerline
-        // is so far that no externally-tangent cap position exists. Fall
-        // back to lk in place; the cap may bulge slightly but it's the
-        // best we can do without flattening the stroke.
-        return { x: lk.x, y: lk.y, p: lk.p };
-      }
+      if (sqr <= 0) return { x: lk.x, y: lk.y, p: lk.p };
       const alongEnd = Math.sqrt(sqr);
       const sideSign = alongLk >= 0 ? 1 : -1;
       const k = sideSign * alongEnd - alongLk;
       return { x: lk.x + k * dxs, y: lk.y + k * dys, p: lk.p };
     };
+    const buildPt = (i) => {
+      const p = sourcePts[i];
+      const press = (p.p == null ? 1 : p.p) * (env ? env[i] : 1);
+      return { x: p.x, y: p.y, p: press };
+    };
     return runs.map(run => {
+      const startCut = run.start > 0;
+      const endCut = run.end < N - 1;
       const s = Object.assign({}, st);
       s.id = U.uid();
       s.closed = false;
-      // Per-end taper: a fragment with a natural endpoint inside it keeps
-      // the original auto-taper at that end; the cut end stays full width
-      // so the stroke doesn't develop a fine pointy spike where the eraser
-      // disc punched through. computeTaperEnv reads taperStart/taperEnd.
-      s.taperStart = !run.startCut;
-      s.taperEnd = !run.endCut;
-      const runPts = run.pts;
-      const headSrc = runPts[0];
-      const tailSrc = runPts[runPts.length - 1];
-      const head = run.startCut ? tangentEndpoint(headSrc)
-                                : { x: headSrc.x, y: headSrc.y, p: headSrc.p };
-      const tail = run.endCut   ? tangentEndpoint(tailSrc)
-                                : { x: tailSrc.x, y: tailSrc.y, p: tailSrc.p };
-      // Reuse the ORIGINAL polyline vertices that fell inside the run --
-      // re-simplifying the densified run would shift the smoothed curve
-      // and the artist would see the line morph on release. The cut
-      // endpoint's neighbourhood necessarily differs, but the interior
-      // tracks the original.
-      const out = [head];
-      for (let i = 1; i < runPts.length - 1; i++) {
-        if (runPts[i].orig) out.push({ x: runPts[i].x, y: runPts[i].y, p: runPts[i].p });
-      }
-      out.push(tail);
+      // pts ARE the smoothed curve subset -- mark sharp so samplesOf
+      // returns them as-is and so renderLine's computeTaperEnv leaves
+      // them alone (we've already baked the original taper into p).
+      s.sharp = true;
+      // Per-end taper-source flags are still useful for downstream tools
+      // that inspect fragments (export, hit-test, future refinements).
+      s.taperStart = !startCut;
+      s.taperEnd = !endCut;
+      const out = [];
+      out.push(startCut
+        ? tangentEndpoint(sourcePts[run.start], dirs[run.start])
+        : buildPt(run.start));
+      for (let i = run.start + 1; i < run.end; i++) out.push(buildPt(i));
+      out.push(endCut
+        ? tangentEndpoint(sourcePts[run.end], dirs[run.end])
+        : buildPt(run.end));
       s.pts = out;
       return s;
     });

@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Eraser visual test</title>
+<style>
+  body { margin: 0; padding: 20px; background: #1a1a1a; color: #ddd; font: 14px monospace; }
+  canvas { display: block; background: #fff; margin: 8px 0; image-rendering: pixelated; }
+  .panel { margin-bottom: 24px; }
+  h3 { margin: 8px 0; color: #fff; }
+  .diff { color: #5cf; }
+  .bad { color: #f55; }
+  .good { color: #5f5; }
+  pre { background: #222; padding: 8px; max-height: 200px; overflow: auto; }
+</style>
+</head>
+<body>
+<h2>OT.Vector.eraseStroke visual / numeric test</h2>
+<div class="panel">
+  <h3>Test A — complicated curve, eraser bites middle</h3>
+  <canvas id="c1" width="900" height="320"></canvas>
+  <h4 style="margin:4px 0;color:#aaa">↓ Production view: fragments only</h4>
+  <canvas id="c1prod" width="900" height="320"></canvas>
+  <div id="r1"></div>
+</div>
+<div class="panel">
+  <h3>Test B — variable pressure stroke</h3>
+  <canvas id="c2" width="900" height="320"></canvas>
+  <div id="r2"></div>
+</div>
+<div class="panel">
+  <h3>Test C — eraser at very tip (natural end inside fragment)</h3>
+  <canvas id="c3" width="900" height="320"></canvas>
+  <div id="r3"></div>
+</div>
+
+<script src="../src/core.js"></script>
+<script src="../src/vector.js"></script>
+<script>
+const V = OT.Vector;
+const U = OT.util;
+
+function makeCurve(start, end, amplitude, freq, pressureVary) {
+  const pts = [];
+  for (let t = 0; t <= 1; t += 0.025) {
+    const x = start.x + (end.x - start.x) * t;
+    const baseY = start.y + (end.y - start.y) * t;
+    const y = baseY + Math.sin(t * Math.PI * freq) * amplitude;
+    const p = pressureVary ? (0.4 + 0.6 * (1 - Math.abs(t - 0.5) * 2)) : 1;
+    pts.push({ x, y, p });
+  }
+  // Simulate the real commit pipeline: RDP-simplify with the same
+  // tolerance the brush tool uses (0.4 + smooth*0.8, smooth=0.5 -> 0.8).
+  // This produces the sparse control-pt count a real brush stroke would
+  // ship with -- the perceptible-morph regime, not the dense-test regime.
+  return V.simplify(pts, 0.8);
+}
+
+function renderStrokeFromPts(ctx, pts, color, width, opts) {
+  opts = opts || {};
+  const st = {
+    type: 'line', pencil: false,
+    color, width, opacity: 1,
+    pts, closed: false,
+    taperStart: opts.taperStart, taperEnd: opts.taperEnd, taper: opts.taper
+  };
+  ctx.save();
+  V.renderStroke(ctx, st);
+  ctx.restore();
+  return st;
+}
+
+function drawDot(ctx, p, color, r) {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, r || 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawEraserCircle(ctx, cx, cy, r) {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,0,0,0.6)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function logResult(elId, lines) {
+  document.getElementById(elId).innerHTML = lines.map(l => {
+    if (typeof l === 'string') return '<div>' + l + '</div>';
+    return '<div class="' + (l.cls || '') + '">' + l.text + '</div>';
+  }).join('');
+}
+
+function comparePts(originalPts, fragmentPts, label) {
+  // For each fragment interior pt, find the matching original pt (by x,y).
+  // If they line up to <0.0001 px we know the interior is byte-identical
+  // to the original samples — no curve morph in the interior.
+  const interior = fragmentPts.slice(1, -1);
+  const tolerance = 1e-4;
+  let mismatches = 0;
+  for (const fp of interior) {
+    const hit = originalPts.find(op => Math.abs(op.x - fp.x) < tolerance && Math.abs(op.y - fp.y) < tolerance);
+    if (!hit) mismatches++;
+  }
+  return {
+    label,
+    total: interior.length,
+    mismatches,
+    head: fragmentPts[0],
+    tail: fragmentPts[fragmentPts.length - 1]
+  };
+}
+
+// =========================================
+// Test A — complicated curve, eraser bites middle
+// =========================================
+{
+  const ctx = document.getElementById('c1').getContext('2d');
+  const ctx0 = document.getElementById('c1prod').getContext('2d');
+  const pts = makeCurve({ x: 50, y: 160 }, { x: 850, y: 160 }, 60, 4, false);
+  const width = 20;
+  // Render the ORIGINAL (faded grey, so we can see if the survivors match it)
+  renderStrokeFromPts(ctx, pts, 'rgba(0,0,0,0.18)', width);
+  // Dot every original control point
+  for (const p of pts) drawDot(ctx, p, 'rgba(0,0,0,0.35)', 1.5);
+
+  // Erase in the middle
+  const cx = 450, cy = 160, r = 50;
+  drawEraserCircle(ctx, cx, cy, r);
+  drawEraserCircle(ctx0, cx, cy, r);
+  const sample = { type: 'line', color: '#000', width, opacity: 1, pts, closed: false };
+  const survivors = V.eraseStroke(sample, cx, cy, r);
+
+  // Render survivors in green (left fragment) and red (right fragment) on top
+  const colors = ['rgba(0,140,0,0.9)', 'rgba(180,0,160,0.9)'];
+  const lines = [];
+  if (!survivors) {
+    lines.push({ cls: 'bad', text: 'NO SURVIVORS — eraser bbox missed the stroke' });
+  } else {
+    lines.push('Survivors: ' + survivors.length);
+    survivors.forEach((s, i) => {
+      renderStrokeFromPts(ctx, s.pts, colors[i % colors.length], width, {
+        taperStart: s.taperStart, taperEnd: s.taperEnd, taper: s.taper
+      });
+      for (const p of s.pts) drawDot(ctx, p, colors[i % colors.length], 2.5);
+      // PRODUCTION view — just the surviving fragments + eraser circle.
+      renderStrokeFromPts(ctx0, s.pts, '#000', width, {
+        taperStart: s.taperStart, taperEnd: s.taperEnd, taper: s.taper
+      });
+      const cmp = comparePts(pts, s.pts, 'Fragment ' + i);
+      const cls = cmp.mismatches === 0 ? 'good' : 'bad';
+      lines.push({
+        cls,
+        text: 'Fragment ' + i + ': ' + s.pts.length + ' pts, interior=' + cmp.total +
+              ' mismatches=' + cmp.mismatches +
+              ' | taperStart=' + s.taperStart + ' taperEnd=' + s.taperEnd +
+              ' | head=(' + cmp.head.x.toFixed(2) + ',' + cmp.head.y.toFixed(2) + ')' +
+              ' tail=(' + cmp.tail.x.toFixed(2) + ',' + cmp.tail.y.toFixed(2) + ')'
+      });
+    });
+  }
+  logResult('r1', lines);
+}
+
+// =========================================
+// Test B — variable pressure stroke
+// =========================================
+{
+  const ctx = document.getElementById('c2').getContext('2d');
+  const pts = makeCurve({ x: 50, y: 160 }, { x: 850, y: 160 }, 50, 3, true);
+  const width = 28;
+  renderStrokeFromPts(ctx, pts, 'rgba(0,0,0,0.18)', width);
+  for (const p of pts) drawDot(ctx, p, 'rgba(0,0,0,0.35)', 1.5);
+
+  const cx = 450, cy = 160, r = 45;
+  drawEraserCircle(ctx, cx, cy, r);
+  const sample = { type: 'line', color: '#000', width, opacity: 1, pts, closed: false };
+  const survivors = V.eraseStroke(sample, cx, cy, r);
+
+  const colors = ['rgba(0,140,0,0.9)', 'rgba(180,0,160,0.9)'];
+  const lines = [];
+  if (!survivors) {
+    lines.push({ cls: 'bad', text: 'NO SURVIVORS' });
+  } else {
+    lines.push('Survivors: ' + survivors.length);
+    survivors.forEach((s, i) => {
+      renderStrokeFromPts(ctx, s.pts, colors[i % colors.length], width, {
+        taperStart: s.taperStart, taperEnd: s.taperEnd, taper: s.taper
+      });
+      for (const p of s.pts) drawDot(ctx, p, colors[i % colors.length], 2.5);
+      const cmp = comparePts(pts, s.pts, 'Fragment ' + i);
+      const cls = cmp.mismatches === 0 ? 'good' : 'bad';
+      lines.push({
+        cls,
+        text: 'Fragment ' + i + ': ' + s.pts.length + ' pts, interior=' + cmp.total +
+              ' mismatches=' + cmp.mismatches +
+              ' | taperStart=' + s.taperStart + ' taperEnd=' + s.taperEnd
+      });
+    });
+  }
+  logResult('r2', lines);
+}
+
+// =========================================
+// Test C — eraser at the very tip (natural end inside surviving fragment)
+// =========================================
+{
+  const ctx = document.getElementById('c3').getContext('2d');
+  const pts = makeCurve({ x: 50, y: 160 }, { x: 850, y: 160 }, 40, 2, false);
+  const width = 22;
+  renderStrokeFromPts(ctx, pts, 'rgba(0,0,0,0.18)', width);
+  for (const p of pts) drawDot(ctx, p, 'rgba(0,0,0,0.35)', 1.5);
+
+  // Erase NEAR the right tip; surviving fragment should contain the original
+  // natural left end + a fresh cut at the right
+  const cx = 780, cy = 160, r = 55;
+  drawEraserCircle(ctx, cx, cy, r);
+  const sample = { type: 'line', color: '#000', width, opacity: 1, pts, closed: false };
+  const survivors = V.eraseStroke(sample, cx, cy, r);
+
+  const colors = ['rgba(0,140,0,0.9)', 'rgba(180,0,160,0.9)'];
+  const lines = [];
+  if (!survivors) {
+    lines.push({ cls: 'bad', text: 'NO SURVIVORS' });
+  } else {
+    lines.push('Survivors: ' + survivors.length);
+    survivors.forEach((s, i) => {
+      renderStrokeFromPts(ctx, s.pts, colors[i % colors.length], width, {
+        taperStart: s.taperStart, taperEnd: s.taperEnd, taper: s.taper
+      });
+      for (const p of s.pts) drawDot(ctx, p, colors[i % colors.length], 2.5);
+      const cmp = comparePts(pts, s.pts, 'Fragment ' + i);
+      const cls = cmp.mismatches === 0 ? 'good' : 'bad';
+      const headIsNatural = cmp.head.x === pts[0].x && cmp.head.y === pts[0].y;
+      lines.push({
+        cls,
+        text: 'Fragment ' + i + ': head-is-natural=' + headIsNatural +
+              ' | taperStart=' + s.taperStart + ' (should be true if natural)' +
+              ' | taperEnd=' + s.taperEnd + ' (should be false — cut)'
+      });
+    });
+  }
+  logResult('r3', lines);
+}
+
+// Expose results to puppeteer/playwright via window
+window.__testResults = {
+  ready: true
+};
+</script>
+</body>
+</html>
