@@ -135,16 +135,47 @@
     0%   { transform: translateX(-110%); }
     100% { transform: translateX(280%); }
   }
+
+  /* "Drift" — the onion-skin mark breathes outward and back. The handoff
+     spec called for a quiet 5.8s / 3.15px cycle which is invisible during
+     the splash's 2.2s dwell. Tuned to a confident 3.4s cycle with a brief
+     hold at peak so it reads as breathing (inhale, pause, exhale) rather
+     than as a loader spinner. */
+  .mark .g-prev {
+    animation: onion-drift-left  3.4s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+    transform-origin: center;
+    transform-box: fill-box;
+  }
+  .mark .g-next {
+    animation: onion-drift-right 3.4s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+    transform-origin: center;
+    transform-box: fill-box;
+  }
+  /* 0% rest → 40% peak (inhale) → 60% peak (hold) → 100% rest (exhale).
+     The hold is what separates "breathing" from "spinning". Displacement is
+     additive over the static ±9px ring offset (ghosts breathe to ±15px). */
+  @keyframes onion-drift-left {
+    0%, 100% { transform: translateX(0); }
+    40%, 60% { transform: translateX(-6px); }
+  }
+  @keyframes onion-drift-right {
+    0%, 100% { transform: translateX(0); }
+    40%, 60% { transform: translateX(6px); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .mark .g-prev, .mark .g-next { animation: none; }
+  }
 </style>
 </head>
 <body>
   <div class="splash" role="dialog" aria-label="Loading OpenToon">
     <div class="stage">
-      <!-- Mark: identical geometry to assets/brand/opentoon-mark.svg -->
+      <!-- Mark: identical geometry to assets/brand/opentoon-mark.svg, with
+           "Drift" animation on the two ghost rings (see /branding handoff). -->
       <svg class="mark" viewBox="0 0 200 200" fill="none" aria-hidden="true">
-        <circle cx="85"  cy="100" r="68" stroke="#DD5038" stroke-width="17" stroke-linecap="round" opacity="0.55"/>
-        <circle cx="115" cy="100" r="68" stroke="#54B06A" stroke-width="17" stroke-linecap="round" opacity="0.55"/>
-        <circle cx="100" cy="100" r="68" stroke="#F7F1E5" stroke-width="17" stroke-linecap="round"/>
+        <circle class="g-prev" cx="85"  cy="100" r="68" stroke="#DD5038" stroke-width="17" stroke-linecap="round" opacity="0.55"/>
+        <circle class="g-next" cx="115" cy="100" r="68" stroke="#54B06A" stroke-width="17" stroke-linecap="round" opacity="0.55"/>
+        <circle               cx="100" cy="100" r="68" stroke="#F7F1E5" stroke-width="17" stroke-linecap="round"/>
       </svg>
       <div class="wordmark"><span class="open">Open</span><span class="toon">Toon</span></div>
     </div>

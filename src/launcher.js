@@ -293,7 +293,7 @@
       const openBtn = el('button', {
         class: 'launcher-action',
         type: 'button',
-        onclick: () => this._dismissThen(() => this.app.openProject())
+        onclick: () => this._openProject()
       });
       openBtn.innerHTML =
         '<div class="launcher-action__glyph" aria-hidden="true">' +
@@ -354,6 +354,23 @@
     _dismissThen(fn) {
       this._teardown();
       requestAnimationFrame(fn);
+    }
+
+    // Open Project keeps the launcher visible behind the native file picker
+    // so that cancelling the picker leaves the artist back where they were
+    // instead of dropping them into an empty default scene.
+    _openProject() {
+      const fsd = window.OpenToonDesktop && window.OpenToonDesktop.fs;
+      if (!fsd || !fsd.openDialog) {
+        // Web fallback: there's no native picker we can hold the overlay
+        // behind, so just hand off to the app's existing flow.
+        this._dismissThen(() => this.app.openProject());
+        return;
+      }
+      fsd.openDialog().then(path => {
+        if (!path) return;          // canceled — launcher stays
+        this._dismissThen(() => this.app._openPath(path));
+      }).catch(() => { /* dialog failure — stay put */ });
     }
 
     _skip() {
