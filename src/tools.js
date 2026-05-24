@@ -854,17 +854,14 @@
       const r = this.size / 2;
       // Per-event: buffer interpolated samples between the previous
       // erase point and this one. Same step the brush uses (r * 0.4)
-      // so a fast tablet flick doesn't leave un-erased gaps. The heavy
-      // stroke-intersection work is deferred to one RAF tick so a pen
-      // firing 200 events/sec only does the erase pass ~60 times/sec.
+      // so a fast tablet flick doesn't leave un-erased gaps.
       const last = this._lastErasePt;
       if (!this._erasePending) {
         this._erasePending = { cel: cel, app: app, samples: [] };
-        // First sample of a fresh drag: pre-rasterise cel.canvas once
-        // and switch the composite to the cached path. Every later
-        // frame just blits cel.canvas with the destructive-punch holes
-        // already in it — O(1) per frame instead of O(strokes ×
-        // segments) re-rendering every stamp every tick.
+        // First sample of a fresh drag: snapshot the cel for undo
+        // BEFORE any marks land, and pre-rasterise cel.canvas once so
+        // live frames just punch destination-out on top instead of
+        // re-rendering strokes every tick.
         cel.rebuild();
         cel._liveDrawing = true;
       }
@@ -888,20 +885,14 @@
         });
       }
     }
-    // Drain the sample buffer. Two passes per tick:
-    //   1) Punch the eraser dabs directly on cel.canvas via
-    //      destination-out — this is what the user sees, and the cost
-    //      is O(samples) regardless of how many strokes are on the
-    //      cel. The stage composite blits cel.canvas via one
-    //      drawImage so the live view stays at 60 fps.
-    //   2) Run the vector-level eraseStroke pass to keep cel.strokes
-    //      consistent (so save / undo / export get the real surviving
-    //      stroke fragments). The bbox cull in eraseStroke skips
-    //      strokes nowhere near the eraser tip, so this scales with
-    //      "strokes actually under the eraser path", not "all strokes
-    //      on the cel".
-    // cel.canvas isn't full-rebuilt during the drag — that one heavy
-    // pass is deferred to _flushErase on pointerUp.
+    // Drain the sample buffer. NON-DESTRUCTIVE eraser:
+    //   1) Punch destination-out on cel.canvas for instant visual
+    //      feedback. Same cost as before, O(samples).
+    //   2) Append samples to cel.eraserMarks. cel.strokes is NEVER
+    //      touched -- compositeStage applies eraserMarks at render
+    //      time, so original stroke control points stay intact and
+    //      the line shape can't shift on commit, no matter how many
+    //      times the eraser passes through it.
     _processErase() {
       const pending = this._erasePending;
       if (!pending || !pending.samples.length) return;
@@ -923,33 +914,14 @@
       }
       ctx.restore();
       pending.cel.dirty();
-      // Pass 2: vector-level erase pass to keep cel.strokes in sync.
-      let strokes = pending.cel.strokes;
-      let changed = false;
-      for (const s of samples) {
-        const next = [];
-        let touched = false;
-        for (const st of strokes) {
-          const res = V().eraseStroke(st, s.x, s.y, r);
-          if (res === null) next.push(st);
-          else { touched = true; for (const p of res) next.push(p); }
-        }
-        if (touched) { strokes = next; changed = true; }
-      }
-      if (changed) {
-        pending.cel.strokes = strokes;
-        this.changed = true;
-      }
+      // Pass 2: append to cel.eraserMarks (NOT modifying cel.strokes).
+      // Each sample becomes a render-time destination-out circle.
+      if (!Array.isArray(pending.cel.eraserMarks)) pending.cel.eraserMarks = [];
+      for (const s of samples) pending.cel.eraserMarks.push({ x: s.x, y: s.y, r: r });
+      this.changed = true;
       // Ship the destruction samples to anything that wants to mirror
-      // the live erase visual (pen window via pencast). We do NOT
-      // emit celchange mid-drag -- the cut-stroke fragments
-      // V.eraseStroke produces re-smooth visibly differently from the
-      // originals on re-render, so a vector-cel-replace would morph the
-      // line shape mid-erase. Instead, the consumer is expected to
-      // render destination-out punches on top of the UNCHANGED strokes,
-      // matching what cel.canvas does locally on main. On pointerUp,
-      // _vUp emits celchange for the final commit and the overlay
-      // clears (pen window does this on vector-cel-replace).
+      // the live erase visual (pen window via pencast). Pen window
+      // applies these to its local cel mirror too (see pencast publish).
       if (this.t && this.t.layer) {
         pending.app.emit('erase-samples', {
           layer: this.t.layer,
@@ -962,16 +934,14 @@
     }
     _flushErase() {
       if (this._eraseRAF) { cancelAnimationFrame(this._eraseRAF); this._eraseRAF = 0; }
-      // Process any pending samples that didn't get a RAF tick.
       this._processErase();
       if (this._erasePending) {
         const cel = this._erasePending.cel;
         const app = this._erasePending.app;
-        // Drop the cached-path override and re-render cel.canvas from
-        // the now-final cel.strokes. This reconciles the destructive
-        // punch (which removed pixels regardless of stroke ownership)
-        // with the real surviving stroke fragments, so thumbs / onion
-        // / export pick up the clean vector state.
+        // Drop the cached-path override. cel.canvas was already updated
+        // by the per-tick destination-out punches and will be re-rendered
+        // by compositeStage's strokes + eraserMarks pass on subsequent
+        // composites if needed (thumbs / export call rebuild as well).
         cel._liveDrawing = false;
         cel.rebuild();
         app.emit('render');

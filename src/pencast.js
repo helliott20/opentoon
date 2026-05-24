@@ -51,7 +51,13 @@
         celNum: layer.celNumAt(frame),
         kind: 'vector',
         w: cel.w, h: cel.h,
-        strokes: (cel.strokes || []).map(serializeStroke)
+        strokes: (cel.strokes || []).map(serializeStroke),
+        // Non-destructive eraser marks travel with the cel so the pen
+        // window renders the same erased view as main. Without this the
+        // pen would render strokes un-erased on every commit, and the
+        // user would see the mask "snap back" the moment the live drag
+        // ended.
+        eraserMarks: (cel.eraserMarks || []).map(m => ({ x: m.x, y: m.y, r: m.r }))
       };
     }
     // raster cels are placeholder in D1 (D2 sends pixel data)

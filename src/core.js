@@ -115,7 +115,15 @@ window.OT = window.OT || {};
       this.canvas = document.createElement('canvas');
       this.canvas.width = w; this.canvas.height = h;
       this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
-      if (this.kind === 'vector') this.strokes = [];
+      if (this.kind === 'vector') {
+        this.strokes = [];
+        // Non-destructive eraser marks. Each entry: { x, y, r }. Applied as
+        // destination-out at render time AFTER all strokes are drawn, so
+        // strokes never get mutated by erasing -- previously V.eraseStroke
+        // replaced each affected stroke with new control points, which
+        // visibly shifted the line at every cut on a complex drawing.
+        this.eraserMarks = [];
+      }
       this.thumb = null;
       this.thumbDirty = true;
     }
@@ -125,7 +133,7 @@ window.OT = window.OT || {};
       if (this.kind === 'vector' && OT.Vector) OT.Vector.renderCel(this);
     }
     clear() {
-      if (this.kind === 'vector') this.strokes = [];
+      if (this.kind === 'vector') { this.strokes = []; this.eraserMarks = []; }
       this.ctx.clearRect(0, 0, this.w, this.h);
       this.dirty();
     }
@@ -137,7 +145,10 @@ window.OT = window.OT || {};
     }
     snapshot() {
       if (this.kind === 'vector')
-        return { strokes: JSON.parse(JSON.stringify(this.strokes)) };
+        return {
+          strokes: JSON.parse(JSON.stringify(this.strokes)),
+          eraserMarks: JSON.parse(JSON.stringify(this.eraserMarks || []))
+        };
       const c = document.createElement('canvas');
       c.width = this.w; c.height = this.h;
       c.getContext('2d').drawImage(this.canvas, 0, 0);
@@ -146,6 +157,7 @@ window.OT = window.OT || {};
     restore(s) {
       if (this.kind === 'vector') {
         this.strokes = JSON.parse(JSON.stringify((s && s.strokes) || []));
+        this.eraserMarks = JSON.parse(JSON.stringify((s && s.eraserMarks) || []));
         this.rebuild();
         return;
       }

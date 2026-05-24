@@ -103,9 +103,10 @@
       applyWorldXform(ctx, layer, frame, project, layerAncestors);
 
       const isActive = wetLayerId && layer.id === wetLayerId;
-      const eraserLayer = opts.eraserOverlay
+      const liveOverlay = opts.eraserOverlay
         && opts.eraserOverlay.samples && opts.eraserOverlay.samples.length > 0
         && layer.id === opts.eraserOverlay.layerId;
+      const celMarks = cel.eraserMarks && cel.eraserMarks.length ? cel.eraserMarks : null;
 
       // Vector cels: re-render strokes directly so linework stays crisp at
       // any zoom. Skip if the cel is mid-live-stroke (raster cache owns
@@ -114,11 +115,13 @@
       if (cel.kind === 'vector' && cel.strokes && OT.Vector
           && !opts.useRaster && !cel._liveDrawing) {
         const V = OT.Vector;
-        if (eraserLayer) {
-          // Pen-window live-eraser path: render this layer's strokes onto
-          // a temp canvas sized to the PARENT BACKING STORE (not project
-          // pixels), apply destination-out at each sample, then blit the
-          // result pixel-perfect onto the parent ctx.
+        if (liveOverlay || celMarks) {
+          // Temp-canvas path for destination-out punches. Used whenever the
+          // cel carries permanent non-destructive eraser marks OR a live
+          // eraser drag is feeding overlay samples for this layer (pen
+          // window). Render strokes to a temp at PARENT BACKING STORE size
+          // (no upscale blur), apply destination-out for cel marks +
+          // overlay samples, then blit 1:1 onto parent ctx.
           //
           // Why this shape:
           //   * Vector clip(evenodd) with N sample subpaths was O(N)+
@@ -135,22 +138,16 @@
           //     layer only (no leak to bg). Blit happens at identity
           //     transform = 1:1 pixel copy.
           //   * Per-frame cost is roughly: clearRect + render strokes
-          //     (same as the non-eraser path) + O(samples) circle fills
-          //     + one drawImage. Constant in clip complexity.
+          //     (same as the non-eraser path) + O(marks+samples) circle
+          //     fills + one drawImage. Constant in clip complexity.
           const tempW = ctx.canvas.width;
           const tempH = ctx.canvas.height;
           const temp = getEraserTempCanvas(tempW, tempH);
           const tctx = temp.getContext('2d');
-          // Reset state -- the temp is shared across renders and we will
-          // leave globalCompositeOperation = 'destination-out' below.
           tctx.setTransform(1, 0, 0, 1, 0, 0);
           tctx.globalCompositeOperation = 'source-over';
           tctx.globalAlpha = 1;
           tctx.clearRect(0, 0, tempW, tempH);
-          // Adopt the parent's current transform so strokes drawn on the
-          // temp end up at the same pen-display pixels they would on the
-          // parent ctx. (getTransform/setTransform: DOMMatrix, supported
-          // in all Chromium versions we target.)
           tctx.setTransform(ctx.getTransform());
           for (const st of cel.strokes)
             if (st.type === 'fill' && (includeLassoHidden || !st._lassoHidden))
@@ -161,17 +158,20 @@
           if (isActive && wetStroke) { V.renderStroke(tctx, wetStroke); wetRendered = true; }
           tctx.globalCompositeOperation = 'destination-out';
           tctx.fillStyle = '#000';
-          for (const s of opts.eraserOverlay.samples) {
-            tctx.beginPath();
-            tctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-            tctx.fill();
+          if (celMarks) {
+            for (const m of celMarks) {
+              tctx.beginPath();
+              tctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+              tctx.fill();
+            }
           }
-          // Blit pixel-perfect onto parent ctx. setTransform(identity)
-          // bypasses the parent's projection/zoom/layer xform stack so
-          // drawImage(temp, 0, 0) copies temp pixels 1:1 onto parent.
-          // The parent's globalAlpha is preserved across setTransform
-          // and still applies to drawImage -- so worldOpacity(layer)
-          // multiplies through, same as the direct-render path.
+          if (liveOverlay) {
+            for (const s of opts.eraserOverlay.samples) {
+              tctx.beginPath();
+              tctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+              tctx.fill();
+            }
+          }
           ctx.save();
           ctx.setTransform(1, 0, 0, 1, 0, 0);
           ctx.drawImage(temp, 0, 0);

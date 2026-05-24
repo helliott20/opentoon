@@ -269,6 +269,21 @@
     // large selections.
     for (const st of cel.strokes) if (st.type === 'fill' && !st._lassoHidden) renderStroke(ctx, st);
     for (const st of cel.strokes) if (st.type !== 'fill' && !st._lassoHidden) renderStroke(ctx, st);
+    // Non-destructive eraser marks: punch destination-out circles AFTER
+    // every stroke is drawn. cel.strokes itself is never modified by the
+    // eraser, so on subsequent renders the strokes are still exactly the
+    // shape the artist drew. cel.canvas just shows the erased view.
+    if (cel.eraserMarks && cel.eraserMarks.length) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.fillStyle = '#000';
+      for (const m of cel.eraserMarks) {
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
     cel.dirty();
   }
 

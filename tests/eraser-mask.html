@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Non-destructive eraser mask test</title>
+<style>
+  body { margin: 0; padding: 20px; background: #1a1a1a; color: #ddd; font: 14px monospace; }
+  canvas { display: block; background: #fff; margin: 8px 0; }
+  .panel { margin-bottom: 24px; }
+  h3 { margin: 8px 0; color: #fff; }
+  .good { color: #5f5; }
+  .bad { color: #f55; }
+</style>
+</head>
+<body>
+<h2>Non-destructive eraser: cel.strokes intact, mask at render</h2>
+<div class="panel">
+  <h3>Before erasing — three curving strokes</h3>
+  <canvas id="before" width="900" height="320"></canvas>
+</div>
+<div class="panel">
+  <h3>After eraser drag through middle — strokes untouched, mask applied at render</h3>
+  <canvas id="after" width="900" height="320"></canvas>
+  <div id="report"></div>
+</div>
+
+<script src="../src/core.js?v=2"></script>
+<script src="../src/vector.js?v=2"></script>
+<script src="../src/composite.js?v=2"></script>
+<script>
+const V = OT.Vector;
+
+function makeCurve(start, end, amplitude, freq) {
+  const pts = [];
+  for (let t = 0; t <= 1; t += 0.025) {
+    const x = start.x + (end.x - start.x) * t;
+    const y = start.y + (end.y - start.y) * t + Math.sin(t * Math.PI * freq) * amplitude;
+    pts.push({ x, y, p: 1 });
+  }
+  return V.simplify(pts, 0.8);
+}
+
+const project = { width: 900, height: 320, bg: '#ffffff', layers: [] };
+const cel = new OT.Cel(1, 900, 320, 'vector');
+const layer = new OT.Layer('Test', 'drawing');
+layer.id = 'L1';
+layer.cels[1] = cel;
+layer.exposure[0] = 1;
+project.layers.push(layer);
+
+cel.strokes.push({
+  id: 'a', type: 'line', pencil: false,
+  color: '#222', width: 18, opacity: 1,
+  pts: makeCurve({ x: 50, y: 130 }, { x: 850, y: 130 }, 30, 3),
+  closed: false
+});
+cel.strokes.push({
+  id: 'b', type: 'line', pencil: false,
+  color: '#a33', width: 14, opacity: 1,
+  pts: makeCurve({ x: 50, y: 180 }, { x: 850, y: 180 }, 25, 4),
+  closed: false
+});
+cel.strokes.push({
+  id: 'c', type: 'line', pencil: true,
+  color: '#36c', width: 6, opacity: 1,
+  pts: makeCurve({ x: 50, y: 220 }, { x: 850, y: 220 }, 20, 5),
+  closed: false
+});
+
+const strokesBefore = JSON.parse(JSON.stringify(cel.strokes));
+
+cel.rebuild();
+document.getElementById('before').getContext('2d').drawImage(cel.canvas, 0, 0);
+
+// Apply a sequence of eraser marks (simulating a drag through x=420..480 at y=175)
+const radius = 30;
+for (let x = 420; x <= 480; x += 6) {
+  cel.eraserMarks.push({ x: x, y: 175, r: radius });
+}
+cel.rebuild();
+
+const afterCtx = document.getElementById('after').getContext('2d');
+afterCtx.drawImage(cel.canvas, 0, 0);
+// Also draw a faint dashed circle showing the eraser path
+afterCtx.save();
+afterCtx.strokeStyle = 'rgba(255,0,0,0.4)';
+afterCtx.setLineDash([3, 3]);
+for (const m of cel.eraserMarks) {
+  afterCtx.beginPath();
+  afterCtx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+  afterCtx.stroke();
+}
+afterCtx.restore();
+
+// Verify cel.strokes is byte-identical to before
+const strokesAfter = cel.strokes;
+const sameLen = strokesBefore.length === strokesAfter.length;
+let mismatch = !sameLen;
+if (sameLen) {
+  for (let i = 0; i < strokesBefore.length; i++) {
+    if (JSON.stringify(strokesBefore[i]) !== JSON.stringify(strokesAfter[i])) {
+      mismatch = true; break;
+    }
+  }
+}
+
+const report = document.getElementById('report');
+report.innerHTML = `
+  <div class="${mismatch ? 'bad' : 'good'}">cel.strokes mutated: ${mismatch}</div>
+  <div>cel.strokes.length: ${strokesAfter.length}</div>
+  <div>cel.eraserMarks.length: ${cel.eraserMarks.length}</div>
+`;
+
+window.__testResults = {
+  ready: true,
+  strokesIntact: !mismatch,
+  strokeCount: strokesAfter.length,
+  markCount: cel.eraserMarks.length
+};
+</script>
+</body>
+</html>

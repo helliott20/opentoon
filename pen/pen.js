@@ -332,6 +332,13 @@
       }
       if (celSnap.kind === 'vector') {
         cel.strokes = Array.isArray(celSnap.strokes) ? celSnap.strokes.slice() : [];
+        // Non-destructive eraser marks (see core.js Cel). Mirror them so
+        // the pen's compositeStage punches the same destination-out
+        // circles main does. Without this the pen would render strokes
+        // intact after commit -- the erased view would disappear.
+        cel.eraserMarks = Array.isArray(celSnap.eraserMarks)
+          ? celSnap.eraserMarks.map(m => ({ x: m.x, y: m.y, r: m.r }))
+          : [];
       }
       // raster cels: D1 keeps the placeholder; D2 wires bmp data
       layer.exposure[frame] = num;

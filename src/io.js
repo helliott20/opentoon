@@ -86,7 +86,7 @@
         for (const num in l.cels) {
           const c = l.cels[num];
           cels[num] = (c.kind === 'vector')
-            ? { k: 'v', strokes: c.strokes }
+            ? { k: 'v', strokes: c.strokes, eraserMarks: c.eraserMarks || [] }
             : { k: 'r', png: c.toDataURL() };
         }
         return {
@@ -133,6 +133,7 @@
             cel.ctx.drawImage(img, 0, 0);
           } else if (cd.k === 'v') {
             cel.strokes = cd.strokes || [];
+            cel.eraserMarks = Array.isArray(cd.eraserMarks) ? cd.eraserMarks : [];
             cel.rebuild();
           } else {
             const img = await loadImage(cd.png);
