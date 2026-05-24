@@ -715,10 +715,6 @@
       this._wetTimer = setTimeout(() => this._clearWetStroke(), 2000);
     }
     _clearWetStroke() {
-      if (this.state.wetStroke) {
-        // D1 diagnostic — temporary, remove once symptom B is confirmed fixed
-        console.log('[pen] clearWet from:', new Error().stack.split('\n').slice(2, 5).join(' | '));
-      }
       this.state.wetStroke = null;
       if (this._wetTimer) { clearTimeout(this._wetTimer); this._wetTimer = null; }
     }
