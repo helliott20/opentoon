@@ -1,6 +1,6 @@
 {
   "name": "opentoon",
-  "version": "1.0.20",
+  "version": "1.0.21",
   "description": "An open-source 2D animation studio for Windows, inspired by Toon Boom Harmony.",
   "main": "electron/main.js",
   "scripts": {
