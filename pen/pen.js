@@ -670,6 +670,35 @@
       ws.pts = fin.pts;
       ws.closed = fin.closed;
     }
+    // Called on pointerup, before the wet timer is armed. Mirrors what
+    // main's PaintTool._vUp does immediately before its own finalize call:
+    //
+    //   this.raw.push({ x: pt.x, y: pt.y, p: pt.pressure, t: tNow });
+    //
+    // The raw release pt is NOT One-Euro-filtered on main, so we must
+    // skip the filter here too — applying One Euro at release would shift
+    // the endpoint INTO the smoothed trail and put the pen's finalize
+    // input out of sync with main's. The result was a visible ~1 px snap
+    // when the committed stroke replaced the wet preview.
+    _appendReleaseAndRefinalize(projPt) {
+      const ws = this.state.wetStroke;
+      if (!ws) return;
+      const t = this.state.tool;
+      ws.rawPts = ws.rawPts.concat([{
+        x: projPt.x, y: projPt.y, p: projPt.p, t: performance.now()
+      }]);
+      const layer = this.state.layersById.get(this.state.activeLayerId);
+      const cel = layer ? layer.celAt(this.state.frame) : null;
+      const fin = OT.StrokeFinalize.finalize(ws.rawPts, {
+        tol: typeof t.tol === 'number' ? t.tol : 0.4,
+        snapDist: typeof t.snapDist === 'number' ? t.snapDist : 0,
+        inkDynamics: !!t.inkDynamics,
+        autoClose: !!t.autoClose,
+        cel: cel && cel.kind === 'vector' ? cel : null
+      });
+      ws.pts = fin.pts;
+      ws.closed = fin.closed;
+    }
     // Defensive timer: started on pointerup, NOT on seed. While the artist
     // is still dragging, the wet stroke must stay alive arbitrarily long.
     // Once the artist lifts, main has 2 seconds to commit (via celchange)
@@ -1065,17 +1094,26 @@
         }
         if (!this.stroking) return;
         this.stroking = false;
-        // Arm the 2-second defensive cleanup so the wet eventually goes
-        // away even if the commit message never arrives. (D1 no longer
-        // tracks predicted touches, so there's nothing to clear here.)
-        const id = this.state.wetStroke ? this.state.wetStroke.id : null;
-        if (this.state.wetStroke) {
-          this._armWetTimer();
-          this._scheduleComposite();
-        }
         const r = rect();
         const n = norm(e.clientX, e.clientY, r);
         const pressure = e.pointerType === 'pen' ? e.pressure : 1;
+        // Arm the 2-second defensive cleanup so the wet eventually goes
+        // away even if the commit message never arrives. Before arming,
+        // push the raw release pt into rawPts and re-finalize so the wet
+        // preview's pts exactly match what main's _vUp will push to
+        // cel.strokes — without this, the simplify step picks slightly
+        // different control points near the end and the line visibly
+        // snaps when the commit replaces the wet preview.
+        const id = this.state.wetStroke ? this.state.wetStroke.id : null;
+        if (this.state.wetStroke) {
+          this._appendReleaseAndRefinalize({
+            x: n.nx * this.state.project.width,
+            y: n.ny * this.state.project.height,
+            p: pressure
+          });
+          this._armWetTimer();
+          this._scheduleComposite();
+        }
         if (PEN) PEN.sendInput(Object.assign({
           type: 'up', id, nx: n.nx, ny: n.ny, pressure
         }, mods(e)));
