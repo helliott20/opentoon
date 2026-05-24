@@ -134,6 +134,13 @@
     if (st.closed) return null;
     if (st.sharp) return null;
     if (n < 6) return null;
+    // Per-end opt-out: eraseStroke sets these on cut fragments so the cut
+    // end stays full-width while a natural endpoint (when one falls inside
+    // the fragment) still gets its taper. Default true preserves existing
+    // behaviour for non-cut strokes.
+    const taperStart = st.taperStart !== false;
+    const taperEnd = st.taperEnd !== false;
+    if (!taperStart && !taperEnd) return null;
     // arc length per sample
     const cum = new Float64Array(n);
     let L = 0;
@@ -155,11 +162,11 @@
     for (let i = 0; i < n; i++) {
       const s = cum[i];
       let e = 1;
-      if (s < taperLen) {
+      if (taperStart && s < taperLen) {
         const t = s / taperLen;
         const ss = t * t * (3 - 2 * t);     // cubic ease-in (smoothstep)
         e = TIP_FLOOR + (1 - TIP_FLOOR) * ss;
-      } else if (s > L - taperLen) {
+      } else if (taperEnd && s > L - taperLen) {
         const t = (L - s) / taperLen;
         const ss = t * t * (3 - 2 * t);     // cubic ease-out (smoothstep)
         e = TIP_FLOOR + (1 - TIP_FLOOR) * ss;
@@ -402,47 +409,76 @@
       return !cut;
     });
     if (!any) return null;
+    // Build runs of kept dense points, tracking per-end whether the run was
+    // bounded by an actual cut (a removed neighbour in `dense`) or by the
+    // stroke's natural start/end. We need to know which is which so the
+    // output can keep the original taper at natural ends while flattening
+    // (and recessing) at cut ends.
     const runs = [];
     let cur = [];
+    let curStartCut = false;
     for (let i = 0; i < dense.length; i++) {
-      if (keep[i]) cur.push(dense[i]);
-      else { if (cur.length >= 2) runs.push(cur); cur = []; }
+      if (keep[i]) {
+        if (cur.length === 0) curStartCut = i > 0 && !keep[i - 1];
+        cur.push(dense[i]);
+      } else {
+        if (cur.length >= 2) runs.push({ pts: cur, startCut: curStartCut, endCut: true });
+        cur = [];
+      }
     }
-    if (cur.length >= 2) runs.push(cur);
+    if (cur.length >= 2) runs.push({ pts: cur, startCut: curStartCut, endCut: false });
     return runs.map(run => {
       const s = Object.assign({}, st);
       s.id = U.uid();
       s.closed = false;
-      // Disable auto-taper on cut fragments. computeTaperEnv tapers
-      // the first/last min(0.08*L, 60)px of every brush stroke to give
-      // it pointy ends; on a fragment freshly cut by the eraser it
-      // applies that taper at the CUT endpoint, producing a fine
-      // pointy tip where the destination-out hole showed a sharp
-      // circular bite at full stroke width. The user wants the cut
-      // to match what the eraser disc actually removed, so we turn
-      // the auto-taper off for any fragment produced by an erase.
+      // Per-end taper: a fragment with a natural endpoint inside it keeps
+      // the original auto-taper at that end; the cut end stays full width
+      // so the stroke doesn't develop a fine pointy spike where the eraser
+      // disc punched through. computeTaperEnv reads taperStart/taperEnd.
+      s.taperStart = !run.startCut;
+      s.taperEnd = !run.endCut;
+      const runPts = run.pts;
+      const headSrc = runPts[0];
+      const tailSrc = runPts[runPts.length - 1];
+      // Recess each CUT endpoint inward along the stroke tangent by wHalf.
+      // The round lineCap / endpoint stamp renders a hemisphere of radius
+      // wHalf at the endpoint, so without recess that hemisphere bulges
+      // outward into the freshly-erased region (the user reads this as a
+      // bulbous, unintentional cap). With recess, the cap is tangent to
+      // where the eraser disc cut -- matching the destination-out preview
+      // they saw during the drag and reading as a deliberate clean cut.
       //
-      // Side effect: if the original stroke had its natural start or
-      // end inside this fragment, that endpoint loses its original
-      // auto-taper too. Less jarring than a new pointy spike at the
-      // cut and matches the cut visual the artist saw.
-      s.taper = false;
-      // Use the run's first/last (interpolated cut endpoints) plus the
-      // ORIGINAL polyline vertices that fell inside the run. The original
-      // st.pts were already simplified at commit time, so re-simplifying
-      // the densified run produces a different point set -- and a
-      // different smoothed curve, which the artist sees as the line
-      // "morphing" on release. Reusing the original interior points
-      // means samplesOf produces the same smoothed curve away from the
-      // cut; only the cut endpoint's neighbourhood necessarily differs.
-      const out = [
-        { x: run[0].x, y: run[0].y, p: run[0].p }
-      ];
-      for (let i = 1; i < run.length - 1; i++) {
-        if (run[i].orig) out.push({ x: run[i].x, y: run[i].y, p: run[i].p });
+      // Pressure-weighted: the stamp radius is wHalf * p, so the recess
+      // distance must scale with the same factor or the cap re-bulges on
+      // pressure-variable brushes.
+      const wHalf = (st.width || 0) / 2;
+      const recess = (pt) => {
+        const p = pt.p == null ? 1 : pt.p;
+        return wHalf * p;
+      };
+      let head, tail;
+      if (run.startCut) {
+        const r0 = recess(headSrc);
+        head = { x: headSrc.x + headSrc.dx * r0, y: headSrc.y + headSrc.dy * r0, p: headSrc.p };
+      } else {
+        head = { x: headSrc.x, y: headSrc.y, p: headSrc.p };
       }
-      const tail = run[run.length - 1];
-      out.push({ x: tail.x, y: tail.y, p: tail.p });
+      if (run.endCut) {
+        const r1 = recess(tailSrc);
+        tail = { x: tailSrc.x - tailSrc.dx * r1, y: tailSrc.y - tailSrc.dy * r1, p: tailSrc.p };
+      } else {
+        tail = { x: tailSrc.x, y: tailSrc.y, p: tailSrc.p };
+      }
+      // Reuse the ORIGINAL polyline vertices that fell inside the run --
+      // re-simplifying the densified run would shift the smoothed curve
+      // and the artist would see the line morph on release. The cut
+      // endpoint's neighbourhood necessarily differs, but the interior
+      // tracks the original.
+      const out = [head];
+      for (let i = 1; i < runPts.length - 1; i++) {
+        if (runPts[i].orig) out.push({ x: runPts[i].x, y: runPts[i].y, p: runPts[i].p });
+      }
+      out.push(tail);
       s.pts = out;
       return s;
     });
