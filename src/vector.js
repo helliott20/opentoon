@@ -427,6 +427,35 @@
       }
     }
     if (cur.length >= 2) runs.push({ pts: cur, startCut: curStartCut, endCut: false });
+    // Place a new fragment endpoint so its stamp cap is EXTERNALLY tangent
+    // to the eraser disc. Solves: cap_center_distance_from_eraser = r + rc
+    // where rc = wHalf * lk.p (cap radius at endpoint pressure). The cap
+    // center lies on lk's segment-line on the same side of the foot of
+    // perpendicular as lk (i.e. outside the disc). Without this, the cut
+    // endpoint sits where the densify-and-trim loop happened to drop the
+    // last-kept dense point -- offset by up to spacing/2 from the actual
+    // disc edge, plus wHalf bulge from the round cap -- and the artist
+    // reads it as a sloppy hemisphere rather than a clean circular bite.
+    const tangentEndpoint = (lk) => {
+      const dxs = lk.dx, dys = lk.dy;
+      const rc = wHalf * (lk.p == null ? 1 : lk.p);
+      const alongLk = (lk.x - cx) * dxs + (lk.y - cy) * dys;
+      const perpLk  = (lk.x - cx) * (-dys) + (lk.y - cy) * dxs;
+      const pPerp = Math.abs(perpLk);
+      const radiusSum = r + rc;
+      const sqr = radiusSum * radiusSum - pPerp * pPerp;
+      if (sqr <= 0) {
+        // Degenerate: stroke band intersects the disc but the centerline
+        // is so far that no externally-tangent cap position exists. Fall
+        // back to lk in place; the cap may bulge slightly but it's the
+        // best we can do without flattening the stroke.
+        return { x: lk.x, y: lk.y, p: lk.p };
+      }
+      const alongEnd = Math.sqrt(sqr);
+      const sideSign = alongLk >= 0 ? 1 : -1;
+      const k = sideSign * alongEnd - alongLk;
+      return { x: lk.x + k * dxs, y: lk.y + k * dys, p: lk.p };
+    };
     return runs.map(run => {
       const s = Object.assign({}, st);
       s.id = U.uid();
@@ -440,35 +469,10 @@
       const runPts = run.pts;
       const headSrc = runPts[0];
       const tailSrc = runPts[runPts.length - 1];
-      // Recess each CUT endpoint inward along the stroke tangent by wHalf.
-      // The round lineCap / endpoint stamp renders a hemisphere of radius
-      // wHalf at the endpoint, so without recess that hemisphere bulges
-      // outward into the freshly-erased region (the user reads this as a
-      // bulbous, unintentional cap). With recess, the cap is tangent to
-      // where the eraser disc cut -- matching the destination-out preview
-      // they saw during the drag and reading as a deliberate clean cut.
-      //
-      // Pressure-weighted: the stamp radius is wHalf * p, so the recess
-      // distance must scale with the same factor or the cap re-bulges on
-      // pressure-variable brushes.
-      const wHalf = (st.width || 0) / 2;
-      const recess = (pt) => {
-        const p = pt.p == null ? 1 : pt.p;
-        return wHalf * p;
-      };
-      let head, tail;
-      if (run.startCut) {
-        const r0 = recess(headSrc);
-        head = { x: headSrc.x + headSrc.dx * r0, y: headSrc.y + headSrc.dy * r0, p: headSrc.p };
-      } else {
-        head = { x: headSrc.x, y: headSrc.y, p: headSrc.p };
-      }
-      if (run.endCut) {
-        const r1 = recess(tailSrc);
-        tail = { x: tailSrc.x - tailSrc.dx * r1, y: tailSrc.y - tailSrc.dy * r1, p: tailSrc.p };
-      } else {
-        tail = { x: tailSrc.x, y: tailSrc.y, p: tailSrc.p };
-      }
+      const head = run.startCut ? tangentEndpoint(headSrc)
+                                : { x: headSrc.x, y: headSrc.y, p: headSrc.p };
+      const tail = run.endCut   ? tangentEndpoint(tailSrc)
+                                : { x: tailSrc.x, y: tailSrc.y, p: tailSrc.p };
       // Reuse the ORIGINAL polyline vertices that fell inside the run --
       // re-simplifying the densified run would shift the smoothed curve
       // and the artist would see the line morph on release. The cut
