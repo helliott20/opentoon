@@ -114,7 +114,15 @@ window.OT = window.OT || {};
       this.kind = kind || 'raster';     // 'raster' | 'vector'
       this.canvas = document.createElement('canvas');
       this.canvas.width = w; this.canvas.height = h;
-      this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
+      // No `willReadFrequently` — the hint forces a CPU-side backing store,
+      // which means every `drawImage(cel.canvas, …)` from the composite
+      // path triggers a CPU→GPU upload each frame. With 5 layers × 1080p
+      // RGBA that was ~1.2 GB/sec of texture traffic on the pen window.
+      // Letting Chromium GPU-back the cel canvas turns those uploads into
+      // GPU→GPU copies. Fill flood + isBlank still call getImageData; that
+      // now incurs a sync GPU→CPU readback per call, but those are
+      // user-initiated one-shots and not in any hot loop.
+      this.ctx = this.canvas.getContext('2d');
       if (this.kind === 'vector') {
         this.strokes = [];
         // Non-destructive eraser marks. Each entry: { x, y, r }. Applied as
