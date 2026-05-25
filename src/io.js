@@ -72,6 +72,30 @@
   }
 
   /* ---------------- serialize / deserialize ---------------- */
+  // Captured per-project so reopening drops the artist back where they
+  // left off: stage view (zoom/pan/rotation), timeline zoom, the current
+  // frame + active layer, and a snapshot of the tool settings. Stored
+  // under `workspace` so we can extend later without breaking the format.
+  function captureWorkspace(app) {
+    const stage = app.stage || {};
+    const tl = app.timeline || {};
+    const settings = app.settings ? JSON.parse(JSON.stringify(app.settings)) : null;
+    const active = app.activeLayer && app.activeLayer();
+    return {
+      stage: stage.view ? {
+        zoom: stage.view.zoom, x: stage.view.x, y: stage.view.y, rot: stage.view.rot,
+        flipH: !!stage.flipH, flipV: !!stage.flipV
+      } : null,
+      timeline: { cellW: tl.cellW || null, namesWidth: tl.namesWidth || null },
+      frame: app.frame | 0,
+      activeLayerId: active ? active.id : null,
+      tool: app.tools && app.tools.active ? app.tools.active.name : null,
+      color: app.color || null,
+      onion: app.onion ? JSON.parse(JSON.stringify(app.onion)) : null,
+      settings
+    };
+  }
+
   function serialize(app) {
     const p = app.project;
     return {
@@ -81,6 +105,7 @@
       palette: app.palette.serialize(),
       camera: { keyframes: p.camera.keyframes.map(k => ({ ...k })) },
       audio: p.audio || null,
+      workspace: captureWorkspace(app),
       layers: p.layers.map(l => {
         const cels = {};
         for (const num in l.cels) {
@@ -150,7 +175,7 @@
       p.layers.push(layer);
     }
     if (!p.layers.length) p.layers.push(new OT.Layer('Drawing 1'));
-    return { project: p, palette: data.palette };
+    return { project: p, palette: data.palette, workspace: data.workspace || null };
   }
 
   /* ---------------- frame rendering (camera-aware) ---------------- */

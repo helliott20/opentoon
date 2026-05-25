@@ -744,9 +744,27 @@
       }
       return l;
     }
+    // Standard 2D-animation behaviour: when an artist creates a new drawing
+    // past a gap, the previous drawing should hold across that gap so the
+    // intermediate frames don't go blank. Fills any empty (0) exposure
+    // slots between the most recent non-empty frame and `frame` with the
+    // previous drawing's cel number. Pre-existing held runs are untouched.
+    _holdPreviousTo(layer, frame) {
+      if (!layer || !layer.exposure || frame <= 0) return;
+      let prev = -1;
+      for (let f = frame - 1; f >= 0; f--) {
+        if (layer.exposure[f]) { prev = f; break; }
+      }
+      if (prev < 0) return;
+      const num = layer.exposure[prev];
+      for (let f = prev + 1; f < frame; f++) {
+        if (!layer.exposure[f]) layer.exposure[f] = num;
+      }
+    }
     newDrawing() {
       const l = this._dl(); if (!l) return;
       this.doStruct('New drawing', () => {
+        this._holdPreviousTo(l, this.frame);
         l.newDrawingAt(this.frame, this.project.width, this.project.height);
       });
     }
@@ -754,6 +772,7 @@
       const l = this._dl(); if (!l) return;
       const src = l.celAt(this.frame);
       this.doStruct('Duplicate drawing', () => {
+        this._holdPreviousTo(l, this.frame);
         const n = l.nextNum++;
         const kind = l.type === 'vector' ? 'vector' : 'raster';
         const c = new OT.Cel(n, this.project.width, this.project.height, kind);
@@ -1586,13 +1605,73 @@
       this.projectPath = null;
       this.colorPanel._renderSwatches();
       this.emitAll();
-      this.stage.fitToCamera();
+      // Apply any saved workspace state (stage zoom, timeline zoom, current
+      // frame, tool settings) BEFORE fitToCamera so we don't undo a stored
+      // stage view. When the project has no workspace block (legacy file),
+      // fall back to fitToCamera so the artist sees something sensible.
+      const restored = this._applyWorkspace(data.workspace);
+      if (!restored.stage) this.stage.fitToCamera();
       this.ui.refreshProjectInfo();
       this._reattachVideoLayers();
       this._syncVideoLayers();
       if (this.project.audio && this.project.audio.data)
         this._loadAudioData(this.project.audio.data);
       this.ui.status('Project loaded');
+    }
+    // Restore the workspace snapshot captured by io.js#captureWorkspace.
+    // Returns flags for which pieces were applied so the caller knows
+    // whether to fall back to defaults (e.g. fit-to-camera).
+    _applyWorkspace(w) {
+      const applied = { stage: false, timeline: false };
+      if (!w) return applied;
+      try {
+        // Tool settings + onion first — these influence subsequent
+        // refresh calls (onion neighbours, ui status).
+        if (w.settings) Object.assign(this.settings, w.settings);
+        if (w.onion) Object.assign(this.onion, w.onion);
+        // Frame + active layer.
+        if (typeof w.frame === 'number') {
+          this.frame = U.clamp(w.frame | 0, 0, this.project.frameCount - 1);
+        }
+        if (w.activeLayerId) {
+          const layer = this.project.layers.find(l => l.id === w.activeLayerId);
+          if (layer) {
+            this._activeLayer = layer;
+            this.selectedLayers.clear();
+            this.selectedLayers.add(layer);
+          }
+        }
+        // Tool / colour.
+        if (w.color) this.color = w.color;
+        if (w.tool && this.tools && this.tools.tools && this.tools.tools[w.tool]) {
+          this.tools.select(w.tool);
+        }
+        // Stage view (zoom/pan/rotation/flip). Skip fitToCamera in caller.
+        if (w.stage && this.stage && this.stage.view) {
+          const v = this.stage.view, s = w.stage;
+          if (typeof s.zoom === 'number') v.zoom = s.zoom;
+          if (typeof s.x === 'number') v.x = s.x;
+          if (typeof s.y === 'number') v.y = s.y;
+          if (typeof s.rot === 'number') v.rot = s.rot;
+          if (typeof s.flipH === 'boolean') this.stage.flipH = s.flipH;
+          if (typeof s.flipV === 'boolean') this.stage.flipV = s.flipV;
+          applied.stage = true;
+        }
+        // Timeline zoom / names column width.
+        if (w.timeline && this.timeline) {
+          const t = w.timeline;
+          if (typeof t.cellW === 'number') this.timeline.cellW = t.cellW;
+          if (typeof t.namesWidth === 'number'
+              && typeof this.timeline._applyNamesWidth === 'function') {
+            this.timeline._applyNamesWidth(t.namesWidth);
+          }
+          applied.timeline = true;
+        }
+        // Re-emit so panels (timeline, layer list, brush opts) pick up
+        // the restored settings/frame/active layer.
+        this.emitAll();
+      } catch (e) { /* malformed workspace — ignore, fall back to defaults */ }
+      return applied;
     }
     saveProject(saveAs) {
       const fsd = window.OpenToonDesktop && window.OpenToonDesktop.fs;

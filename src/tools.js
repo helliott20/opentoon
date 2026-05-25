@@ -27,6 +27,13 @@
       // explicitly; auto-forking on every stroke surprised users by
       // appearing to "create a new frame" instead of editing the
       // existing held drawing.
+      //
+      // Hold-previous: if the artist is drawing on a fresh frame past a
+      // gap, extend the previous drawing forward to fill the gap so the
+      // intermediate frames don't go blank.
+      if (!layer.exposure[app.frame] && typeof app._holdPreviousTo === 'function') {
+        app._holdPreviousTo(layer, app.frame);
+      }
       cel = layer.drawingAt(app.frame, app.project.width, app.project.height);
     }
     if (!cel) return null;
