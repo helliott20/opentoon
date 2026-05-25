@@ -294,17 +294,34 @@
       const lo = Math.min(ia, ib), hi = Math.max(ia, ib);
       const f0 = Math.min(aFrame, bFrame), f1 = Math.max(aFrame, bFrame);
       const sel = [];
+      // Whole-run selection: a held run touched by the rectangle is
+      // included with its FULL underlying boundaries — not truncated to
+      // the rect's column range. A held run is conceptually one drawing,
+      // so "select half of it" doesn't have a clean meaning; selecting
+      // any part of it = selecting the whole drawing. The seen set
+      // dedupes the same run touched at multiple points along the
+      // rectangle.
+      const seen = new Set();
       for (let i = lo; i <= hi; i++) {
         const layer = visible[i];
         if (!layer || !layer.exposure) continue;
+        const exp = layer.exposure;
         let f = f0;
         while (f <= f1) {
-          const num = layer.exposure[f] || 0;
+          const num = exp[f] || 0;
           if (!num) { f++; continue; }
-          let e = f;
-          while (e < f1 && (layer.exposure[e + 1] || 0) === num) e++;
-          sel.push({ layer, num, start: f, end: e });
-          f = e + 1;
+          // Walk both ways to find the full underlying run boundaries.
+          let runStart = f;
+          while (runStart > 0 && (exp[runStart - 1] || 0) === num) runStart--;
+          let runEnd = f;
+          while (runEnd + 1 < exp.length && (exp[runEnd + 1] || 0) === num) runEnd++;
+          const key = layer.id + ':' + num + ':' + runStart + ':' + runEnd;
+          if (!seen.has(key)) {
+            seen.add(key);
+            sel.push({ layer, num, start: runStart, end: runEnd });
+          }
+          // Skip past the rest of this run inside the rect.
+          f = runEnd + 1;
         }
       }
       return sel;
