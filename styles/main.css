@@ -928,14 +928,27 @@ input[type=range]::-webkit-slider-thumb:active{
   content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;
   background:var(--accent);border-radius:2px;pointer-events:none;z-index:5;
 }
+/* Drop-into-folder: the middle band of a group row turns into a "container"
+   highlight so dragging a layer onto the folder name clearly means "become
+   a member". Top/bottom slivers of the row still act as sibling drops. */
+.layer-item.drop-into,
+.tl-name-row.drop-into{
+  box-shadow:inset 0 0 0 2px var(--accent);
+  background:color-mix(in srgb,var(--accent) 18%,transparent);
+  border-radius:4px;
+}
 
 #timeline canvas{display:block;}
 
 /* ---------- Status bar ---------- */
+/* Right padding is bigger than left so the Pos / Zoom / project readouts
+   never sit flush against the window edge — on Windows the OS resize
+   gripper at the bottom-right corner can eat the last few pixels of
+   content, which made the last readouts look clipped. */
 #statusbar{
   height:22px;flex:0 0 22px;background:var(--panel2);
   border-top:1px solid var(--edge);
-  display:flex;align-items:center;gap:14px;padding:0 10px;
+  display:flex;align-items:center;gap:14px;padding:0 26px 0 10px;
   color:var(--text-dim);font-size:12px;
 }
 /* the message takes the slack but must be allowed to shrink + ellipsize,

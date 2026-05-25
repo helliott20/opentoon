@@ -1125,6 +1125,21 @@
       }
       return out;
     }
+    // Mirror src/canvas.js#_focusComposite: dim everything that isn't the
+    // active layer when there are ≥ 2 drawable layers. Pen doesn't know
+    // about main's selectedLayers Set, so we focus on activeLayerId only
+    // — close enough for the visual cue (which layer am I drawing on).
+    _focusOpts() {
+      const s = this.state;
+      if (!s || !s.project || !s.project.layers) return null;
+      let drawables = 0;
+      for (const L of s.project.layers) {
+        if (L.type === 'drawing' || L.type === 'vector') drawables++;
+        if (drawables >= 2) break;
+      }
+      if (drawables < 2 || !s.activeLayerId) return null;
+      return new Set([s.activeLayerId]);
+    }
     // Render the full layer composite into a project-sized offscreen canvas
     // with selected strokes already excluded (their _lassoHidden flag is
     // honoured by renderCel). Called only when the cache is dirty.
@@ -1147,7 +1162,8 @@
       OT.compositeStage(s.project, s.frame, bctx, {
         bg: false,
         includeVideo: false,
-        eraserOverlay: s.eraserOverlay
+        eraserOverlay: s.eraserOverlay,
+        focusLayerIds: this._focusOpts()
       }, {
         layerAncestors: layer => this._layerAncestors(layer)
       });
@@ -1268,7 +1284,8 @@
             wetStroke: wetForRender || null,
             wetLayerId: s.activeLayerId,
             includeVideo: false,         // D1: pen has no <video> element
-            eraserOverlay: s.eraserOverlay
+            eraserOverlay: s.eraserOverlay,
+            focusLayerIds: this._focusOpts()
           }, {
             layerAncestors: layer => this._layerAncestors(layer)
           });

@@ -746,8 +746,26 @@
       const clearMarks = () => {
         const parent = row.parentNode;
         if (!parent) return;
-        parent.querySelectorAll('.' + cls + '.drop-above, .' + cls + '.drop-below')
-          .forEach(n => { n.classList.remove('drop-above'); n.classList.remove('drop-below'); });
+        parent.querySelectorAll('.' + cls + '.drop-above, .' + cls + '.drop-below, .' + cls + '.drop-into')
+          .forEach(n => {
+            n.classList.remove('drop-above');
+            n.classList.remove('drop-below');
+            n.classList.remove('drop-into');
+          });
+      };
+      // Three-zone hit test for group rows so dropping ONTO a folder (middle
+      // band) joins it as a child; the top + bottom slivers are still
+      // sibling-above / sibling-below targets. Leaf rows keep the original
+      // two-zone behaviour.
+      const hitZone = (e) => {
+        const r = row.getBoundingClientRect();
+        const t = (e.clientY - r.top) / r.height;
+        if (layer.type === 'group') {
+          if (t < 0.25) return 'above';
+          if (t > 0.75) return 'below';
+          return 'into';
+        }
+        return t < 0.5 ? 'above' : 'below';
       };
       row.addEventListener('dragstart', e => {
         e.dataTransfer.effectAllowed = 'move';
@@ -761,16 +779,16 @@
       row.addEventListener('dragover', e => {
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
-        const r = row.getBoundingClientRect();
-        const above = e.clientY < r.top + r.height / 2;
+        const zone = hitZone(e);
         clearMarks();
-        row.classList.add(above ? 'drop-above' : 'drop-below');
+        row.classList.add('drop-' + zone);
       });
       row.addEventListener('dragleave', e => {
         // only clear if leaving the row itself (not into a child)
         if (e.relatedTarget && row.contains(e.relatedTarget)) return;
         row.classList.remove('drop-above');
         row.classList.remove('drop-below');
+        row.classList.remove('drop-into');
       });
       row.addEventListener('drop', e => {
         e.preventDefault();
@@ -780,8 +798,9 @@
         const L = a.project.layers;
         const src = L.find(l => l.id === srcId);
         if (!src) return;
-        const r = row.getBoundingClientRect();
-        const above = e.clientY < r.top + r.height / 2;
+        const zone = hitZone(e);
+        const above = zone === 'above';
+        const into = zone === 'into';
         // If the dragged source is part of a >1 multi-selection, move all
         // selected layers together preserving their relative order. Otherwise
         // fall back to the single-layer drag behaviour. Dragging a group
@@ -799,15 +818,19 @@
         if (multi.length === 1 && src === layer) return;
         let tgtIdx = L.indexOf(layer);
         if (tgtIdx < 0) return;
-        // "above" visually -> higher index in L (top = front-most)
+        // "above" visually -> higher index in L (top = front-most). "into"
+        // and "below" both insert AT tgtIdx — because children of a folder
+        // live at lower L indices than the group header, inserting at the
+        // header's index puts the dropped layer immediately under the
+        // header in L, which renders as the folder's first visible child.
         let insert = above ? tgtIdx + 1 : tgtIdx;
-        // Reparent rule (matches timeline DnD):
-        //   • drop above any row → sibling of target (target.parentId)
-        //   • drop below a leaf  → sibling of target (target.parentId)
-        //   • drop below a group header → join that group (target.id)
+        // Reparent rule:
+        //   • drop above any row     → sibling of target (target.parentId)
+        //   • drop below a leaf      → sibling of target (target.parentId)
+        //   • drop into / below group→ join that group   (target.id)
         // Only top-level members of the moved block reparent; descendants
         // of a moved group keep their existing parent.
-        const newParentId = (!above && layer.type === 'group')
+        const newParentId = ((into || (!above && layer.type === 'group')))
           ? layer.id
           : (layer.parentId || null);
         const movingIds = new Set(multi.map(l => l.id));
@@ -1232,8 +1255,11 @@
       const sb = document.getElementById('statusbar');
       sb.innerHTML = '';
       this.msgEl = el('div', { class: 'st-msg', text: 'Ready' });
-      this.coordEl = el('div', {}, ['0, 0']);
-      this.zoomStat = el('div', {}, ['100%']);
+      // Inline spans (not divs) so "Pos: 0, 0" stays on a single line —
+      // a block-inside-block was wrapping the value to its own line and
+      // looking visually squashed in the 22px-tall statusbar.
+      this.coordEl = el('span', {}, ['0, 0']);
+      this.zoomStat = el('span', {}, ['100%']);
       this.projEl = el('div', {});
       sb.appendChild(this.msgEl);
       sb.appendChild(el('div', {}, ['Pos: ', this.coordEl]));

@@ -54,6 +54,16 @@
     const wetLayerId = opts.wetLayerId;
     const includeVideo = opts.includeVideo !== false;
     const includeLassoHidden = !!opts.includeLassoHidden;
+    // Focus-layer preview: when `focusLayerIds` is a non-empty Set, every
+    // layer NOT in the set renders at `focusDim` × its real opacity. The
+    // dim is a render-time multiplier only — layer.opacity in the project
+    // is never mutated. Exports / playback skip this by not passing the
+    // option. 0.3 matches typical animation "light table" mode — clearly
+    // ghosted so the artist can tell at a glance which layer they're
+    // editing, but still readable enough to keep as visual context.
+    const focusSet = opts.focusLayerIds || null;
+    const focusDim = typeof opts.focusDim === 'number' ? opts.focusDim : 0.3;
+    const focusActive = !!(focusSet && focusSet.size);
 
     if (opts.bg !== false) {
       ctx.fillStyle = project.bg;
@@ -66,6 +76,18 @@
     const worldOpacity = (layer) => {
       let op = layer.opacity == null ? 1 : layer.opacity;
       for (const a of layerAncestors(layer)) op *= (a.opacity == null ? 1 : a.opacity);
+      // Focus preview dim. A layer counts as in-focus when it OR any of
+      // its ancestor folders is in the focus set — keeps a group active
+      // when the user selects a child layer.
+      if (focusActive) {
+        let inFocus = focusSet.has(layer.id);
+        if (!inFocus) {
+          for (const a of layerAncestors(layer)) {
+            if (focusSet.has(a.id)) { inFocus = true; break; }
+          }
+        }
+        if (!inFocus) op *= focusDim;
+      }
       return op;
     };
     const ancestorVisible = (layer) => {
@@ -107,6 +129,15 @@
         && opts.eraserOverlay.samples && opts.eraserOverlay.samples.length > 0
         && layer.id === opts.eraserOverlay.layerId;
       const celMarks = cel.eraserMarks && cel.eraserMarks.length ? cel.eraserMarks : null;
+      // When the layer's effective opacity is < 1 (focus-preview dim, or a
+      // user-set layer opacity) we must route through the temp-canvas path
+      // even with no eraser data. The direct-stamp brush renderer in
+      // vector.js stamps overlapping circles using `ctx.fill()`, and each
+      // stamp picks up `globalAlpha` independently — so 100s of overlaps at
+      // alpha 0.3 still accumulate to nearly opaque. Rendering strokes to
+      // the temp at alpha 1 and blitting once with the dim alpha gives the
+      // uniform layer fade the artist actually wants.
+      const dimComposite = ctx.globalAlpha < 0.999;
 
       // Vector cels: re-render strokes directly so linework stays crisp at
       // any zoom. Skip if the cel is mid-live-stroke (raster cache owns
@@ -115,7 +146,7 @@
       if (cel.kind === 'vector' && cel.strokes && OT.Vector
           && !opts.useRaster && !cel._liveDrawing) {
         const V = OT.Vector;
-        if (liveOverlay || celMarks) {
+        if (liveOverlay || celMarks || dimComposite) {
           // Temp-canvas path for destination-out punches. Used whenever the
           // cel carries permanent non-destructive eraser marks OR a live
           // eraser drag is feeding overlay samples for this layer (pen

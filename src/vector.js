@@ -63,6 +63,18 @@
   }
 
   // Sample a smooth Catmull-Rom path through control points.
+  //
+  // Step density controls how visibly angular slow direction-changes
+  // look on screen. Slow careful strokes produce control points 1–8 px
+  // apart; old min=2 + density d/4 collapsed close segments to 2
+  // samples — essentially a polyline through the control points, which
+  // showed as a hard corner anywhere the artist changed direction
+  // between two nearby control points. Min=8 + density d/2 guarantees
+  // a meaningfully dense sample set even on slow strokes, which is
+  // what both the brush stamp loop and the pencil pathThrough need to
+  // render a curve as a curve rather than a polygon. Cost is neutral
+  // — stampPolyline still emits the same total number of dabs because
+  // its spacing is per-pixel-distance.
   function smoothPath(pts, closed) {
     if (!pts || !pts.length) return [];
     if (pts.length < 3)
@@ -74,7 +86,7 @@
       const p0 = src[Math.max(0, i - 1)], p1 = src[i];
       const p2 = src[i + 1], p3 = src[Math.min(n - 1, i + 2)];
       const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-      const steps = Math.max(2, Math.min(40, Math.ceil(d / 4)));
+      const steps = Math.max(8, Math.min(48, Math.ceil(d / 2)));
       for (let s = 0; s < steps; s++) out.push(catmull(p0, p1, p2, p3, s / steps));
     }
     const last = src[n - 1];
@@ -90,10 +102,37 @@
   }
 
   /* ----------------------------- rendering ----------------------------- */
-  function pathThrough(ctx, pts, closed) {
+  // Trace `pts` onto ctx. For smooth strokes the path is built from
+  // midpoint-quadratic curves — each interior control point becomes the
+  // bezier handle of a quadratic going from one midpoint to the next.
+  // The resulting path is C1 continuous so direction changes render as
+  // smooth bends rather than visible corners. `sharp` flips back to
+  // plain lineTo so shape-snap primitives keep their crisp vertices.
+  //
+  // Terminal segment: the path is closed off with a lineTo to the last
+  // control point. (A terminal quadCurveTo with `prev` as control would
+  // hook backwards because `prev` sits behind the path's current
+  // position — that was the actual bug in my first attempt.)
+  function pathThrough(ctx, pts, closed, sharp) {
     ctx.beginPath();
+    if (!pts || pts.length === 0) return;
     ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    if (pts.length === 1) return;
+    if (sharp || pts.length === 2) {
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    } else {
+      for (let i = 1; i < pts.length - 1; i++) {
+        const mx = (pts[i].x + pts[i + 1].x) / 2;
+        const my = (pts[i].y + pts[i + 1].y) / 2;
+        ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+      }
+      // Close with a straight segment from the last midpoint to the
+      // final control point. Visually invisible against the dense
+      // surrounding samples and avoids the backward-hook a terminal
+      // quadCurveTo would create.
+      const last = pts[pts.length - 1];
+      ctx.lineTo(last.x, last.y);
+    }
     if (closed) ctx.closePath();
   }
 
@@ -206,7 +245,7 @@
       if (pts.length === 1) {
         ctx.fillStyle = st.color;
         ctx.beginPath(); ctx.arc(pts[0].x, pts[0].y, st.width / 2, 0, 7); ctx.fill();
-      } else { pathThrough(ctx, pts, st.closed); ctx.stroke(); }
+      } else { pathThrough(ctx, pts, st.closed, st.sharp); ctx.stroke(); }
       ctx.restore();
       return;
     }
@@ -552,7 +591,7 @@
         mx.lineJoin = 'round'; mx.lineCap = 'round';
         if (pts.length === 1) {
           mx.beginPath(); mx.arc(pts[0].x, pts[0].y, (st.width + gap * 2) / 2, 0, 7); mx.fill();
-        } else { pathThrough(mx, pts, st.closed); mx.stroke(); }
+        } else { pathThrough(mx, pts, st.closed, st.sharp); mx.stroke(); }
       } else {
         stampPolyline(mx, pts, p => st.width / 2 * (p.p == null ? 1 : p.p) + gap);
       }

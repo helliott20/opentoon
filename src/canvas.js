@@ -233,6 +233,28 @@
       ctx.globalAlpha = 1;
     }
 
+    // Build the focus-layer set for the current frame. The active layer
+    // PLUS every layer in the multi-selection counts as focused; every
+    // other drawable layer gets dimmed at composite time. Returns the
+    // bare set in an opts object (or {} to skip). The dim is a preview
+    // only — layer.opacity is never mutated.
+    _focusComposite() {
+      const a = this.app;
+      if (!a) return {};
+      if (a.playback && a.playback.playing) return {};
+      // Skip when there's effectively nothing to compare against.
+      const drawables = (a.project && a.project.layers) ? a.project.layers
+        .filter(l => l.type === 'drawing' || l.type === 'vector').length : 0;
+      if (drawables < 2) return {};
+      const ids = new Set();
+      const active = a.activeLayer && a.activeLayer();
+      if (active) ids.add(active.id);
+      if (a.selectedLayers && a.selectedLayers.size) {
+        for (const l of a.selectedLayers) if (l && l.id) ids.add(l.id);
+      }
+      if (!ids.size) return {};
+      return { focusLayerIds: ids };
+    }
     /* ---------------- render ---------------- */
     render() {
       const ctx = this.ctx, p = this.app.project;
@@ -250,7 +272,11 @@
       ctx.restore();
 
       this._drawOnion(ctx);
-      this.compositeStage(this.app.frame, ctx, { bg: false });
+      // Focus-layer preview: dim layers outside the current selection so
+      // the artist can see which layer they're working on. Skip during
+      // playback (would flicker) and when only one drawable layer exists.
+      const focusOpts = this._focusComposite();
+      this.compositeStage(this.app.frame, ctx, Object.assign({ bg: false }, focusOpts));
 
       // active tool may draw on the cel directly; nothing else here
       this.renderOverlay();

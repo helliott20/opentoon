@@ -825,7 +825,85 @@
       tl.selectedRuns = [];
       this.ui.status('Cleared ' + totalFrames + ' frame' + (totalFrames === 1 ? '' : 's'));
     }
+    // Snapshot the current timeline/layer selection into a fragment array.
+    // Each fragment carries the SOURCE LAYER'S id (not a relative offset)
+    // so paste can put it back on the same layer regardless of which
+    // layer is currently active — relative-index mapping kept skipping
+    // fragments whenever the artist pasted with the topmost selected
+    // layer as active, because the offsets would walk off the end of the
+    // layer list. We still record a frameOffset (relative to the earliest
+    // start) so multi-frame paste keeps its rhythm anchored at playhead.
+    //
+    // Two selection sources are considered, in priority order:
+    //   1. timeline.selectedRuns — explicit frame fragments
+    //   2. app.selectedLayers (>1) — fall back to "current frame on each
+    //      selected drawable layer", so shift-clicking layer names then
+    //      Ctrl+C does what an artist expects.
+    _grabCelForClipboard(cel) {
+      let strokes = null, canvas = null;
+      if (cel.kind === 'vector' && cel.strokes) {
+        strokes = JSON.parse(JSON.stringify(cel.strokes));
+      }
+      if (cel.canvas) {
+        canvas = document.createElement('canvas');
+        canvas.width = cel.w; canvas.height = cel.h;
+        canvas.getContext('2d').drawImage(cel.canvas, 0, 0);
+      }
+      return { strokes, canvas };
+    }
+    _captureSelectionForClipboard() {
+      const tl = this.timeline;
+      const runs = tl && tl.selectedRuns && tl.selectedRuns.length
+        ? tl.selectedRuns.slice() : null;
+      const fragments = [];
+      if (runs && runs.length) {
+        let minStart = Infinity;
+        for (const r of runs) if (r.start < minStart) minStart = r.start;
+        for (const r of runs) {
+          const cel = r.layer.cels ? r.layer.cels[r.num] : null;
+          if (!cel) continue;
+          const { strokes, canvas } = this._grabCelForClipboard(cel);
+          fragments.push({
+            kind: cel.kind,
+            layerId: r.layer.id,
+            frameOffset: r.start - minStart,
+            length: r.end - r.start + 1,
+            strokes, canvas
+          });
+        }
+        return fragments.length ? { multi: true, fragments } : null;
+      }
+      // Fallback: multi-layer selection but no explicit frame run picked.
+      const sel = this.selectedLayers;
+      if (sel && sel.size > 1) {
+        const f = this.frame;
+        for (const layer of this.project.layers) {
+          if (!sel.has(layer)) continue;
+          if (layer.type !== 'drawing' && layer.type !== 'vector') continue;
+          const num = layer.exposure[f] || 0;
+          const cel = num ? layer.cels[num] : null;
+          if (!cel) continue;
+          const { strokes, canvas } = this._grabCelForClipboard(cel);
+          fragments.push({
+            kind: cel.kind,
+            layerId: layer.id,
+            frameOffset: 0,
+            length: 1,
+            strokes, canvas
+          });
+        }
+        return fragments.length > 1 ? { multi: true, fragments } : null;
+      }
+      return null;
+    }
     copyDrawing() {
+      const multi = this._captureSelectionForClipboard();
+      if (multi) {
+        this.celClipboard = multi;
+        const total = multi.fragments.reduce((n, f) => n + f.length, 0);
+        this.ui.status('Copied ' + total + ' frame' + (total === 1 ? '' : 's'));
+        return;
+      }
       const l = this._dl(); if (!l) return;
       const cel = l.celAt(this.frame);
       if (!cel) { this.ui.status('No drawing on this frame to copy'); return; }
@@ -840,15 +918,64 @@
       this.ui.status('Drawing copied');
     }
     cutDrawing() {
+      const multi = this._captureSelectionForClipboard();
+      if (multi) {
+        this.celClipboard = multi;
+        const total = multi.fragments.reduce((n, f) => n + f.length, 0);
+        this.clearSelectedRuns();
+        this.ui.status('Cut ' + total + ' frame' + (total === 1 ? '' : 's'));
+        return;
+      }
       const l = this._dl(); if (!l) return;
       if (!l.exposure[this.frame]) { this.ui.status('No drawing to cut'); return; }
       this.copyDrawing();
       this.doStruct('Cut drawing', () => { l.exposure[this.frame] = 0; });
     }
     pasteDrawing() {
-      const l = this._dl(); if (!l) return;
       const clip = this.celClipboard;
       if (!clip) { this.ui.status('Clipboard is empty'); return; }
+      if (clip.multi) {
+        const layers = this.project.layers;
+        const layerById = (id) => layers.find(l => l.id === id) || null;
+        const baseFrame = this.frame;
+        const totalFrames = clip.fragments.reduce((n, f) => n + f.length, 0);
+        // Single-fragment clipboards retarget to the active layer so that
+        // the existing "copy one frame, switch layer, paste" muscle memory
+        // still works. Multi-fragment clipboards put each fragment back on
+        // its source layer (by id).
+        const singleFragmentRedirect = clip.fragments.length === 1
+          ? (this._dl() || (this.activeLayer && this.activeLayer()))
+          : null;
+        let pastedFrames = 0, skippedFragments = 0;
+        this.doStruct('Paste ' + totalFrames + ' frame'
+          + (totalFrames === 1 ? '' : 's'), () => {
+          for (const f of clip.fragments) {
+            let tgt = singleFragmentRedirect || layerById(f.layerId);
+            if (!tgt || (tgt.type !== 'drawing' && tgt.type !== 'vector')) { skippedFragments++; continue; }
+            if (tgt.type === 'vector' && !f.strokes) { skippedFragments++; continue; }
+            if (tgt.type === 'drawing' && !f.canvas) { skippedFragments++; continue; }
+            const n = tgt.nextNum++;
+            const kind = tgt.type === 'vector' ? 'vector' : 'raster';
+            const c = new OT.Cel(n, this.project.width, this.project.height, kind);
+            if (kind === 'vector') {
+              c.strokes = JSON.parse(JSON.stringify(f.strokes));
+              c.rebuild();
+            } else c.ctx.drawImage(f.canvas, 0, 0);
+            c.dirty();
+            tgt.cels[n] = c;
+            const startF = baseFrame + f.frameOffset;
+            for (let k = 0; k < f.length; k++) {
+              const fr = startF + k;
+              if (fr >= 0 && fr < this.project.frameCount) tgt.exposure[fr] = n;
+            }
+            pastedFrames += f.length;
+          }
+        });
+        this.ui.status('Pasted ' + pastedFrames + ' frame' + (pastedFrames === 1 ? '' : 's')
+          + (skippedFragments ? ' (' + skippedFragments + ' missing layer)' : ''));
+        return;
+      }
+      const l = this._dl(); if (!l) return;
       if (l.type === 'vector' && !clip.strokes) {
         this.ui.status('Cannot paste a bitmap drawing onto a vector layer'); return;
       }

@@ -453,35 +453,44 @@
           // from the right). Now scales with cellW so the inner hit zone
           // is a small fraction of a single cell; the outer extension keeps
           // it reachable when cells are very narrow.
-          const edge = (run.end + 1) * this.cellW;
+          const edgeRight = (run.end + 1) * this.cellW;
+          const edgeLeft = run.start * this.cellW;
           const handleIn = Math.min(6, Math.max(2, this.cellW * 0.25));
           const handleOut = 4;
-          // Snapshot per-layer baselines for every selected run so we can
-          // apply the same delta to all of them in _applyMultiDrag.
-          // Per-cell test: only treat as multi-drag when the click landed
-          // inside an actually-highlighted cell. Clicking the unselected
-          // part of a held run replaced the selection above, so the new
-          // single-run entry passes this test and the whole run drags.
           const draggedSelected = !!this._cellInSelection(layer, f);
-          // Resize is a single-run gesture. When the user has a real
-          // multi-selection (more than one fragment) and clicks any
-          // selected run, drag should MOVE the whole set — not resize
-          // one of them while the rest stay put. Suppress resize mode
-          // in that case. Matches Photoshop / spreadsheet behaviour.
-          const hasMulti = draggedSelected && this.selectedRuns.length > 1;
-          const isResize = !hasMulti
-            && (x > edge - handleIn && x < edge + handleOut);
+          // Two resize edges: trailing edge of the run extends/shrinks the
+          // end; leading edge does the same to the start. Either edge in a
+          // multi-selection applies the delta to every selected run from
+          // its respective edge. The right edge takes priority when a
+          // single-cell run makes both hit zones overlap.
+          const isResizeEnd = (x > edgeRight - handleIn && x < edgeRight + handleOut);
+          const isResizeStart = !isResizeEnd
+            && (x >= edgeLeft - handleOut && x < edgeLeft + handleIn);
+          const mode = isResizeEnd ? 'resize-end'
+            : isResizeStart ? 'resize-start'
+            : 'move';
           const bases = new Map();
           if (draggedSelected) {
             for (const sr of this.selectedRuns) {
               if (!bases.has(sr.layer)) bases.set(sr.layer, sr.layer.exposure.slice());
             }
           }
+          // Snapshot the selection ranges at pointerdown so the render
+          // path can paint the highlight at the run's CURRENT position
+          // throughout the drag — without this, selectedRuns kept the
+          // pre-drag start/end values and the coral marquee stayed
+          // pinned to the original cells while the actual frames slid
+          // away beneath it.
+          const selBase = draggedSelected
+            ? this.selectedRuns.map(sr => ({
+                layer: sr.layer, num: sr.num, start: sr.start, end: sr.end
+              }))
+            : [];
           this._celDrag = {
             layer: layer, num: run.num, runStart: run.start, runEnd: run.end,
-            startFrame: f, mode: isResize ? 'resize' : 'move',
+            startFrame: f, mode: mode,
             base: layer.exposure.slice(), before: app._structSnapshot(), moved: false,
-            multi: draggedSelected, bases: bases
+            multi: draggedSelected, bases: bases, selBase: selBase
           };
           app.setFrame(f);
         } else {
@@ -524,16 +533,12 @@
               const f = frameAt(x);
               const run = this._runAt(layer, f);
               if (run) {
-                const edge = (run.end + 1) * this.cellW;
+                const edgeRight = (run.end + 1) * this.cellW;
+                const edgeLeft = run.start * this.cellW;
                 const handleIn = Math.min(6, Math.max(2, this.cellW * 0.25));
                 const handleOut = 4;
-                // Match the pointerdown gate: when this cell is part of
-                // a real multi-selection, edge-hover shows the move
-                // cursor instead of resize — resize is suppressed in
-                // multi-drag.
-                const cellSel = this._cellInSelection(layer, f);
-                const multiActive = cellSel && this.selectedRuns.length > 1;
-                if (!multiActive && x > edge - handleIn && x < edge + handleOut) cur = 'ew-resize';
+                if (x > edgeRight - handleIn && x < edgeRight + handleOut) cur = 'ew-resize';
+                else if (x >= edgeLeft - handleOut && x < edgeLeft + handleIn) cur = 'ew-resize';
                 else cur = 'grab';
               }
             }
@@ -541,9 +546,12 @@
           g.style.cursor = cur;
         }
       });
-      // Ctrl + wheel zooms the timeline horizontally, centred on the cursor.
-      // Plain wheel falls through to the browser's native scroll on .tl-grid-wrap.
-      g.addEventListener('wheel', e => {
+      // Ctrl + wheel zooms the timeline horizontally, centred on the
+      // cursor. Bound to gridWrap (the scroll container) rather than the
+      // canvas so the artist can still zoom while their cursor hovers in
+      // the empty area below the rendered rows. Plain wheel falls through
+      // to the browser's native scroll on .tl-grid-wrap.
+      this.gridWrap.addEventListener('wheel', e => {
         if (!(e.ctrlKey || e.metaKey)) return;
         e.preventDefault();
         const r = g.getBoundingClientRect();
@@ -620,68 +628,72 @@
       const delta = curFrame - d.startFrame;
       const exp = d.base.slice();
       const len = d.runEnd - d.runStart;
+      // Clear the run's original cells once — both resize modes and move
+      // need a clean baseline before stamping the new range.
+      for (let f = d.runStart; f <= d.runEnd; f++) if (exp[f] === d.num) exp[f] = 0;
+      let ns = d.runStart, ne = d.runEnd;
       if (d.mode === 'move') {
-        const ns = Math.max(0, d.runStart + delta), ne = ns + len;
-        for (let f = d.runStart; f <= d.runEnd; f++) if (exp[f] === d.num) exp[f] = 0;
-        if (ne >= p.frameCount) p.frameCount = ne + 1;
-        for (let f = ns; f <= ne; f++) exp[f] = d.num;
-      } else {
-        const ne = Math.max(d.runStart, d.runEnd + delta);
-        if (ne >= p.frameCount) p.frameCount = ne + 1;
-        for (let f = d.runStart; f <= ne; f++) exp[f] = d.num;
-        for (let f = ne + 1; f <= d.runEnd; f++) if (exp[f] === d.num) exp[f] = 0;
+        ns = Math.max(0, d.runStart + delta);
+        ne = ns + len;
+      } else if (d.mode === 'resize-end') {
+        ne = Math.max(d.runStart, d.runEnd + delta);
+      } else {  // resize-start
+        ns = Math.min(d.runEnd, Math.max(0, d.runStart + delta));
       }
+      if (ne >= p.frameCount) p.frameCount = ne + 1;
+      for (let f = ns; f <= ne; f++) exp[f] = d.num;
       d.layer.exposure = exp;
       if (delta !== 0) d.moved = true;
       app.emit('render');
       this.render();
     }
 
-    // Apply the same frame-delta to every run in selectedRuns. Each layer's
-    // baseline exposure was snapshotted at pointerdown so we can re-derive
-    // the result on every move without compounding offsets.
+    // Apply the same frame-delta to every run in d.selBase (the snapshot
+    // of selectedRuns taken at pointerdown). All deltas are computed
+    // against the baseline — the live selectedRuns array is rebuilt each
+    // call so the coral selection-highlight tracks the moved/resized
+    // frames in real time rather than staying pinned to where the user
+    // first clicked.
     _applyMultiDrag(delta) {
       const d = this._celDrag, app = this.app, p = app.project;
-      // start every affected layer from its baseline, clearing runs we own
       const working = new Map();
       d.bases.forEach((base, layer) => working.set(layer, base.slice()));
-      // clear the original positions of every selected run on its baseline
-      for (const sr of this.selectedRuns) {
+      // 1. Clear every selected run's original cells on the working buffer.
+      for (const sr of d.selBase) {
         const exp = working.get(sr.layer);
         if (!exp) continue;
         for (let f = sr.start; f <= sr.end; f++) {
           if ((d.bases.get(sr.layer)[f] || 0) === sr.num) exp[f] = 0;
         }
       }
-      // now stamp each run at its new position. Resize mode extends only the
-      // dragged run's end; move mode shifts all selected runs by delta.
-      if (d.mode === 'resize') {
-        // resize behaves the same as single drag -- only the dragged run is
-        // resized, other selected runs are left in place
-        for (const sr of this.selectedRuns) {
-          const exp = working.get(sr.layer);
-          if (!exp) continue;
-          if (sr.layer === d.layer && sr.num === d.num &&
-              sr.start === d.runStart && sr.end === d.runEnd) {
-            const ne = Math.max(sr.start, sr.end + delta);
-            if (ne >= p.frameCount) p.frameCount = ne + 1;
-            for (let f = sr.start; f <= ne; f++) exp[f] = sr.num;
-          } else {
-            for (let f = sr.start; f <= sr.end; f++) exp[f] = sr.num;
-          }
-        }
-      } else {
-        for (const sr of this.selectedRuns) {
-          const exp = working.get(sr.layer);
-          if (!exp) continue;
+      // 2. Compute each run's new range (preserved in the original order
+      //    so the live selectedRuns indices stay stable).
+      const newSel = d.selBase.map(sr => {
+        let ns = sr.start, ne = sr.end;
+        if (d.mode === 'resize-end') {
+          ne = Math.max(sr.start, sr.end + delta);
+        } else if (d.mode === 'resize-start') {
+          ns = Math.min(sr.end, Math.max(0, sr.start + delta));
+        } else {
           const len = sr.end - sr.start;
-          const ns = Math.max(0, sr.start + delta), ne = ns + len;
-          if (ne >= p.frameCount) p.frameCount = ne + 1;
-          for (let f = ns; f <= ne; f++) exp[f] = sr.num;
+          ns = Math.max(0, sr.start + delta);
+          ne = ns + len;
         }
+        if (ne >= p.frameCount) p.frameCount = ne + 1;
+        return { layer: sr.layer, num: sr.num, start: ns, end: ne };
+      });
+      // 3. Stamp in start-order so a same-layer overlap resolves with
+      //    the later run "on top" (matches the visual stacking order
+      //    the user is dragging from).
+      const stampOrder = newSel.slice().sort((a, b) => a.start - b.start);
+      for (const sr of stampOrder) {
+        const exp = working.get(sr.layer);
+        if (!exp) continue;
+        for (let f = sr.start; f <= sr.end; f++) exp[f] = sr.num;
       }
-      // commit working buffers back onto the layers
       working.forEach((exp, layer) => { layer.exposure = exp; });
+      // 4. Update the live selection so the highlight rides along.
+      this.selectedRuns = newSel;
       if (delta !== 0) d.moved = true;
       app.emit('render');
       this.render();
@@ -1026,8 +1038,25 @@
       const clearMarks = () => {
         const parent = row.parentNode;
         if (!parent) return;
-        parent.querySelectorAll('.' + cls + '.drop-above, .' + cls + '.drop-below')
-          .forEach(n => { n.classList.remove('drop-above'); n.classList.remove('drop-below'); });
+        parent.querySelectorAll('.' + cls + '.drop-above, .' + cls + '.drop-below, .' + cls + '.drop-into')
+          .forEach(n => {
+            n.classList.remove('drop-above');
+            n.classList.remove('drop-below');
+            n.classList.remove('drop-into');
+          });
+      };
+      // Three-zone hit test: dropping onto the middle of a group row joins
+      // it as a child; top/bottom slivers remain sibling targets. Leaf rows
+      // keep the original two-zone split.
+      const hitZone = (e) => {
+        const r = row.getBoundingClientRect();
+        const t = (e.clientY - r.top) / r.height;
+        if (layer.type === 'group') {
+          if (t < 0.25) return 'above';
+          if (t > 0.75) return 'below';
+          return 'into';
+        }
+        return t < 0.5 ? 'above' : 'below';
       };
       row.addEventListener('dragstart', e => {
         e.dataTransfer.effectAllowed = 'move';
@@ -1066,15 +1095,15 @@
       row.addEventListener('dragover', e => {
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
-        const r = row.getBoundingClientRect();
-        const above = e.clientY < r.top + r.height / 2;
+        const zone = hitZone(e);
         clearMarks();
-        row.classList.add(above ? 'drop-above' : 'drop-below');
+        row.classList.add('drop-' + zone);
       });
       row.addEventListener('dragleave', e => {
         if (e.relatedTarget && row.contains(e.relatedTarget)) return;
         row.classList.remove('drop-above');
         row.classList.remove('drop-below');
+        row.classList.remove('drop-into');
       });
       row.addEventListener('drop', e => {
         e.preventDefault();
@@ -1084,8 +1113,9 @@
         const L = app.project.layers;
         const src = L.find(l => l.id === srcId);
         if (!src) return;
-        const r = row.getBoundingClientRect();
-        const above = e.clientY < r.top + r.height / 2;
+        const zone = hitZone(e);
+        const above = zone === 'above';
+        const into = zone === 'into';
         // Block we're moving:
         //   • if the source is part of a >1 multi-selection, every selected
         //     layer comes along (preserves relative project order);
@@ -1104,6 +1134,10 @@
         const srcIdx = L.indexOf(src);
         let tgtIdx = L.indexOf(layer);
         if (srcIdx < 0 || tgtIdx < 0) return;
+        // "above" → higher index in L (visually above target). "into" and
+        // "below" both insert AT tgtIdx — the folder's children live at
+        // lower L indices than the header, so this becomes the folder's
+        // first visible child after the reparent below.
         let insert = above ? tgtIdx + 1 : tgtIdx;
         const blockIdxs = block.map(l => L.indexOf(l)).filter(i => i >= 0).sort((a, b) => a - b);
         // Account for block members removed from positions before `insert`.
@@ -1112,10 +1146,10 @@
         if (insert < 0) insert = 0;
         // Reparent the dragged top-level layers (those in the block whose
         // own parent isn't also in the block). Rule:
-        //   • drop above a row → become its sibling (target.parentId)
-        //   • drop below a leaf → become its sibling (target.parentId)
-        //   • drop below a folder header → join that folder (target.id)
-        const newParentId = (!above && layer.type === 'group')
+        //   • drop above a row        → become its sibling (target.parentId)
+        //   • drop below a leaf       → become its sibling (target.parentId)
+        //   • drop into / below group → join that folder    (target.id)
+        const newParentId = ((into || (!above && layer.type === 'group')))
           ? layer.id
           : (layer.parentId || null);
         const movingIds = new Set(block.map(l => l.id));
@@ -1165,10 +1199,47 @@
       c.setTransform(dpr, 0, 0, dpr, 0, 0);
       c.clearRect(0, 0, w, h);
 
-      // current frame column
+      // No full-height playhead column tint. A blue wash across the whole
+      // current column competes with the cel-run fills (also blue), the
+      // coral selection highlight, and the row stripe — every NLE
+      // (DaVinci, AE, Toon Boom, Premiere) trusts the playhead LINE plus
+      // a header marker to carry the information. The line + wedge below
+      // are enough; emptiness here is the design.
       const cf = app.frame;
-      c.fillStyle = '#4a9fd422';
-      c.fillRect(cf * cw, 0, cw, h);
+      // Alternating row stripe behind the cells. Very subtle — animators
+      // scan timelines by rhythm, and a striped backdrop turns the row
+      // grid from "guess which row" into something you read at a glance
+      // without competing with the cel runs themselves.
+      const audioHeightPx = app.audioPeaks ? 38 : 0;
+      for (let r = 0; r < L.length; r += 2) {
+        c.fillStyle = '#ffffff05';
+        c.fillRect(0, hh + r * rh, w, rh);
+      }
+      // Per-frame vertical gridlines across the row body (faint), plus a
+      // slightly stronger line on every second boundary so the artist can
+      // read the rhythm without having to chase the header tick marks.
+      const rowsBottom = hh + L.length * rh + audioHeightPx;
+      const F = Math.max(1, Math.round(p.fps || 24));
+      // Skip per-cell lines when zoomed out hard — they'd just darken the
+      // background into a haze without any per-frame readability gain.
+      if (cw >= 8) {
+        c.strokeStyle = '#ffffff07'; c.lineWidth = 1;
+        c.beginPath();
+        for (let f = 1; f < p.frameCount; f++) {
+          if (f % F === 0) continue;   // second-boundary drawn separately
+          const x = f * cw + 0.5;
+          c.moveTo(x, hh); c.lineTo(x, rowsBottom);
+        }
+        c.stroke();
+      }
+      // Second-boundary lines (always on).
+      c.strokeStyle = '#ffffff14'; c.lineWidth = 1;
+      c.beginPath();
+      for (let f = F; f < p.frameCount; f += F) {
+        const x = f * cw + 0.5;
+        c.moveTo(x, hh); c.lineTo(x, rowsBottom);
+      }
+      c.stroke();
 
       // header
       c.fillStyle = '#272b32';
@@ -1188,7 +1259,7 @@
       const ticks = this._rulerStrides(cw, p.fps, p.frameCount);
       const labelStride = ticks.label;
       const tickStride  = ticks.tick;
-      const F = Math.max(1, Math.round(p.fps || 24));
+      // `F` (frames per second) was declared earlier for the body gridlines.
 
       c.font = '10px Segoe UI';
       c.textBaseline = 'middle';
@@ -1206,7 +1277,7 @@
           c.moveTo(x + 0.5, hh - (onSecond ? 11 : 7));
           c.lineTo(x + 0.5, hh);
           c.stroke();
-          c.fillStyle = (f === cf) ? '#4a9fd4' : (onSecond ? '#c8ccd3' : '#7a808b');
+          c.fillStyle = (f === cf) ? '#f7f1e5' : (onSecond ? '#c8ccd3' : '#7a808b');
           c.textAlign = 'left';
           c.fillText(String(f + 1), x + 2, hh / 2);
         } else if (onTick) {
@@ -1226,11 +1297,32 @@
         c.beginPath(); c.moveTo(gx, 7); c.lineTo(gx, hh - 7); c.stroke();
       }
 
-      // playhead marker
-      c.fillStyle = '#4a9fd4';
+      // Playhead head — cream filled circle. Cream is the cinematic
+      // "current-time" colour (think 35 mm film leader marks, grease-
+      // pencil edit tape) and crucially it's a VALUE contrast rather
+      // than a hue contrast: an artist can pick any layer.color for
+      // their cels — blue, red, amber, even coral — and the playhead
+      // still reads clearly. Blue collided with the default blue cel
+      // runs; cream sits cleanly outside every other timeline hue.
+      const phX = cf * cw + 0.5;
+      const phR = 4;
+      const phY = hh - phR - 1;
+      c.save();
+      // Warm halo around the head — a soft amber-cream glow that
+      // matches the "film leader" mental model without bleeding into
+      // adjacent cells.
+      c.shadowColor = 'rgba(247,241,229,0.65)';
+      c.shadowBlur = 5;
+      c.fillStyle = '#f7f1e5';
+      c.beginPath(); c.arc(phX, phY, phR, 0, 7); c.fill();
+      c.shadowBlur = 0;
+      // Upper-half gloss for dimensionality.
+      c.fillStyle = 'rgba(255,255,255,0.55)';
       c.beginPath();
-      c.moveTo(cf * cw, hh); c.lineTo(cf * cw + cw, hh);
-      c.lineTo(cf * cw + cw / 2, hh - 6); c.closePath(); c.fill();
+      c.arc(phX, phY - 0.5, phR - 1.5, Math.PI, 0);
+      c.closePath();
+      c.fill();
+      c.restore();
 
       // rows
       for (let r = 0; r < L.length; r++) {
@@ -1305,20 +1397,27 @@
             this._roundRect(c, bx, by, bw, bh, 3);
             c.fill();
           }
-          // start key dot
+          // Keyframe marker for the start of the drawing run. Centred
+          // vertically in the row so it reads as a balanced "key" symbol
+          // rather than floating at the top edge of the bar.
+          const dotX = f * cw + cw / 2, dotY = y + rh / 2;
+          c.fillStyle = isActive ? '#ffffff55' : '#ffffff33';
+          c.beginPath(); c.arc(dotX, dotY, 5, 0, 7); c.fill();
           c.fillStyle = this.showThumbs ? this._alpha(layer.color, 1) : '#fff';
-          c.beginPath();
-          c.arc(f * cw + cw / 2, y + 8, 3, 0, 7);
-          c.fill();
-          // right-edge resize handle -- two short vertical bars on the trailing
-          // edge of the run, signalling "drag me to extend"
+          c.beginPath(); c.arc(dotX, dotY, 3, 0, 7); c.fill();
+          // Resize handles -- two short vertical bars on each edge of the
+          // run, signalling "drag me to extend / shrink". Left edge moves
+          // the run's start, right edge moves the end.
           if (bw > 8) {
-            const hx = bx + bw - 2.5;
             c.strokeStyle = isActive ? '#ffffff80' : '#ffffff44';
             c.lineWidth = 1;
             c.beginPath();
-            c.moveTo(hx, by + 3); c.lineTo(hx, by + bh - 3);
-            c.moveTo(hx + 2, by + 3); c.lineTo(hx + 2, by + bh - 3);
+            const hxR = bx + bw - 2.5;
+            c.moveTo(hxR, by + 3); c.lineTo(hxR, by + bh - 3);
+            c.moveTo(hxR + 2, by + 3); c.lineTo(hxR + 2, by + bh - 3);
+            const hxL = bx + 0.5;
+            c.moveTo(hxL, by + 3); c.lineTo(hxL, by + bh - 3);
+            c.moveTo(hxL + 2, by + 3); c.lineTo(hxL + 2, by + bh - 3);
             c.stroke();
           }
           // drawing number — only annotated when thumbnails are on (then
@@ -1330,35 +1429,45 @@
             c.font = '9px Segoe UI'; c.textAlign = 'left';
             c.fillText(String(num), f * cw + cw / 2 + 5, y + rh / 2);
           }
-          // Multi-selection accent. Shift-range select can produce
-          // selection fragments smaller than the full run — paint the
-          // tinted fill + outline over the intersected cells only.
+          // Multi-selection accent — coral/hot-pink so it can't blend with
+          // the blue cel fills, the amber transform keyframes, or the
+          // playhead. Previously this used the project's blue accent on
+          // top of layers tinted the same blue, which made "selected"
+          // and "unselected" read as the same colour. Hue separation is
+          // the only thing that actually solves contrast on a stack of
+          // identically-tinted clip bars (DaVinci, AE and Blender all do
+          // this — selection gets its own colour outside the clip-fill
+          // palette).
           const inter = this._rangeIntersectsSelection(layer, num, f, e);
           if (inter) {
             const ix = inter.start * cw + 1.5;
             const iw = (inter.end - inter.start + 1) * cw - 3;
             c.save();
-            // 1. Translucent fill so the cells *look* highlighted at a
-            //    glance — was previously just an outline that disappeared
-            //    against dark thumbs.
-            this._roundRect(c, ix, by, iw, bh, 3);
-            c.fillStyle = 'rgba(74,159,212,0.32)';
-            c.fill();
-            // 2. Bright outline. 2.5 px reads at any DPR; the inner shadow
-            //    line adds depth so the marquee pops on light backgrounds.
+            // Outer glow — a wide, soft halo around the selection that
+            // separates it from the row's row-stripe background and any
+            // adjacent runs. This is what makes the selection "lift" off
+            // the timeline at a glance.
+            c.shadowColor = 'rgba(255,92,138,0.55)';
+            c.shadowBlur = 6;
             c.lineWidth = 2.5;
-            c.strokeStyle = '#4a9fd4';
+            c.strokeStyle = '#ff5c8a';
+            this._roundRect(c, ix, by, iw, bh, 3);
             c.stroke();
-            c.lineWidth = 1;
-            c.strokeStyle = 'rgba(255,255,255,0.55)';
-            this._roundRect(c, ix + 1, by + 1, iw - 2, bh - 2, 2.2);
-            c.stroke();
-            // 3. Top + bottom accent bars — wide-edge cue that signals
-            //    "this is a range" even when the cells are too narrow to
-            //    show the outline corners clearly.
-            c.fillStyle = '#4a9fd4';
-            c.fillRect(ix, by, iw, 2);
-            c.fillRect(ix, by + bh - 2, iw, 2);
+            c.shadowBlur = 0;
+            // Fill tint — kept low-alpha so the underlying cel art still
+            // reads (thumbnails / linework / layer colour all still show
+            // through). Coral over a blue base is a chromatic contrast,
+            // not a value contrast, so the underlying bar isn't drowned.
+            c.fillStyle = 'rgba(255,92,138,0.18)';
+            this._roundRect(c, ix, by, iw, bh, 3);
+            c.fill();
+            // Top + bottom edge bars — solid coral, full opacity. When
+            // cells are tiny (zoomed out) the corners of the outline
+            // disappear into noise; these horizontal bars carry the
+            // selection-range information regardless of cell width.
+            c.fillStyle = '#ff5c8a';
+            c.fillRect(ix, by, iw, 2.5);
+            c.fillRect(ix, by + bh - 2.5, iw, 2.5);
             c.restore();
           }
           f = e + 1;
@@ -1398,17 +1507,15 @@
         c.textAlign = 'left'; c.textBaseline = 'middle';
         c.fillText('♪ ' + (app.project.audio ? app.project.audio.name : 'audio'), 5, ay + 9);
       }
-      // body gridlines — same FPS-aware stride as the ruler so the vertical
-      // guides under each row align with labels above.
-      const grid = (tickStride > 0 ? tickStride : labelStride);
-      c.strokeStyle = '#ffffff0a';
-      for (let f = grid; f < p.frameCount; f += grid) {
-        c.beginPath(); c.moveTo(f * cw + 0.5, hh); c.lineTo(f * cw + 0.5, h); c.stroke();
-      }
-      // playhead line
-      c.strokeStyle = '#4a9fd4'; c.lineWidth = 1.5;
+      // body gridlines are now drawn upfront (above) so they sit BEHIND
+      // the cel runs rather than on top, and so the per-frame + per-second
+      // structure matches what artists expect from an X-sheet/dope-sheet.
+      // Playhead line — cream to match the head, so the playhead reads
+      // as one continuous "film leader" element from the header
+      // marker straight down through every row.
+      c.strokeStyle = '#f7f1e5'; c.lineWidth = 1.5;
       c.beginPath();
-      c.moveTo(cf * cw + cw / 2, hh); c.lineTo(cf * cw + cw / 2, h);
+      c.moveTo(cf * cw + 0.5, hh); c.lineTo(cf * cw + 0.5, h);
       c.stroke();
     }
 
