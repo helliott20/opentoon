@@ -415,9 +415,17 @@
           // About to move / resize an exposure run -- stop playback so the
           // edit isn't chased by the playhead.
           if (app.playback && app.playback.playing) app.playback.stop();
+          // Resize handle: a narrow band straddling the run's right edge.
+          // Previously the inside-the-cell portion was a flat 9 px, which
+          // covered ~60% of a 15 px cell — clicking on the right half of a
+          // held run accidentally entered resize mode (shrinking the run
+          // from the right). Now scales with cellW so the inner hit zone
+          // is a small fraction of a single cell; the outer extension keeps
+          // it reachable when cells are very narrow.
           const edge = (run.end + 1) * this.cellW;
-          // a generous 9 px grab zone past the run's right edge -- on a small
-          // cellW the original 5 px was effectively invisible to mouse / pen
+          const handleIn = Math.min(6, Math.max(2, this.cellW * 0.25));
+          const handleOut = 4;
+          const isResize = (x > edge - handleIn && x < edge + handleOut);
           // Snapshot per-layer baselines for every selected run so we can
           // apply the same delta to all of them in _applyMultiDrag.
           // Use overlap (not exact match) so a shift-range fragment of a
@@ -433,7 +441,7 @@
           }
           this._celDrag = {
             layer: layer, num: run.num, runStart: run.start, runEnd: run.end,
-            startFrame: f, mode: (x > edge - 9) ? 'resize' : 'move',
+            startFrame: f, mode: isResize ? 'resize' : 'move',
             base: layer.exposure.slice(), before: app._structSnapshot(), moved: false,
             multi: draggedSelected, bases: bases
           };
@@ -478,7 +486,9 @@
               const run = this._runAt(layer, frameAt(x));
               if (run) {
                 const edge = (run.end + 1) * this.cellW;
-                if (x > edge - 9 && x < edge + 2) cur = 'ew-resize';
+                const handleIn = Math.min(6, Math.max(2, this.cellW * 0.25));
+                const handleOut = 4;
+                if (x > edge - handleIn && x < edge + handleOut) cur = 'ew-resize';
                 else cur = 'grab';
               }
             }
