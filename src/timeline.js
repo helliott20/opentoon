@@ -244,6 +244,54 @@
       this.selectedRuns.splice(i, 1);
       return true;
     }
+    // True if any selected run on this layer overlaps the given frame
+    // range. Used by the renderer to highlight cells covered by a
+    // shift-range selection that doesn't align to the underlying run
+    // boundaries — and by the run-fragment hit test for shift-drag.
+    _rangeIntersectsSelection(layer, num, start, end) {
+      for (const r of this.selectedRuns) {
+        if (r.layer !== layer || r.num !== num) continue;
+        if (r.end < start || r.start > end) continue;
+        return { start: Math.max(r.start, start), end: Math.min(r.end, end) };
+      }
+      return null;
+    }
+    // Replace the multi-selection with the rectangle anchored between
+    // `(aLayer, aFrame)` and `(bLayer, bFrame)`. Walks every layer in
+    // the visible list between the two rows and every frame in the
+    // column range; adds one selection fragment per contiguous run of
+    // the same exposure num on each row. Empty cells (exposure 0) are
+    // skipped — they're not "frames" to copy.
+    _selectRectRange(aLayer, aFrame, bLayer, bFrame) {
+      const visible = this._visibleLayers();
+      const ia = visible.indexOf(aLayer);
+      const ib = visible.indexOf(bLayer);
+      if (ia < 0 || ib < 0) return;
+      const lo = Math.min(ia, ib), hi = Math.max(ia, ib);
+      const f0 = Math.min(aFrame, bFrame), f1 = Math.max(aFrame, bFrame);
+      const sel = [];
+      for (let i = lo; i <= hi; i++) {
+        const layer = visible[i];
+        if (!layer || !layer.exposure) continue;
+        let f = f0;
+        while (f <= f1) {
+          const num = layer.exposure[f] || 0;
+          if (!num) { f++; continue; }
+          let e = f;
+          while (e < f1 && (layer.exposure[e + 1] || 0) === num) e++;
+          sel.push({ layer, num, start: f, end: e });
+          f = e + 1;
+        }
+      }
+      this.selectedRuns = sel;
+    }
+    // The layer rows the timeline is currently rendering, in row order.
+    // Used by rect-select; mirrors app.visibleLayers() when available.
+    _visibleLayers() {
+      const a = this.app;
+      if (a && typeof a.visibleLayers === 'function') return a.visibleLayers();
+      return (a && a.project && a.project.layers) ? a.project.layers.slice() : [];
+    }
 
     _installGridInput() {
       const g = this.grid;
@@ -295,12 +343,20 @@
         const layer = this.rowToLayer(Math.floor((y - this.headerH) / this.rowH));
         const run = layer ? this._runAt(layer, f) : null;
         const ctrl = !!(e.ctrlKey || e.metaKey);
+        const shift = !!e.shiftKey;
         // Multi-select / single-select bookkeeping. selectLayer fires
         // 'layerselect', which would normally clear selectedRuns -- guard
         // with _selBusy so our own click can mutate the set.
         this._selBusy = true;
         if (layer) app.selectLayer(layer);
-        if (run) {
+        if (shift && this._anchorCell && this._anchorCell.layer && layer) {
+          // Range-select rectangle from the anchor to this cell. Works in
+          // any diagonal — top-left↔bottom-right, top-right↔bottom-left.
+          // Spans every layer between (inclusive) and every frame between
+          // (inclusive); empty cells are skipped so the selection contains
+          // only real drawings the artist can copy / delete.
+          this._selectRectRange(this._anchorCell.layer, this._anchorCell.frame, layer, f);
+        } else if (run) {
           if (ctrl) {
             // toggle this run in the multi-selection set
             if (!this._removeFromSelection(layer, run)) {
@@ -317,11 +373,18 @@
           }
           // else: plain click inside an already-selected run -- keep the
           // existing set so the drag moves all of them
+          // Plain / ctrl click on a real cell anchors range-select.
+          this._anchorCell = { layer: layer, frame: f };
         } else if (!ctrl) {
           // plain click on an empty cell clears the multi-selection
           this.selectedRuns = [];
+          if (layer) this._anchorCell = { layer: layer, frame: f };
         }
         this._selBusy = false;
+
+        // Shift+click is purely a selection action — don't enter the
+        // move/resize drag mode the plain-click path below would start.
+        if (shift) { app.setFrame(f); this.render(); return; }
 
         if (run && !layer.locked) {
           // About to move / resize an exposure run -- stop playback so the
@@ -1183,12 +1246,17 @@
             c.font = '9px Segoe UI'; c.textAlign = 'left';
             c.fillText(String(num), f * cw + cw / 2 + 5, y + rh / 2);
           }
-          // multi-selection accent outline
-          if (this._isRunSelected(layer, { num: num, start: f, end: e })) {
+          // Multi-selection accent. Shift-range select can produce
+          // selection fragments smaller than the full run — draw the
+          // outline over the intersected cells only.
+          const inter = this._rangeIntersectsSelection(layer, num, f, e);
+          if (inter) {
+            const ix = inter.start * cw + 1.5;
+            const iw = (inter.end - inter.start + 1) * cw - 3;
             c.save();
             c.strokeStyle = '#4a9fd4';
             c.lineWidth = 2;
-            this._roundRect(c, bx, by, bw, bh, 3);
+            this._roundRect(c, ix, by, iw, bh, 3);
             c.stroke();
             c.restore();
           }
