@@ -610,6 +610,11 @@
         cel.eraserMarks = Array.isArray(celSnap.eraserMarks)
           ? celSnap.eraserMarks.map(m => ({ x: m.x, y: m.y, r: m.r }))
           : [];
+        // Populate cel.canvas so onion / thumbnails / any drawImage path
+        // sees rendered pixels — compositeStage for vector cels re-renders
+        // from cel.strokes directly so it never needed cel.canvas, but
+        // onion-tint needs a real bitmap to recolour through source-in.
+        cel.rebuild();
       }
       // raster cels: D1 keeps the placeholder; D2 wires bmp data
       layer.exposure[frame] = num;
