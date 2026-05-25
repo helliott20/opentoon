@@ -120,6 +120,12 @@
         else for (const l of a.selectedLayers) if (l.type === 'group') { a.ungroupLayer(l); break; }
       } },
     { id: 'clear', label: 'Clear drawing', cat: 'Animation', def: 'delete', prevent: 1, run: a => {
+        // Timeline frame multi-select takes precedence — Del clears every
+        // selected exposure run across every selected layer in one undo.
+        if (a.timeline && a.timeline.selectedRuns && a.timeline.selectedRuns.length) {
+          a.clearSelectedRuns();
+          return;
+        }
         // When multiple layers are selected in the panel, Del deletes them all
         // rather than clearing the current drawing.
         if (a.selectedLayers && a.selectedLayers.size > 1) { a.deleteSelectedLayers(); return; }
@@ -777,6 +783,28 @@
       const l = this._dl(); if (!l) return;
       if (!l.exposure[this.frame]) { this.ui.status('Frame already empty'); return; }
       this.doStruct('Clear exposure', () => { l.exposure[this.frame] = 0; });
+    }
+    // Clear every frame in every currently-selected timeline run. Single
+    // undo entry; matches what users expect when they multi-select frames
+    // and hit Delete. Runs are {layer, start, end} as kept by the timeline.
+    clearSelectedRuns() {
+      const tl = this.timeline;
+      if (!tl || !tl.selectedRuns || !tl.selectedRuns.length) return;
+      const runs = tl.selectedRuns.slice();
+      let totalFrames = 0;
+      const label = runs.length === 1
+        ? 'Clear ' + (runs[0].end - runs[0].start + 1) + ' frames'
+        : 'Clear ' + runs.length + ' runs';
+      this.doStruct(label, () => {
+        for (const r of runs) {
+          if (!r || !r.layer || !r.layer.exposure) continue;
+          for (let f = r.start; f <= r.end; f++) {
+            if (r.layer.exposure[f]) { r.layer.exposure[f] = 0; totalFrames++; }
+          }
+        }
+      });
+      tl.selectedRuns = [];
+      this.ui.status('Cleared ' + totalFrames + ' frame' + (totalFrames === 1 ? '' : 's'));
     }
     copyDrawing() {
       const l = this._dl(); if (!l) return;

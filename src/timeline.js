@@ -118,7 +118,10 @@
       tb.appendChild(this._btn('New drawing on current frame', ICON.newdraw, () => app.newDrawing()));
       tb.appendChild(this._btn('Duplicate drawing', ICON.dup, () => app.duplicateDrawing()));
       tb.appendChild(this._btn('Extend exposure', ICON.extend, () => app.extendExposure()));
-      tb.appendChild(this._btn('Clear exposure (Del frame)', ICON.clearx, () => app.clearExposure()));
+      // "Remove frame" splices the frame column out of every layer (single
+      // current frame). Multi-frame selection delete is handled by the Del
+      // key handler in main.js which clears the selected runs.
+      tb.appendChild(this._btn('Remove frame', ICON.clearx, () => app.removeFrame()));
 
       tb.appendChild(U.el('div', { class: 'tl-sep' }));
       tb.appendChild(this._btn('Add 12 frames', ICON.addframe, () => {
@@ -539,19 +542,32 @@
 
     _context(e) {
       const app = this.app;
+      // If there's an active multi-selection in the timeline, the
+      // "Remove frame" entry deletes those cells in one undo.
+      const hasMulti = this.selectedRuns && this.selectedRuns.length > 0;
+      const removeLabel = hasMulti
+        ? ('Remove ' + this._selectedFrameCount() + ' frames')
+        : 'Remove frame';
+      const removeFn = hasMulti
+        ? () => app.clearSelectedRuns()
+        : () => app.removeFrame();
       app.ui.contextMenu(e.clientX, e.clientY, [
         { label: 'New drawing', fn: () => app.newDrawing() },
         { label: 'Duplicate drawing', fn: () => app.duplicateDrawing() },
         { label: 'Extend exposure', fn: () => app.extendExposure() },
-        { label: 'Clear exposure', fn: () => app.clearExposure() },
         { sep: 1 },
         { label: 'Copy drawing', fn: () => app.copyDrawing() },
         { label: 'Cut drawing', fn: () => app.cutDrawing() },
         { label: 'Paste drawing', fn: () => app.pasteDrawing() },
         { sep: 1 },
         { label: 'Insert frame', fn: () => app.insertFrame() },
-        { label: 'Remove frame', fn: () => app.removeFrame() }
+        { label: removeLabel, fn: removeFn }
       ]);
+    }
+    _selectedFrameCount() {
+      let n = 0;
+      for (const r of (this.selectedRuns || [])) n += (r.end - r.start + 1);
+      return n;
     }
 
     /* ---------------- render ---------------- */
@@ -614,7 +630,14 @@
           row.appendChild(U.el('div', { class: 'tl-chev-spacer' }));
         }
         row.appendChild(U.el('div', { class: 'dot', style: { background: layer.color } }));
-        row.appendChild(U.el('div', { class: 'nm', text: layer.name }));
+        const nm = U.el('div', { class: 'nm', text: layer.name });
+        // Double-click the layer name to rename inline — same flow as the
+        // context-menu Rename action so users have a familiar shortcut.
+        nm.addEventListener('dblclick', ev => {
+          ev.stopPropagation();
+          this._renameLayer(layer);
+        });
+        row.appendChild(nm);
         row.appendChild(this._layerIconBtn(
           layer.visible ? 'eye' : 'eyeoff',
           layer.visible ? 'Hide layer' : 'Show layer',
