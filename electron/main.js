@@ -89,21 +89,31 @@ function createWindow() {
    A canvas-only window meant to be dragged onto a Wacom-style pen display.
    It owns no project; it mirrors the main window's stage and forwards input
    back. See src/pencast.js and pen/pen.js for the two ends of the bridge. */
-function createPenWindow() {
+function createPenWindow(savedBounds) {
   if (penWin && !penWin.isDestroyed()) { penWin.focus(); return; }
 
-  // a pen tablet is usually a second monitor -- open there if one exists
-  let bounds = { x: undefined, y: undefined, width: 1180, height: 800 };
-  try {
-    const primary = screen.getPrimaryDisplay();
-    const ext = screen.getAllDisplays().find(d => d.id !== primary.id);
-    if (ext && ext.workArea) {
-      bounds = {
-        x: ext.workArea.x, y: ext.workArea.y,
-        width: ext.workArea.width, height: ext.workArea.height
-      };
-    }
-  } catch (e) { /* single display -- use the default size */ }
+  // Caller-provided bounds (restored from the project workspace) take
+  // precedence over the auto-pick. Only honour them if the saved x/y
+  // lies inside one of the connected displays — a saved external-monitor
+  // position is useless after the monitor is unplugged.
+  let bounds;
+  const saved = sanitizePenBounds(savedBounds);
+  if (saved) {
+    bounds = saved;
+  } else {
+    // a pen tablet is usually a second monitor -- open there if one exists
+    bounds = { x: undefined, y: undefined, width: 1180, height: 800 };
+    try {
+      const primary = screen.getPrimaryDisplay();
+      const ext = screen.getAllDisplays().find(d => d.id !== primary.id);
+      if (ext && ext.workArea) {
+        bounds = {
+          x: ext.workArea.x, y: ext.workArea.y,
+          width: ext.workArea.width, height: ext.workArea.height
+        };
+      }
+    } catch (e) { /* single display -- use the default size */ }
+  }
 
   penWin = new BrowserWindow({
     x: bounds.x, y: bounds.y,
@@ -124,10 +134,48 @@ function createPenWindow() {
   });
   penWin.loadFile(path.join(__dirname, '..', 'pen', 'pen.html'));
   if (isDev) penWin.webContents.openDevTools({ mode: 'detach' });
+  // Stream live bounds to the renderer so the project workspace stays
+  // current with the latest position+size — saving the project picks
+  // up the last reported value without an IPC round-trip on save.
+  const pushBounds = () => {
+    if (!penWin || penWin.isDestroyed() || !win || win.isDestroyed()) return;
+    const b = penWin.getBounds();
+    win.webContents.send('opentoon:pen-bounds', b);
+  };
+  penWin.on('move', pushBounds);
+  penWin.on('resize', pushBounds);
+  // Push once after the window settles so the renderer learns the
+  // initial bounds even if the user never moves the window.
+  penWin.once('ready-to-show', pushBounds);
   penWin.on('closed', () => {
     penWin = null;
     if (win && !win.isDestroyed()) win.webContents.send('opentoon:pen-detach');
   });
+}
+
+// Validate restored pen-window bounds. We refuse to honour a saved
+// position that's outside every connected display (the artist plugged
+// in a second monitor when saving, then unplugged it) — placing the
+// window off-screen would orphan it. Returns null on reject so the
+// caller falls back to the auto-pick.
+function sanitizePenBounds(b) {
+  if (!b || typeof b.width !== 'number' || typeof b.height !== 'number') return null;
+  const w = Math.max(480, b.width | 0);
+  const h = Math.max(360, b.height | 0);
+  if (typeof b.x !== 'number' || typeof b.y !== 'number') {
+    // size-only restore is fine — Electron will place the window
+    return { width: w, height: h };
+  }
+  try {
+    const displays = screen.getAllDisplays();
+    const cx = b.x + w / 2, cy = b.y + h / 2;
+    const inside = displays.some(d => {
+      const a = d.workArea;
+      return cx >= a.x && cx <= a.x + a.width && cy >= a.y && cy <= a.y + a.height;
+    });
+    if (!inside) return { width: w, height: h };
+  } catch (e) { /* fall through */ }
+  return { x: b.x, y: b.y, width: w, height: h };
 }
 
 /* ---- launch splash window ---- */
@@ -347,10 +395,18 @@ function setupIpc() {
   });
 
   /* ---- secondary pen-display window: open + IPC relay ---- */
-  ipcMain.handle('opentoon:pen-open', () => {
+  ipcMain.handle('opentoon:pen-open', (_e, opts) => {
     const existed = !!(penWin && !penWin.isDestroyed());
-    createPenWindow();
+    createPenWindow(opts && opts.bounds);
     return { ok: true, focused: existed };
+  });
+  // Renderer can query the current pen window state when capturing the
+  // project workspace. open=true means the window exists right now.
+  ipcMain.handle('opentoon:pen-window-state', () => {
+    if (penWin && !penWin.isDestroyed()) {
+      return { open: true, bounds: penWin.getBounds() };
+    }
+    return { open: false, bounds: null };
   });
   // the pen window finished loading -> tell the main window to start publishing
   ipcMain.on('opentoon:pen-ready', () => {

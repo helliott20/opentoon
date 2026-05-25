@@ -1667,6 +1667,16 @@
           }
           applied.timeline = true;
         }
+        // Pen window: if it was open at save time, reopen at the saved
+        // bounds. Electron rejects out-of-display positions in main.js
+        // (sanitizePenBounds), so we always pass them through — they
+        // either land where the artist had them or fall back to the
+        // auto-pick.
+        if (w.penWindow && w.penWindow.open && this.penCast && this.penCast.available
+            && this.penCast.available()) {
+          try { this.penCast.open({ bounds: w.penWindow.bounds }); }
+          catch (e) { /* ignore — pen window will just stay closed */ }
+        }
         // Re-emit so panels (timeline, layer list, brush opts) pick up
         // the restored settings/frame/active layer.
         this.emitAll();

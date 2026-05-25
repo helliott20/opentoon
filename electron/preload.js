@@ -19,7 +19,14 @@ contextBridge.exposeInMainWorld('OpenToonDesktop', {
   // a .otoon double-clicked while the app is already running
   onOpenFile: cb => ipcRenderer.on('opentoon:open-file', (_e, p) => cb(p)),
   // secondary "pen display" drawing window (see src/pencast.js)
-  openPenWindow: () => ipcRenderer.invoke('opentoon:pen-open'),
+  openPenWindow: (opts) => ipcRenderer.invoke('opentoon:pen-open', opts),
+  // one-shot query for the current pen-window open state + bounds —
+  // used by io.js#captureWorkspace when saving the project.
+  getPenWindowState: () => ipcRenderer.invoke('opentoon:pen-window-state'),
+  // streamed bounds — fires whenever the user moves or resizes the
+  // pen window so the renderer can cache the latest values without
+  // a round-trip on every save.
+  onPenBounds: cb => ipcRenderer.on('opentoon:pen-bounds', (_e, b) => cb(b)),
   onPenAttach: cb => ipcRenderer.on('opentoon:pen-attach', () => cb()),
   onPenDetach: cb => ipcRenderer.on('opentoon:pen-detach', () => cb()),
   // STATE CHANNEL for the pen window — see pen-preload.js. Tiny JSON ops

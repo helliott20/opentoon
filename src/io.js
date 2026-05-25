@@ -81,6 +81,11 @@
     const tl = app.timeline || {};
     const settings = app.settings ? JSON.parse(JSON.stringify(app.settings)) : null;
     const active = app.activeLayer && app.activeLayer();
+    // Pen window state: open flag + last known bounds (kept across
+    // close→reopen by pencast). Reopening a project also reopens the
+    // pen window at the saved position if it was open at save time.
+    const pen = app.penCast && app.penCast.workspaceState
+      ? app.penCast.workspaceState() : null;
     return {
       stage: stage.view ? {
         zoom: stage.view.zoom, x: stage.view.x, y: stage.view.y, rot: stage.view.rot,
@@ -92,7 +97,8 @@
       tool: app.tools && app.tools.active ? app.tools.active.name : null,
       color: app.color || null,
       onion: app.onion ? JSON.parse(JSON.stringify(app.onion)) : null,
-      settings
+      settings,
+      penWindow: pen
     };
   }
 

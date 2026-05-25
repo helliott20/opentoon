@@ -78,6 +78,10 @@
       // re-publish the v.orig snapshot only when mode / strokes / frame /
       // layer changes (i.e. on a real rebaseline), not every frame.
       this._lastLassoSig = null;
+      // Last reported pen-window bounds (kept across close→reopen so the
+      // project workspace can persist the position even if the window is
+      // currently closed). Updated by the onPenBounds stream below.
+      this._lastBounds = null;
       if (!this.bridge || !this.bridge.sendPenState) return;
       this.bridge.onPenAttach(() => this._attach());
       this.bridge.onPenDetach(() => this._detach());
@@ -85,6 +89,13 @@
       this.bridge.onPenCommand(msg => { try { this._onCommand(msg); } catch (e) { console.error(e); } });
       if (this.bridge.onPenStateAck)
         this.bridge.onPenStateAck(seq => { this._lastAckSeq = seq | 0; });
+      if (this.bridge.onPenBounds) {
+        this.bridge.onPenBounds(b => {
+          if (b && typeof b.width === 'number' && typeof b.height === 'number') {
+            this._lastBounds = { x: b.x | 0, y: b.y | 0, width: b.width | 0, height: b.height | 0 };
+          }
+        });
+      }
 
       app.on('render', () => {
         // no-op in D1: there is no bitmap to re-encode; the pen pulls
@@ -193,13 +204,24 @@
     }
 
     available() { return !!(this.bridge && this.bridge.openPenWindow); }
-    open() {
+    open(opts) {
       if (!this.available()) {
         this.app.ui.status('The pen drawing window is a desktop-app feature');
         return;
       }
-      this.bridge.openPenWindow();
+      this.bridge.openPenWindow(opts || undefined);
       this.app.ui.status('Opening the drawing window…');
+    }
+    // Snapshot for the project workspace. Reports `open` (true while
+    // active is set) and the most recent bounds the main process pushed.
+    // Bounds persist across close→reopen so the artist can re-launch the
+    // project and find the pen window where they left it, even if they
+    // closed it before saving.
+    workspaceState() {
+      return {
+        open: !!this.active,
+        bounds: this._lastBounds || null
+      };
     }
 
     _attach() {
