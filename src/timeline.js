@@ -386,14 +386,22 @@
             if (!this._removeFromSelection(layer, run)) this.selectedRuns.push(entry);
           }
         } else {
-          // Plain click. Replace selection with this single run (or clear
-          // when clicking an empty cell). Always (re)sets the anchor.
-          if (run) {
-            this.selectedRuns = [
-              { layer: layer, num: run.num, start: run.start, end: run.end }
-            ];
-          } else {
-            this.selectedRuns = [];
+          // Plain click. If the clicked cell IS already covered by the
+          // existing multi-selection (shift-range fragment or whole run),
+          // keep the selection — the click is the start of a drag that
+          // should move every selected fragment. Only replace the
+          // selection when the user clicks outside it.
+          const insideSelection = run
+            ? !!this._rangeIntersectsSelection(layer, run.num, run.start, run.end)
+            : false;
+          if (!insideSelection) {
+            if (run) {
+              this.selectedRuns = [
+                { layer: layer, num: run.num, start: run.start, end: run.end }
+              ];
+            } else {
+              this.selectedRuns = [];
+            }
           }
           if (layer) this._anchorCell = { layer: layer, frame: f };
         }
@@ -412,7 +420,11 @@
           // cellW the original 5 px was effectively invisible to mouse / pen
           // Snapshot per-layer baselines for every selected run so we can
           // apply the same delta to all of them in _applyMultiDrag.
-          const draggedSelected = this._isRunSelected(layer, run);
+          // Use overlap (not exact match) so a shift-range fragment of a
+          // longer held run still triggers multi-drag — the fragment's
+          // start/end won't equal the underlying run's start/end.
+          const draggedSelected = !!this._rangeIntersectsSelection(
+            layer, run.num, run.start, run.end);
           const bases = new Map();
           if (draggedSelected) {
             for (const sr of this.selectedRuns) {
