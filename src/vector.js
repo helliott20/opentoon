@@ -102,37 +102,24 @@
   }
 
   /* ----------------------------- rendering ----------------------------- */
-  // Trace `pts` onto ctx. For smooth strokes the path is built from
-  // midpoint-quadratic curves — each interior control point becomes the
-  // bezier handle of a quadratic going from one midpoint to the next.
-  // The resulting path is C1 continuous so direction changes render as
-  // smooth bends rather than visible corners. `sharp` flips back to
-  // plain lineTo so shape-snap primitives keep their crisp vertices.
+  // Trace `pts` onto ctx as a polyline. Smoothness comes entirely from
+  // upstream: smoothPath produces dense Catmull-Rom samples (~1-2 px
+  // apart on slow strokes), so the lineTo polyline through those
+  // samples reads as a smooth curve.
   //
-  // Terminal segment: the path is closed off with a lineTo to the last
-  // control point. (A terminal quadCurveTo with `prev` as control would
-  // hook backwards because `prev` sits behind the path's current
-  // position — that was the actual bug in my first attempt.)
-  function pathThrough(ctx, pts, closed, sharp) {
+  // An earlier version applied midpoint-quadratic interpolation here
+  // on top of the dense samples. It looked smooth in stills but
+  // introduced live-preview jitter: the terminal segment alternated
+  // between "straight lineTo" and "interior quadCurveTo" every time a
+  // new control point arrived, so the trailing edge of the stroke
+  // visibly morphed each frame. Trusting the upstream sampling and
+  // keeping the renderer dumb fixes that without losing any of the
+  // smoothness benefit.
+  function pathThrough(ctx, pts, closed) {
     ctx.beginPath();
     if (!pts || pts.length === 0) return;
     ctx.moveTo(pts[0].x, pts[0].y);
-    if (pts.length === 1) return;
-    if (sharp || pts.length === 2) {
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-    } else {
-      for (let i = 1; i < pts.length - 1; i++) {
-        const mx = (pts[i].x + pts[i + 1].x) / 2;
-        const my = (pts[i].y + pts[i + 1].y) / 2;
-        ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
-      }
-      // Close with a straight segment from the last midpoint to the
-      // final control point. Visually invisible against the dense
-      // surrounding samples and avoids the backward-hook a terminal
-      // quadCurveTo would create.
-      const last = pts[pts.length - 1];
-      ctx.lineTo(last.x, last.y);
-    }
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
     if (closed) ctx.closePath();
   }
 
@@ -245,7 +232,7 @@
       if (pts.length === 1) {
         ctx.fillStyle = st.color;
         ctx.beginPath(); ctx.arc(pts[0].x, pts[0].y, st.width / 2, 0, 7); ctx.fill();
-      } else { pathThrough(ctx, pts, st.closed, st.sharp); ctx.stroke(); }
+      } else { pathThrough(ctx, pts, st.closed); ctx.stroke(); }
       ctx.restore();
       return;
     }
@@ -591,7 +578,7 @@
         mx.lineJoin = 'round'; mx.lineCap = 'round';
         if (pts.length === 1) {
           mx.beginPath(); mx.arc(pts[0].x, pts[0].y, (st.width + gap * 2) / 2, 0, 7); mx.fill();
-        } else { pathThrough(mx, pts, st.closed, st.sharp); mx.stroke(); }
+        } else { pathThrough(mx, pts, st.closed); mx.stroke(); }
       } else {
         stampPolyline(mx, pts, p => st.width / 2 * (p.p == null ? 1 : p.p) + gap);
       }

@@ -235,6 +235,20 @@
     return inside;
   }
 
+  // 2D segment-segment intersection. Returns true when segments AB and
+  // CD strictly cross (no shared endpoint, no collinear-overlap case
+  // — those are noise in practice and excluding them keeps the
+  // crossing-select gesture predictable).
+  function segCross(ax, ay, bx, by, cx, cy, dx, dy) {
+    const rx = bx - ax, ry = by - ay;
+    const sx = dx - cx, sy = dy - cy;
+    const denom = rx * sy - ry * sx;
+    if (denom === 0) return false;
+    const u = ((cx - ax) * sy - (cy - ay) * sx) / denom;
+    const v = ((cx - ax) * ry - (cy - ay) * rx) / denom;
+    return u > 0 && u < 1 && v > 0 && v < 1;
+  }
+
   /* ============================== base ============================== */
   class Tool {
     constructor(name) { this.name = name; }
@@ -2226,6 +2240,43 @@
       this._stopAnts();
       this._hideToolbar();
     }
+    // Mirror the active selection horizontally or vertically around its
+    // own centre. Works against whichever transform state is live: the
+    // vector free-transform (this.vt) or the raster lift (this.raster).
+    //
+    // If the artist is mid-distort or mid-warp we rebaseline the current
+    // shape as the new affine "orig" first — that bakes the existing
+    // distortion into the baseline and lets the flip work as a clean
+    // scale-by-negative-one on top. Otherwise the flip would only invert
+    // the affine handles and the control-point distortion would persist
+    // in its original orientation.
+    _flipSelection(axis, app) {
+      const isH = axis === 'h';
+      if (this.vt) {
+        const inMesh = this.transformMode === 'distort' || this.transformMode === 'warp';
+        if (inMesh) {
+          this._rebaselineVT();
+          this.setTransformMode('freeform', app);
+        }
+        const v = this.vt;
+        if (isH) v.scaleX = -v.scaleX;
+        else     v.scaleY = -v.scaleY;
+        // _applyVTransform is what actually rebuilds every selected stroke's
+        // pts from the affine state — without this call, the scaleX flip
+        // sits in v but the rendered strokes keep their pre-flip points.
+        this._applyVTransform();
+      } else if (this.raster) {
+        const r = this.raster;
+        if (isH) r.scaleX = -r.scaleX;
+        else     r.scaleY = -r.scaleY;
+        // Raster snippet is re-rendered each frame via ctx.scale(r.scaleX,
+        // r.scaleY) in the overlay path, so no extra rebuild call needed.
+      } else {
+        if (app && app.ui) app.ui.status('Nothing to flip — make a selection first');
+        return;
+      }
+      if (app) { app.emit('render'); app.emit('overlayrender'); }
+    }
     setTransformMode(mode, app) {
       // Raster lassos don't yet implement distort / warp mesh rendering —
       // silently bounce to Freeform so the toolbar always does something.
@@ -2795,13 +2846,37 @@
       for (const p of pts) { x += p.x; y += p.y; }
       return { x: x / pts.length, y: y / pts.length };
     }
-    // A stroke is inside the lasso if any of its sample points is inside the
-    // polygon (a long horizontal stroke whose centroid sits outside the loop
-    // but whose body crosses through it would otherwise never be picked).
+    // A stroke is grabbed by the lasso when either:
+    //   (a) any of its sample points falls inside the lasso polygon, OR
+    //   (b) any of its segments crosses any lasso segment.
+    //
+    // (b) is what makes a quick LINE across a stroke pick it up — the
+    // artist doesn't have to loop fully around it. This matches the
+    // "scribble select" / "crossing select" gesture in Illustrator's
+    // Lasso, Affinity's Selection Brush, and most 2D animation tools.
+    // The containment test still wins for any stroke fully enclosed by
+    // a loop, so the conventional lasso behaviour is preserved.
     _strokeInLasso(st, poly) {
       const pts = st.type === 'fill' ? st.contour : st.pts;
       if (!pts || !pts.length) return false;
+      // (a) containment
       for (const p of pts) if (pointInPoly(p.x, p.y, poly)) return true;
+      // (b) crossing — for each lasso edge, test against every stroke
+      // segment. Closed strokes (fills) include the closing edge.
+      const polyN = poly.length;
+      if (polyN < 2) return false;
+      const isFill = st.type === 'fill';
+      const segN = isFill ? pts.length : pts.length - 1;
+      if (segN < 1) return false;
+      for (let pi = 0; pi < polyN; pi++) {
+        const a = poly[pi];
+        const b = poly[(pi + 1) % polyN];
+        for (let si = 0; si < segN; si++) {
+          const c = pts[si];
+          const d = pts[(si + 1) % pts.length];
+          if (segCross(a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y)) return true;
+        }
+      }
       return false;
     }
     _lassoVector(app) {
@@ -3409,6 +3484,14 @@
           return;
         }
         if (mode === 'cancel') { this.cancel(app); return; }
+        // Flip is a one-shot ACTION (not a persistent mode). Mirror the
+        // active transform around its centre by inverting the scale on
+        // the chosen axis. Works the same way on vector and raster
+        // transforms because both carry cx/cy + scaleX/scaleY fields.
+        if (mode === 'flip-h' || mode === 'flip-v') {
+          this._flipSelection(mode === 'flip-h' ? 'h' : 'v', app);
+          return;
+        }
         this.setTransformMode(mode, app);
       });
     }
