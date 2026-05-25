@@ -439,7 +439,6 @@
           const edge = (run.end + 1) * this.cellW;
           const handleIn = Math.min(6, Math.max(2, this.cellW * 0.25));
           const handleOut = 4;
-          const isResize = (x > edge - handleIn && x < edge + handleOut);
           // Snapshot per-layer baselines for every selected run so we can
           // apply the same delta to all of them in _applyMultiDrag.
           // Per-cell test: only treat as multi-drag when the click landed
@@ -447,6 +446,14 @@
           // part of a held run replaced the selection above, so the new
           // single-run entry passes this test and the whole run drags.
           const draggedSelected = !!this._cellInSelection(layer, f);
+          // Resize is a single-run gesture. When the user has a real
+          // multi-selection (more than one fragment) and clicks any
+          // selected run, drag should MOVE the whole set — not resize
+          // one of them while the rest stay put. Suppress resize mode
+          // in that case. Matches Photoshop / spreadsheet behaviour.
+          const hasMulti = draggedSelected && this.selectedRuns.length > 1;
+          const isResize = !hasMulti
+            && (x > edge - handleIn && x < edge + handleOut);
           const bases = new Map();
           if (draggedSelected) {
             for (const sr of this.selectedRuns) {
@@ -497,12 +504,19 @@
             // resize cursor so artists know it's a draggable handle
             const layer = this.rowToLayer(Math.floor((y - this.headerH) / this.rowH));
             if (layer && !layer.locked) {
-              const run = this._runAt(layer, frameAt(x));
+              const f = frameAt(x);
+              const run = this._runAt(layer, f);
               if (run) {
                 const edge = (run.end + 1) * this.cellW;
                 const handleIn = Math.min(6, Math.max(2, this.cellW * 0.25));
                 const handleOut = 4;
-                if (x > edge - handleIn && x < edge + handleOut) cur = 'ew-resize';
+                // Match the pointerdown gate: when this cell is part of
+                // a real multi-selection, edge-hover shows the move
+                // cursor instead of resize — resize is suppressed in
+                // multi-drag.
+                const cellSel = this._cellInSelection(layer, f);
+                const multiActive = cellSel && this.selectedRuns.length > 1;
+                if (!multiActive && x > edge - handleIn && x < edge + handleOut) cur = 'ew-resize';
                 else cur = 'grab';
               }
             }
