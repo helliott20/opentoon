@@ -256,6 +256,19 @@
       }
       return null;
     }
+    // Precise per-cell hit test against the multi-selection. Used by the
+    // pointerdown logic so a click that falls OUTSIDE a fragment-selected
+    // range (even when it's inside the same underlying held run) is
+    // treated as "clicked outside the selection" — the selection gets
+    // replaced with the full run and the drag moves all of it. Without
+    // this, clicking the un-highlighted left half of a held run whose
+    // right half is fragment-selected would only drag the right half.
+    _cellInSelection(layer, frame) {
+      for (const r of this.selectedRuns) {
+        if (r.layer === layer && frame >= r.start && frame <= r.end) return r;
+      }
+      return null;
+    }
     // Replace the multi-selection with the rectangle anchored between
     // `(aLayer, aFrame)` and `(bLayer, bFrame)`. Walks every layer in
     // the visible list between the two rows and every frame in the
@@ -386,14 +399,15 @@
             if (!this._removeFromSelection(layer, run)) this.selectedRuns.push(entry);
           }
         } else {
-          // Plain click. If the clicked cell IS already covered by the
+          // Plain click. If the clicked CELL is already covered by the
           // existing multi-selection (shift-range fragment or whole run),
           // keep the selection — the click is the start of a drag that
-          // should move every selected fragment. Only replace the
-          // selection when the user clicks outside it.
-          const insideSelection = run
-            ? !!this._rangeIntersectsSelection(layer, run.num, run.start, run.end)
-            : false;
+          // should move every selected fragment. Otherwise replace the
+          // selection. The test is per-cell (not per-run) so clicking a
+          // non-highlighted cell of an underlying run whose other cells
+          // are fragment-selected still counts as "outside" and the
+          // whole run becomes the new selection (so drag moves it all).
+          const insideSelection = run ? !!this._cellInSelection(layer, f) : false;
           if (!insideSelection) {
             if (run) {
               this.selectedRuns = [
@@ -428,11 +442,11 @@
           const isResize = (x > edge - handleIn && x < edge + handleOut);
           // Snapshot per-layer baselines for every selected run so we can
           // apply the same delta to all of them in _applyMultiDrag.
-          // Use overlap (not exact match) so a shift-range fragment of a
-          // longer held run still triggers multi-drag — the fragment's
-          // start/end won't equal the underlying run's start/end.
-          const draggedSelected = !!this._rangeIntersectsSelection(
-            layer, run.num, run.start, run.end);
+          // Per-cell test: only treat as multi-drag when the click landed
+          // inside an actually-highlighted cell. Clicking the unselected
+          // part of a held run replaced the selection above, so the new
+          // single-run entry passes this test and the whole run drags.
+          const draggedSelected = !!this._cellInSelection(layer, f);
           const bases = new Map();
           if (draggedSelected) {
             for (const sr of this.selectedRuns) {
