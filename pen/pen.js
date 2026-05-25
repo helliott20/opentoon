@@ -798,6 +798,19 @@
       if ('snapShape' in meta) t.snapShape = meta.snapShape;
       if (meta.sel) t.sel = meta.sel;
       if (meta.transform) t.transform = meta.transform;
+      // Onion-skin settings mirrored from main. _compositeStage draws the
+      // adjacent-frame cels under the live composite using these values
+      // and the pen's own hydrated layer cache. A change to the settings
+      // means the base cache (which has onion baked in) needs rebuilding.
+      if ('onion' in meta) {
+        const prev = this.state.onion;
+        const next = meta.onion;
+        const sig = o => o ? (o.on + '|' + o.prev + '|' + o.next + '|'
+          + o.prevColor + '|' + o.nextColor + '|'
+          + o.maxAlpha + '|' + o.minAlpha) : 'off';
+        if (sig(prev) !== sig(next)) this._baseCacheDirty = true;
+        this.state.onion = next;
+      }
       // Generic tool-overlay channel — see pencast.js: pen-window parity
       // contract. `null` clears, an object describes overlay state for
       // the pen to render via _drawToolOverlay.
@@ -1121,14 +1134,67 @@
       const bctx = this._baseCache.getContext('2d');
       bctx.setTransform(1, 0, 0, 1, 0, 0);
       bctx.clearRect(0, 0, w, h);
+      // Paint bg + onion ourselves so onion sits between background and
+      // the layer composite (matches main window's canvas.js render order).
+      bctx.fillStyle = s.project.bg || '#ffffff';
+      bctx.fillRect(0, 0, w, h);
+      this._drawOnion(bctx);
       OT.compositeStage(s.project, s.frame, bctx, {
-        bg: true,
+        bg: false,
         includeVideo: false,
         eraserOverlay: s.eraserOverlay
       }, {
         layerAncestors: layer => this._layerAncestors(layer)
       });
       this._baseCacheDirty = false;
+    }
+    // Onion skin: tint each adjacent-frame cel of the active layer, fade
+    // by distance, blit them under the live composite. Pen mirrors the
+    // settings + cels via tool-meta + vector-cel-replace from pencast.
+    _drawOnion(ctx) {
+      const s = this.state;
+      const o = s.onion;
+      if (!o || !o.on) return;
+      const layer = s.layersById.get(s.activeLayerId);
+      if (!layer || !layer.celAt) return;
+      const f = s.frame;
+      const fc = s.project.frameCount || 1;
+      const tmp = this._onionTmp || (this._onionTmp = document.createElement('canvas'));
+      const drawSet = (count, dir, color) => {
+        for (let i = 1; i <= (count | 0); i++) {
+          const fr = f + dir * i;
+          if (fr < 0 || fr >= fc) break;
+          const cel = layer.celAt(fr);
+          if (!cel || !cel.canvas) continue;
+          // Tint cel into a temp canvas: source-over the cel, then source-in
+          // the onion colour to recolour every opaque pixel uniformly.
+          if (tmp.width !== cel.w) tmp.width = cel.w;
+          if (tmp.height !== cel.h) tmp.height = cel.h;
+          const tx = tmp.getContext('2d');
+          tx.setTransform(1, 0, 0, 1, 0, 0);
+          tx.clearRect(0, 0, cel.w, cel.h);
+          tx.globalCompositeOperation = 'source-over';
+          tx.drawImage(cel.canvas, 0, 0);
+          tx.globalCompositeOperation = 'source-in';
+          tx.fillStyle = color;
+          tx.fillRect(0, 0, cel.w, cel.h);
+          tx.globalCompositeOperation = 'source-over';
+          const a = (count <= 1) ? o.maxAlpha
+            : (o.maxAlpha + (o.minAlpha - o.maxAlpha) * ((i - 1) / (count - 1)));
+          ctx.save();
+          ctx.globalAlpha = a;
+          // Layer transform: same world xform that the active layer uses
+          // when compositing — keeps onion aligned with the live composite.
+          if (OT.applyWorldXform)
+            OT.applyWorldXform(ctx, layer, fr, s.project,
+              l => this._layerAncestors(l));
+          ctx.drawImage(tmp, 0, 0, s.project.width, s.project.height);
+          ctx.restore();
+        }
+      };
+      drawSet(o.prev, -1, o.prevColor);
+      drawSet(o.next, 1, o.nextColor);
+      ctx.globalAlpha = 1;
     }
     // Mark the base cache stale so the next composite rebuilds it. Call
     // from every op that could change the rendered output of any layer.
@@ -1187,8 +1253,13 @@
           if (this._baseCacheDirty || !this._baseCache) this._renderBaseCache();
           c.drawImage(this._baseCache, 0, 0);
         } else {
+          // Wet-stroke path: paint bg + onion + layers ourselves so onion
+          // sits below the live composite (matches main's render order).
+          c.fillStyle = s.project.bg || '#ffffff';
+          c.fillRect(0, 0, s.project.width, s.project.height);
+          this._drawOnion(c);
           OT.compositeStage(s.project, s.frame, c, {
-            bg: true,
+            bg: false,
             wetStroke: wetForRender || null,
             wetLayerId: s.activeLayerId,
             includeVideo: false,         // D1: pen has no <video> element

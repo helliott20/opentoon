@@ -137,8 +137,43 @@ window.OT = window.OT || {};
     }
     dirty() { this.thumbDirty = true; }
     // Vector cels: re-render all strokes onto the raster cache canvas.
+    // O(N) over cel.strokes — only call when the cel composition has
+    // genuinely changed (strokes deleted, modified, reordered, restored
+    // from undo, frame loaded). For the common case of "added one new
+    // stroke on top", use appendStroke() instead — that's O(1).
     rebuild() {
       if (this.kind === 'vector' && OT.Vector) OT.Vector.renderCel(this);
+    }
+    // Fast path: draw a single newly-committed stroke onto cel.canvas
+    // without re-rasterising the whole cel. Turns the cost of committing
+    // the Nth stroke from O(N) to O(1). Falls back to a full rebuild
+    // when the incremental path would produce a different result
+    // (z-order under fills, hidden via _lassoHidden).
+    appendStroke(stroke) {
+      if (this.kind !== 'vector' || !OT.Vector) return;
+      if (!stroke || stroke._lassoHidden) return;
+      // Fills sit UNDER line strokes in renderCel's ordering. Appending
+      // a fill on top would render it in the wrong z-order, so use the
+      // full rebuild path for fills.
+      if (stroke.type === 'fill') { this.rebuild(); return; }
+      OT.Vector.renderStroke(this.ctx, stroke);
+      // Re-apply eraser cuts so the new stroke is also clipped by any
+      // existing marks (matches what a full rebuild would produce — the
+      // marks are applied AFTER strokes in renderCel).
+      const marks = this.eraserMarks;
+      if (marks && marks.length) {
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.fillStyle = '#000';
+        for (const m of marks) {
+          ctx.beginPath();
+          ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+      this.dirty();
     }
     clear() {
       if (this.kind === 'vector') { this.strokes = []; this.eraserMarks = []; }

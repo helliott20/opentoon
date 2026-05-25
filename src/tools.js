@@ -723,13 +723,16 @@
       };
       this.pendingStrokeId = null;
       cel.strokes.push(stroke);
+      // Fast path: draw just this stroke on top of the existing cel.canvas
+      // instead of re-rasterising every stroke. Turns the per-commit cost
+      // from O(N strokes) into O(1) for the by-far hottest path in the app.
+      cel.appendStroke(stroke);
       if (app.symmetry && app.symmetry.on) {
-        cel.strokes.push(V().mirrorStroke(stroke, app.symmetry.axis,
-          app.project.width / 2, app.project.height / 2));
+        const mirror = V().mirrorStroke(stroke, app.symmetry.axis,
+          app.project.width / 2, app.project.height / 2);
+        cel.strokes.push(mirror);
+        cel.appendStroke(mirror);
       }
-      // Rebuild cel.canvas so the raster cache (used by thumbnails / onion
-      // skin / exports) matches the new stroke.
-      cel.rebuild();
       // Drop the in-progress raw[] so drawOverlay stops drawing a ghost on
       // top of the now-committed stroke.
       this.raw = null;

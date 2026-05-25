@@ -163,6 +163,14 @@
         this._publish({ op: 'tool-meta', meta: this._meta() });
         this._schedule();
       });
+      // Onion-skin toggle / range change — pen needs the updated settings
+      // AND any neighbour-frame cels it didn't have hydrated yet.
+      app.on('onionchange', () => {
+        if (!this.active) return;
+        this._publishCelsForFrame();
+        this._publish({ op: 'tool-meta', meta: this._meta() });
+        this._schedule();
+      });
       // Mid-drag eraser samples (see PaintTool._processErase). Ship the
       // raw destruction-out positions+radius to the pen window so it can
       // render destination-out locally on the rendered active layer --
@@ -200,6 +208,13 @@
       this._stateSeq = 0;
       this._pendingOps = [];
       this._publishInit();
+      // If onion is on, init only ships the current frame's cels — push
+      // neighbour cels in a follow-up batch so onion has data to render
+      // from the moment the pen window finishes hydrating.
+      if (this.app.onion && this.app.onion.on) {
+        this._publishCelsForFrame();
+        this._schedule();
+      }
     }
     _detach() {
       this.active = false;
@@ -270,12 +285,37 @@
     _publishCelsForFrame() {
       const a = this.app, p = a.project;
       if (!p) return;
+      // Ship the current frame, plus any neighbours the pen needs for onion
+      // skin. Pen onion-renders straight from its own hydrated layer cache —
+      // it can't reach back across the IPC for cels it hasn't seen yet, so
+      // we proactively send them whenever the frame neighbourhood changes.
+      const frames = this._onionFrameSet();
       for (const layer of (p.layers || [])) {
-        const cel = snapshotCelForLayer(layer, a.frame);
-        if (cel) this._publish({
-          op: 'vector-cel-replace', layerId: layer.id, frame: a.frame, cel
-        });
+        for (const frame of frames) {
+          const cel = snapshotCelForLayer(layer, frame);
+          if (cel) this._publish({
+            op: 'vector-cel-replace', layerId: layer.id, frame, cel
+          });
+        }
       }
+    }
+    // Set of frames the pen needs hydrated to render onion skin at the
+    // current frame. Bound by [0, frameCount). Always includes the active
+    // frame; when onion is on, adds ± onion.prev / onion.next neighbours.
+    _onionFrameSet() {
+      const a = this.app, p = a.project, o = a.onion || {};
+      const out = new Set([a.frame]);
+      if (o.on && p && typeof p.frameCount === 'number') {
+        for (let i = 1; i <= (o.prev | 0); i++) {
+          const fr = a.frame - i;
+          if (fr >= 0) out.add(fr);
+        }
+        for (let i = 1; i <= (o.next | 0); i++) {
+          const fr = a.frame + i;
+          if (fr < p.frameCount) out.add(fr);
+        }
+      }
+      return out;
     }
     // Publishes a `lasso-orig` op when the lasso's transform session
     // signature changes — i.e. on initial arm, on mode-switch (which
@@ -456,6 +496,19 @@
           sw: xfSw, sh: xfSh
         },
         toolOverlay,
+        // Onion-skin settings — pen window mirrors the same view as main.
+        // Pen renders adjacent-frame cels under the live composite using
+        // its own hydrated layer cache (cels arrive via vector-cel-replace
+        // ops on frame / onion change, see _publishCelsForFrame).
+        onion: a.onion ? {
+          on: !!a.onion.on,
+          prev: a.onion.prev | 0,
+          next: a.onion.next | 0,
+          prevColor: a.onion.prevColor || '#0a8',
+          nextColor: a.onion.nextColor || '#d57',
+          maxAlpha: typeof a.onion.maxAlpha === 'number' ? a.onion.maxAlpha : 0.4,
+          minAlpha: typeof a.onion.minAlpha === 'number' ? a.onion.minAlpha : 0.15
+        } : null,
         // Procreate-style shape-snap (QuickShape): when the artist holds
         // at the end of a stroke, the brush/pencil tool detects a clean
         // primitive and morphs the rough drawing into it. The morph runs
