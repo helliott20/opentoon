@@ -1658,20 +1658,34 @@
 
   /* ============================== select ============================== */
   class SelectTool extends Tool {
-    constructor() { super('select'); this.sel = null; this.mode = 'idle'; this.vsel = []; }
+    constructor() {
+      super('select');
+      this.sel = null;
+      this.mode = 'idle';
+      this.vsel = [];
+      // 'uniform' | 'freeform' — raster selections don't support distort/warp,
+      // but the chip still shows the same buttons (greyed) for visual parity
+      // with the lasso transform pill.
+      this.transformMode = 'uniform';
+    }
     onDeactivate(app) {
       // If a snippet drag was in-flight (rare — tool switch mid-drag), bake
       // the translation in so the strokes don't end up frozen at the old
       // position with _lassoHidden still set.
       if (this.vmode === 'move') this._vUp(null, app);
       if (this.vcel && this.vcel._liveDrawing) this._clearSelSnippet(app);
-      this.commit(app);
+      // Don't commit / discard when we just handed the lift off to the
+      // lasso tool — lasso now owns the lifted region.
+      if (!this._handedOff) this.commit(app);
+      this._handedOff = false;
       this.vsel = [];
+      this._stopAntsTick();
     }
     flush(app) {
       if (this.vmode === 'move') this._vUp(null, app);
       if (this.vcel && this.vcel._liveDrawing) this._clearSelSnippet(app);
-      this.commit(app);
+      if (!this._handedOff) this.commit(app);
+      this._stopAntsTick();
     }
 
     pointerDown(pt, e, app) {
@@ -1756,6 +1770,14 @@
           }
         }
         this.marquee = null;
+        // Hand off to the lasso tool's vector-transform pipeline so the
+        // user gets the SAME chip (uniform/freeform/distort/warp + commit/
+        // cancel) and the SAME handles as the lasso tool — no parallel
+        // chip implementation.
+        if (this.vsel.length) {
+          this._handoffVector(app);
+          return;
+        }
       } else if (this.vmode === 'move') {
         // Finalise the snippet drag: apply the accumulated translation to
         // every selected stroke's points (one pass, not per-event), then
@@ -1805,14 +1827,15 @@
     }
     _vOverlay(ctx, app) {
       const zoom = app.stage.view.zoom;
+      // Drag-rectangle marquee — animated marching ants (matches lasso look).
       if (this.vmode === 'marquee' && this.marquee) {
         const m = this.marquee;
-        ctx.save();
-        ctx.lineWidth = 1 / zoom; ctx.setLineDash([5 / zoom, 4 / zoom]);
-        ctx.strokeStyle = '#fff';
-        ctx.strokeRect(Math.min(m.x0, m.x1), Math.min(m.y0, m.y1),
-          Math.abs(m.x1 - m.x0), Math.abs(m.y1 - m.y0));
-        ctx.restore();
+        const x = Math.min(m.x0, m.x1), y = Math.min(m.y0, m.y1);
+        const w = Math.abs(m.x1 - m.x0), h = Math.abs(m.y1 - m.y0);
+        OT.LassoOverlay.ants(ctx, zoom, c => {
+          c.beginPath(); c.rect(x, y, w, h);
+        });
+        this._ensureSelectAntsTick(app);
       }
       // Live-drag snippet: render the pre-rasterised selected strokes at the
       // accumulated translation. One drawImage regardless of stroke count.
@@ -1977,13 +2000,41 @@
         cel.strokes = cel.strokes;
       }
       cel.dirty();
-      this.sel = {
+      // Build a raster-lift object in the exact shape the lasso tool's
+      // raster pipeline expects (cel + canvas + transform fields + poly).
+      // Then hand it off to the lasso tool and switch active tool. The
+      // user gets the FULL lasso transform experience (same chip, same
+      // handles, same commit/cancel) — no parallel SelectTool chip code
+      // to maintain. Select Pixels becomes a rectangular-marquee front
+      // door to the lasso's raster transform pipeline.
+      const lifted = {
         canvas: sc, sw: w, sh: h,
         cx: cx0 + w / 2, cy: cy0 + h / 2,
         scaleX: 1, scaleY: 1, rot: 0,
-        cel, layer, before
+        cel, layer, before,
+        // Lasso compatibility fields
+        lifted: true,
+        frame: app.frame,
+        x: cx0, y: cy0,
+        poly: [
+          { x: cx0, y: cy0 },
+          { x: cx0 + w, y: cy0 },
+          { x: cx0 + w, y: cy0 + h },
+          { x: cx0, y: cy0 + h }
+        ]
       };
-      app.ui.status('Selection lifted - drag to move, handles to transform, click outside to commit');
+      const lasso = app.tools.tools.lasso;
+      if (lasso) {
+        lasso.raster = lifted;
+        lasso.transformMode = 'uniform';
+        // Stash a marker so onDeactivate doesn't commit/clear the lift
+        // when we switch tools below.
+        this._handedOff = true;
+        app.tools.select('lasso');
+        if (lasso._startAnts) lasso._startAnts(app);
+        if (lasso._showToolbar) lasso._showToolbar(app);
+        app.emit('render'); app.emit('overlayrender');
+      }
     }
     _rotHandleWorld(s) {
       const a = this._anchor(1, s.sw, s.sh);
@@ -2021,50 +2072,112 @@
     }
     _rOverlay(ctx, app) {
       const zoom = app.stage.view.zoom;
+      // Drag-rectangle marquee — animated marching ants, matching the lasso
+      // tool's visual language but with a rectangular trace. Once the user
+      // releases, _lift transfers the region to the lasso tool which owns
+      // the chip, handles and transform pipeline from that point on.
       if (this.mode === 'marquee' && this.marquee) {
         const m = this.marquee;
-        ctx.save();
-        ctx.lineWidth = 1 / zoom;
-        ctx.setLineDash([5 / zoom, 4 / zoom]);
-        ctx.strokeStyle = '#fff';
-        ctx.strokeRect(Math.min(m.x0, m.x1), Math.min(m.y0, m.y1),
-          Math.abs(m.x1 - m.x0), Math.abs(m.y1 - m.y0));
-        ctx.restore();
+        const x = Math.min(m.x0, m.x1), y = Math.min(m.y0, m.y1);
+        const w = Math.abs(m.x1 - m.x0), h = Math.abs(m.y1 - m.y0);
+        OT.LassoOverlay.ants(ctx, zoom, c => {
+          c.beginPath(); c.rect(x, y, w, h);
+        });
+        this._ensureSelectAntsTick(app);
       }
-      const s = this.sel;
-      if (!s) return;
-      ctx.save();
-      ctx.translate(s.cx, s.cy);
-      ctx.rotate(s.rot);
-      ctx.scale(s.scaleX, s.scaleY);
-      ctx.globalAlpha = 0.55;
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(s.canvas, -s.sw / 2, -s.sh / 2);
-      ctx.restore();
-      ctx.save();
-      ctx.lineWidth = 1.4 / zoom;
-      ctx.strokeStyle = '#4a9fd4';
-      const corners = [0, 2, 4, 6].map(i => {
-        const a = this._anchor(i, s.sw, s.sh); return this._world(s, a.x, a.y);
-      });
-      ctx.beginPath();
-      ctx.moveTo(corners[0].x, corners[0].y);
-      for (let i = 1; i < 4; i++) ctx.lineTo(corners[i].x, corners[i].y);
-      ctx.closePath();
-      ctx.stroke();
-      const tc = this._world(s, 0, -s.sh / 2);
-      const rh = this._rotHandleWorld(s);
-      ctx.beginPath(); ctx.moveTo(tc.x, tc.y); ctx.lineTo(rh.x, rh.y); ctx.stroke();
-      const hs = 4 / zoom;
-      ctx.fillStyle = '#fff'; ctx.strokeStyle = '#4a9fd4';
-      for (let i = 0; i < 8; i++) {
-        const a = this._anchor(i, s.sw, s.sh);
-        const w = this._world(s, a.x, a.y);
-        ctx.beginPath(); ctx.rect(w.x - hs, w.y - hs, hs * 2, hs * 2);
-        ctx.fill(); ctx.stroke();
+    }
+
+    // Hand the marquee-selected vector strokes off to the lasso tool's
+    // transform pipeline (same machinery the lasso uses after closing a
+    // free-form loop). The user then sees the lasso's chip + handles and
+    // can scale / rotate / distort / warp / commit / cancel exactly as
+    // they would with the lasso tool itself.
+    _handoffVector(app) {
+      const lasso = app.tools.tools.lasso;
+      if (!lasso) return;
+      const sel = this.vsel.slice();
+      const cel = this.vcel;
+      const layer = app.activeLayer();
+      let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+      for (const st of sel) {
+        const b = V().strokeBounds(st);
+        x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y);
+        x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
       }
-      ctx.beginPath(); ctx.arc(rh.x, rh.y, hs, 0, 7); ctx.fill(); ctx.stroke();
-      ctx.restore();
+      const w = Math.max(1, x1 - x0), h = Math.max(1, y1 - y0);
+      lasso.vsel = sel;
+      lasso.vcel = cel;
+      lasso.vt = {
+        cel, layer, frame: app.frame,
+        strokes: sel.slice(),
+        orig: sel.map(st => st.type === 'fill'
+          ? { stroke: st, contour: st.contour.map(p => ({ x: p.x, y: p.y })) }
+          : { stroke: st, pts: st.pts.map(p => ({ x: p.x, y: p.y, p: p.p })) }
+        ),
+        origCx: x0 + w / 2, origCy: y0 + h / 2,
+        cx: x0 + w / 2, cy: y0 + h / 2,
+        sw: w, sh: h,
+        scaleX: 1, scaleY: 1, rot: 0,
+        before: cel.snapshot()
+      };
+      if (lasso._initDistortWarp) lasso._initDistortWarp(lasso.vt);
+      lasso.vt.dirty = false;
+      lasso.transformMode = 'uniform';
+      if (lasso._buildPreviewSnippet) lasso._buildPreviewSnippet(lasso.vt);
+      if (lasso._hideSelectedFromCel) lasso._hideSelectedFromCel(lasso.vt, app);
+      // Clear our own selection state — lasso owns the strokes now.
+      this.vsel = [];
+      this.vmode = 'idle';
+      this._handedOff = true;
+      app.tools.select('lasso');
+      if (lasso._startAnts) lasso._startAnts(app);
+      if (lasso._showToolbar) lasso._showToolbar(app);
+      app.emit('render'); app.emit('overlayrender');
+    }
+
+    _ensureSelectAntsTick(app) {
+      if (this._antsTimer) return;
+      this._antsTimer = setInterval(() => {
+        if (this.mode === 'marquee' && this.marquee)
+          app.emit('overlayrender');
+        else this._stopAntsTick();
+      }, 75);
+    }
+    _stopAntsTick() {
+      if (this._antsTimer) { clearInterval(this._antsTimer); this._antsTimer = null; }
+    }
+
+    // ---- pen-window parity contract ----
+    // Only the drag-marquee state lives on SelectTool now — the lifted
+    // region itself is owned by the lasso tool after handoff, so the
+    // lasso's penMeta (and meta.transform) handle the rest.
+    penMeta(app) {
+      if (this.mode === 'marquee' && this.marquee) {
+        const m = this.marquee;
+        return { kind: 'select-marquee', rect: {
+          x: Math.min(m.x0, m.x1), y: Math.min(m.y0, m.y1),
+          w: Math.abs(m.x1 - m.x0), h: Math.abs(m.y1 - m.y0)
+        }};
+      }
+      if (this.vmode === 'marquee' && this.marquee) {
+        const m = this.marquee;
+        return { kind: 'select-marquee', rect: {
+          x: Math.min(m.x0, m.x1), y: Math.min(m.y0, m.y1),
+          w: Math.abs(m.x1 - m.x0), h: Math.abs(m.y1 - m.y0)
+        }};
+      }
+      if (this.vsel && this.vsel.length) {
+        let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+        for (const st of this.vsel) {
+          const b = V().strokeBounds(st);
+          if (b.x < x0) x0 = b.x; if (b.y < y0) y0 = b.y;
+          if (b.x + b.w > x1) x1 = b.x + b.w; if (b.y + b.h > y1) y1 = b.y + b.h;
+        }
+        if (x1 > x0 && y1 > y0) {
+          return { kind: 'select-vsel', rect: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } };
+        }
+      }
+      return null;
     }
   }
 
@@ -3308,6 +3421,10 @@
     }
     _refreshToolbar() {
       if (!this._toolbarEl) return;
+      // SelectTool may have hidden the mode buttons + separators — restore
+      // any separator visibility lasso owns when it claims the toolbar back.
+      const seps = this._toolbarEl.querySelectorAll('.lasso-tb-sep');
+      for (const s of seps) s.style.display = '';
       const btns = this._toolbarEl.querySelectorAll('button');
       for (const b of btns) {
         const m = b.dataset.mode;
@@ -3363,7 +3480,11 @@
       const sc = app.stage.projectToScreen(proj.x, proj.y);
       const viewport = document.getElementById('viewport');
       if (!viewport) return;
-      const gap = 22;   // CSS px above the bbox top edge
+      // Affine modes draw a rotate knob ~26 + 7 CSS px above the bbox top —
+      // bump the gap past the knob (+ a few px breathing room) so the chip
+      // doesn't sit on top of it. Distort / warp have no rotate handle, so
+      // the tighter 22 px gap is fine there.
+      const gap = (tm === 'distort' || tm === 'warp') ? 22 : 44;
       let x = sc.x;
       let y = sc.y - gap;
       // Keep the toolbar fully inside the viewport on edge-anchored selections.
@@ -3383,6 +3504,19 @@
       const lx = (pt.x - px) * tr.sx, ly = (pt.y - py) * tr.sy;
       const rad = tr.rot * Math.PI / 180, c = Math.cos(rad), s = Math.sin(rad);
       return { x: lx * c - ly * s + px + tr.x, y: lx * s + ly * c + py + tr.y };
+    }
+    // ---- pen-window parity contract ----
+    // Return a small, serialisable snapshot of overlay state the pen window
+    // should mirror. Transform-armed state (vt / raster) is ALREADY shipped
+    // via meta.transform; this method covers the pre-transform states the
+    // pen wasn't seeing — the open lasso loop being drawn, and (in future)
+    // any other lasso overlay we add. pencast aggregates `penMeta` from
+    // every active tool and ships under meta.toolOverlay.
+    penMeta(app) {
+      if (this.mode === 'lasso' && this.poly && this.poly.length) {
+        return { kind: 'lasso-loop', poly: this.poly.map(p => ({ x: p.x, y: p.y })) };
+      }
+      return null;
     }
 
     /* ---------------- preview snippet (fast affine drag) ---------------- */

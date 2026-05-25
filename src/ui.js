@@ -211,9 +211,12 @@
       const bar = document.getElementById('menubar');
       bar.innerHTML = '';
       // brand cell: 3-ring mark + wordmark; the centre ring uses currentColor
-      // so it follows the .menu-title { color: var(--cream) } rule
-      bar.appendChild(el('div', {
-        class: 'menu-title', 'aria-label': 'OpenToon',
+      // so it follows the .menu-title { color: var(--cream) } rule.
+      // Clickable: returns to the project launcher (start screen).
+      const brand = el('div', {
+        class: 'menu-title', 'aria-label': 'OpenToon — return to start',
+        title: 'Return to start screen',
+        role: 'button', tabindex: '0',
         html:
           '<svg class="menu-title-mark" viewBox="0 0 200 200" fill="none" aria-hidden="true">' +
           '<circle cx="85" cy="100" r="68" stroke="#DD5038" stroke-width="17" stroke-linecap="round" opacity="0.55"/>' +
@@ -221,7 +224,20 @@
           '<circle cx="100" cy="100" r="68" stroke="currentColor" stroke-width="17" stroke-linecap="round"/>' +
           '</svg>' +
           '<span class="menu-title-text"><span class="open">Open</span><span class="toon">Toon</span></span>'
-      }));
+      });
+      brand.addEventListener('click', e => {
+        e.stopPropagation();
+        this._closeMenus();
+        this.returnToLauncher();
+      });
+      brand.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          this._closeMenus();
+          this.returnToLauncher();
+        }
+      });
+      bar.appendChild(brand);
       this._menuData().forEach(([name]) => {
         const item = el('div', { class: 'menu-item' }, [name]);
         item.addEventListener('click', e => {
@@ -1491,6 +1507,11 @@
               frameCount: U.clamp(parseInt(fc.value) || 48, 1, 4000),
               bg: bg.value
             });
+            // Prompt for a save location immediately so the periodic autosave
+            // has a real file to write back to. If the artist cancels, the
+            // project still exists in memory and crash-recovery autosave runs.
+            if (window.OpenToonDesktop && window.OpenToonDesktop.fs)
+              this.app.saveProject(true);
           }
         }
       ]);
@@ -2108,9 +2129,28 @@
         if (!s) return;
         if (s.state === 'downloaded') {
           this._updateReadyVersion = s.version || '';
+          this._showUpdateBannerWhenReady();
+        }
+      });
+    }
+    // The launcher overlays everything at boot, so the update card would be
+    // hidden behind it and the user wouldn't see it. Wait until the launcher
+    // is dismissed (or open it immediately if we're already in the app).
+    _showUpdateBannerWhenReady() {
+      if (!document.querySelector('.launcher')) {
+        this._showUpdateBanner();
+        return;
+      }
+      if (this._updateBannerWaiting) return;
+      this._updateBannerWaiting = true;
+      const obs = new MutationObserver(() => {
+        if (!document.querySelector('.launcher')) {
+          obs.disconnect();
+          this._updateBannerWaiting = false;
           this._showUpdateBanner();
         }
       });
+      obs.observe(document.body, { childList: true });
     }
     _showUpdateBanner() {
       if (this._updateBannerEl && this._updateBannerEl.isConnected) return;
@@ -2144,12 +2184,31 @@
 
       const install = () => {
         const desktop = window.OpenToonDesktop;
-        if (desktop && desktop.quitAndInstall) {
-          card.classList.add('is-installing');
-          const eyebrow = card.querySelector('.update-card__eyebrow');
+        if (!desktop || !desktop.quitAndInstall) return;
+        card.classList.add('is-installing');
+        const eyebrow = card.querySelector('.update-card__eyebrow');
+        if (eyebrow) eyebrow.textContent = 'Saving…';
+        // Save any unsaved work back to the project file (or crash autosave
+        // if there's no file yet) before electron-updater triggers the
+        // installer relaunch. A crash here would otherwise lose the session.
+        const proceed = () => {
           if (eyebrow) eyebrow.textContent = 'Installing…';
           try { desktop.quitAndInstall(); } catch (_) {}
-        }
+        };
+        try {
+          const app = this.app;
+          if (app && app.dirty && app.projectPath && OT.IO && OT.IO.writeProjectTo) {
+            OT.IO.writeProjectTo(app, app.projectPath)
+              .then(() => { app.dirty = false; })
+              .catch(() => { try { OT.IO.autosave(app); } catch (_) {} })
+              .then(proceed);
+            return;
+          }
+          if (app && app.dirty && OT.IO && OT.IO.autosave) {
+            try { OT.IO.autosave(app); } catch (_) {}
+          }
+        } catch (_) {}
+        proceed();
       };
       const later = () => {
         card.classList.add('is-leaving');
@@ -2163,6 +2222,127 @@
 
       document.body.appendChild(card);
       this._updateBannerEl = card;
+    }
+    /* ============================ return to launcher ============================ */
+    // Triggered by clicking the OpenToon logo in the menubar. Re-opens the
+    // start screen overlay so the artist can pick a recent project / template
+    // without restarting the app. Confirms first when there's unsaved work.
+    returnToLauncher() {
+      const app = this.app;
+      if (!OT.Launcher) return;
+      // Already showing — nothing to do
+      if (document.querySelector('.launcher')) return;
+      const show = () => {
+        try {
+          app._launcher = new OT.Launcher(app);
+          app._launcher.show();
+        } catch (_) {}
+      };
+      if (!app.dirty) { show(); return; }
+      const body = U.el('div', { style: { maxWidth: '320px' } }, [
+        'This project has unsaved changes. Save before returning to the start screen?'
+      ]);
+      this.modal('Unsaved Changes', body, [
+        { label: 'Cancel' },
+        {
+          label: 'Discard',
+          fn: () => { show(); }
+        },
+        {
+          label: 'Save', primary: true,
+          fn: () => {
+            // saveProject is async; chain the launcher open after the file
+            // write resolves so a failed save doesn't strand the artist on
+            // the launcher with no way to retry.
+            const fsd = window.OpenToonDesktop && window.OpenToonDesktop.fs;
+            if (!fsd) { OT.IO.saveProject(app); app.dirty = false; show(); return; }
+            if (app.projectPath) {
+              OT.IO.writeProjectTo(app, app.projectPath)
+                .then(p => {
+                  app._addRecent(p);
+                  this.showSaveToast(p);
+                  show();
+                })
+                .catch(e => {
+                  this.showSaveToast(app.projectPath, { error: true, detail: e.message });
+                });
+              return;
+            }
+            const def = (app.project.name || 'untitled').replace(/[^\w\-]+/g, '_') + '.otoon';
+            fsd.saveDialog(def).then(p => {
+              if (!p) return;          // cancelled — stay put
+              OT.IO.writeProjectTo(app, p)
+                .then(saved => {
+                  app.projectPath = saved;
+                  app._addRecent(saved);
+                  this.showSaveToast(saved);
+                  show();
+                })
+                .catch(e => {
+                  this.showSaveToast(p, { error: true, detail: e.message });
+                });
+            });
+          }
+        }
+      ]);
+    }
+
+    /* ============================ save toast ============================ */
+    // Bottom-right confirmation when a project file is written. Matches the
+    // update-card visual language but keyed to --ok green and auto-dismisses
+    // after a short hold. `opts.error = true` switches it to the failure look.
+    showSaveToast(filePath, opts) {
+      opts = opts || {};
+      // Strip directory — show just the filename so the toast stays compact.
+      const name = String(filePath || '').replace(/^.*[\\/]/, '') || 'Untitled';
+      if (this._saveToastEl && this._saveToastEl.isConnected) {
+        this._saveToastEl.remove();
+      }
+      if (this._saveToastTimer) {
+        clearTimeout(this._saveToastTimer);
+        this._saveToastTimer = null;
+      }
+      const isErr = !!opts.error;
+      const eyebrow = isErr ? 'Save Failed' : (opts.label || 'Project Saved');
+      const checkSvg = isErr
+        ? '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
+            '<path d="M4 4 L12 12 M12 4 L4 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+          '</svg>'
+        : '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
+            '<path d="M3.5 8.5 L7 12 L13 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+          '</svg>';
+      const toast = el('div', {
+        class: 'save-toast' + (isErr ? ' is-error' : ''),
+        role: 'status',
+        'aria-live': 'polite'
+      });
+      toast.innerHTML =
+        '<div class="save-toast__bar"></div>' +
+        '<div class="save-toast__row">' +
+          '<span class="save-toast__check" aria-hidden="true">' + checkSvg + '</span>' +
+          '<div class="save-toast__body">' +
+            '<div class="save-toast__eyebrow brand-mono"></div>' +
+            '<div class="save-toast__name"></div>' +
+          '</div>' +
+        '</div>';
+      toast.querySelector('.save-toast__eyebrow').textContent = eyebrow;
+      toast.querySelector('.save-toast__name').textContent = opts.detail || name;
+
+      // Stack above any active update card / pill so the two don't collide.
+      const u = document.querySelector('.update-card, .update-pill');
+      const baseBottom = 46;
+      const gap = 10;
+      const offset = u ? (u.getBoundingClientRect().height + gap) : 0;
+      toast.style.bottom = (baseBottom + offset) + 'px';
+
+      document.body.appendChild(toast);
+      this._saveToastEl = toast;
+      const hold = isErr ? 4200 : 2600;
+      this._saveToastTimer = setTimeout(() => {
+        if (!toast.isConnected) return;
+        toast.classList.add('is-leaving');
+        setTimeout(() => { if (toast.isConnected) toast.remove(); }, 240);
+      }, hold);
     }
     _showUpdatePill() {
       if (this._updatePillEl && this._updatePillEl.isConnected) return;

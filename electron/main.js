@@ -263,7 +263,10 @@ function setupUpdates() {
     sendUpdateStatus('error', { message: err && err.message });
     console.log('Update check failed:', err && err.message);
   });
-  try { autoUpdater.checkForUpdatesAndNotify(); } catch (e) { /* offline */ }
+  // checkForUpdates() (not …AndNotify) keeps electron-updater from showing the
+  // unbranded native Windows toast — the renderer surfaces a branded in-app
+  // banner once the user is past the launcher.
+  try { autoUpdater.checkForUpdates(); } catch (e) { /* offline */ }
   // re-check every 30 minutes while running
   setInterval(() => { try { autoUpdater.checkForUpdates(); } catch (e) {} }, 30 * 60 * 1000);
 }

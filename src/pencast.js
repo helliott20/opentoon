@@ -398,6 +398,14 @@
       // active-layer kind: vector / drawing(raster) / group / video
       const al = a.activeLayer && a.activeLayer();
       const activeLayerKind = al ? al.type : null;
+      // Tool-overlay parity channel: any tool with on-canvas overlay state
+      // can implement penMeta(app) and it ships here automatically. The pen
+      // window's render dispatcher picks up `kind` and routes to the right
+      // shared draw routine. Add a new overlay → describe it in penMeta →
+      // render it in pen.js — no per-tool IPC plumbing.
+      const active = a.tools && a.tools.active;
+      const toolOverlay = (active && typeof active.penMeta === 'function')
+        ? active.penMeta(a) : null;
       // toolSize comes from the tool's cursorRadius (canonical per tool:
       // brush=brushSize/2, pencil=pencilSize/2, eraser=eraserSize/2) so
       // the pen window's wet-stroke width is correct even on the very
@@ -447,6 +455,7 @@
           scaleX: xfScaleX, scaleY: xfScaleY, rot: xfRot,
           sw: xfSw, sh: xfSh
         },
+        toolOverlay,
         // Procreate-style shape-snap (QuickShape): when the artist holds
         // at the end of a stroke, the brush/pencil tool detects a clean
         // primitive and morphs the rough drawing into it. The morph runs

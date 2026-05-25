@@ -11,13 +11,15 @@
 
   const TOOL_ICON = {
     select: '<path d="M5 3l15 8-7 1.6L11 20z"/>',
+    lasso: '<path d="M7 22a5 5 0 0 1-2-4"/><path d="M3.3 14A6.8 6.8 0 0 1 2 10c0-4.4 4.5-8 10-8s10 3.6 10 8-4.5 8-10 8a12 12 0 0 1-5-1"/><circle cx="5" cy="16" r="2"/>',
     brush: '<path d="M4 21c3.2 0 5-1.8 5-5l-3-3c-3.2 0-5 1.8-5 5z"/><path d="M8 13L19 2.2a2 2 0 0 1 3 3L11 16z"/>',
     pencil: '<path d="M4 20l4-1L19 8l-3-3L5 16z"/><path d="M14 6l3 3"/>',
     eraser: '<path d="M7 21l-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M21 21H7"/><path d="M5 11l9 9"/>',
     fill:   '<path d="M11 3l8 8-7.5 7.5L4 11z"/><path d="M9 5l-5 6"/><path d="M20 13c0 0 2.4 3 2.4 4.8a2.4 2.4 0 1 1-4.8 0c0-1.8 2.4-4.8 2.4-4.8z"/>'
   };
   const TOOL_NAME = {
-    select: 'Select', brush: 'Brush', pencil: 'Pencil', eraser: 'Eraser', fill: 'Paint Bucket'
+    select: 'Select Pixels', lasso: 'Lasso Select',
+    brush: 'Brush', pencil: 'Pencil', eraser: 'Eraser', fill: 'Paint Bucket'
   };
   function svg(p) {
     return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -48,7 +50,7 @@
         palette: [],
         activeLayerId: null,
         frame: 0,
-        tool: { name: 'brush', color: '#222222', toolSize: 6, toolOpacity: 1, pencil: false, brushFrac: 0.02, toolRadius: 0, tol: 0.4, snapDist: 0, inkDynamics: false, autoClose: false, smoothing: 0, snapShape: null, activeLayerKind: null, sel: {}, transform: {} },
+        tool: { name: 'brush', color: '#222222', toolSize: 6, toolOpacity: 1, pencil: false, brushFrac: 0.02, toolRadius: 0, tol: 0.4, snapDist: 0, inkDynamics: false, autoClose: false, smoothing: 0, snapShape: null, activeLayerKind: null, sel: {}, transform: {}, overlay: null },
         wetStroke: null,
         // Live eraser destination-out punches (from main mid-drag); cleared
         // by frame/active-layer change or by the vector-cel-replace that
@@ -104,7 +106,7 @@
         s.className = 'psep'; bar.appendChild(s);
       };
 
-      ['select', 'brush', 'pencil', 'eraser', 'fill'].forEach(name => {
+      ['select', 'lasso', 'brush', 'pencil', 'eraser', 'fill'].forEach(name => {
         const btn = mkBtn(svg(TOOL_ICON[name]), TOOL_NAME[name],
           () => this._cmd({ type: 'tool', tool: name }));
         this.toolBtns[name] = btn;
@@ -295,7 +297,7 @@
       // Close any existing popover first.
       this._closeToolPopover();
       // Skip tools that don't have meaningful settings.
-      if (toolName === 'select' || toolName === 'fill') {
+      if (toolName === 'select' || toolName === 'lasso' || toolName === 'fill') {
         if (toolName === 'fill') {
           // Fill: just open the color picker.
           if (this.colorInput) this.colorInput.click();
@@ -448,12 +450,16 @@
     _positionLassoToolbar(xf) {
       const tb = this.lassoTb;
       if (!tb || this.fit.w <= 0) return;
-      const topMid = OT.LassoOverlay.topMidOf(xf, xf.mode || 'uniform');
+      const mode = xf.mode || 'uniform';
+      const topMid = OT.LassoOverlay.topMidOf(xf, mode);
       // project px -> canvas CSS px (matches _compositeStage transforms).
       const projScale = this.fit.w / Math.max(1, this.state.project.width);
       const cssX = this.view.x + this.view.scale * (this.fit.x + projScale * topMid.x);
       const cssY = this.view.y + this.view.scale * (this.fit.y + projScale * topMid.y);
-      const gap = 22;
+      // Affine modes have a rotate knob ~26 + 7 CSS px above the bbox top —
+      // push the chip up past it so it doesn't cover the knob. Distort and
+      // warp don't draw a rotate knob, so the tighter gap is fine there.
+      const gap = (mode === 'distort' || mode === 'warp') ? 22 : 44;
       // Cache the toolbar width — offsetWidth forces synchronous layout,
       // which at 30 Hz costs ~1 ms each. Width only changes when the
       // toolbar visually changes (Reset hidden / shown), which we re-key
@@ -478,8 +484,13 @@
     _startAntsTick() {
       if (this._antsTimer) return;
       this._antsTimer = setInterval(() => {
-        const xf = this.state.tool && this.state.tool.transform;
-        if (!xf || !xf.armed) { this._stopAntsTick(); return; }
+        const tool = this.state.tool;
+        const xf = tool && tool.transform;
+        const armed = xf && xf.armed;
+        const overlay = tool && tool.overlay;
+        // Animate while ANY overlay needs ants: armed transform, lasso
+        // loop being drawn, marquee drag, lifted raster selection, …
+        if (!armed && !overlay) { this._stopAntsTick(); return; }
         this._scheduleComposite();
       }, 75);
     }
@@ -612,6 +623,7 @@
       // drag. Cheap setter; the actual rebuild is deferred until the
       // next composite that needs the cache.
       switch (op.op) {
+        case 'init':
         case 'snapshot':
         case 'layers-replace':
         case 'vector-cel-replace':
@@ -646,6 +658,15 @@
           }
           if (op.toolMeta) this._applyToolMeta(op.toolMeta);
           if (this.hint) this.hint.style.display = 'none';
+          // Initial open: Electron sometimes withholds requestAnimationFrame
+          // until the window gets focus, which left the canvas blank until
+          // the user clicked something. Paint synchronously so the project
+          // appears the moment init arrives.
+          if (this._compositeRAF) {
+            cancelAnimationFrame(this._compositeRAF);
+            this._compositeRAF = 0;
+          }
+          try { this._compositeStage(); } catch (e) { console.error(e); }
           break;
         }
         case 'layers-replace': {
@@ -777,6 +798,15 @@
       if ('snapShape' in meta) t.snapShape = meta.snapShape;
       if (meta.sel) t.sel = meta.sel;
       if (meta.transform) t.transform = meta.transform;
+      // Generic tool-overlay channel — see pencast.js: pen-window parity
+      // contract. `null` clears, an object describes overlay state for
+      // the pen to render via _drawToolOverlay.
+      if ('toolOverlay' in meta) {
+        t.overlay = meta.toolOverlay;
+        // Animation tick must run while there's an unrolled lasso loop /
+        // active marquee / lifted region — same cadence as armed transform.
+        if (t.overlay) this._startAntsTick();
+      }
       if (typeof meta.activeLayerKind === 'string') t.activeLayerKind = meta.activeLayerKind;
       // Tool button active-class — only update when the active tool
       // actually changes. classList.toggle in a 5-item loop at 30 Hz is
@@ -802,7 +832,16 @@
         this.frameLabel.textContent = frameTxt;
       }
       this._refreshActions(t.sel || {}, t.transform);
-      this._applyTransform(t.transform);
+      // Select Pixels uses the same floating chip as the lasso transform —
+      // synthesise an armed-transform-shaped object from the overlay so
+      // _applyTransform doesn't have to know about the select tool.
+      let xfForChip = t.transform;
+      if (t.overlay && t.overlay.kind === 'select-lifted' && t.overlay.s) {
+        xfForChip = Object.assign({}, t.overlay.s, {
+          armed: true, mode: 'uniform', isRaster: true
+        });
+      }
+      this._applyTransform(xfForChip);
       // If the tool/layer is no longer wet-stroke-eligible, drop any wet
       if (this.state.wetStroke
           && (t.activeLayerKind !== 'vector'
@@ -1134,13 +1173,17 @@
         }
         // Live transform: the selected strokes are flagged _lassoHidden
         // once per session (in _ensureLassoSession) so the cel cache
-        // doesn't render them at their original position. While a session
-        // is active we also cache the static layer composite in
-        // _baseCache and blit it instead of re-running compositeStage
-        // per frame — main does the same trick (only its overlay canvas
-        // redraws during a transform, base canvas stays put).
+        // doesn't render them at their original position.
         const lassoSession = this._ensureLassoSession();
-        if (lassoSession && !wetForRender) {
+        // Base-composite cache: when no wet stroke is in flight, the layer
+        // composite is invariant between frames. Build it once, blit per
+        // overlay tick — one drawImage instead of iterating every layer's
+        // strokes through compositeStage every ~33ms. This is what kept
+        // the pen's FPS pinned to main's during ants animation; without
+        // it, marching ants triggered full re-composite at 13fps minimum.
+        // The cache is invalidated by ANY state change (cel/layer/frame/
+        // project/erase-overlay/lasso-orig — see the op switch above).
+        if (!wetForRender) {
           if (this._baseCacheDirty || !this._baseCache) this._renderBaseCache();
           c.drawImage(this._baseCache, 0, 0);
         } else {
@@ -1160,6 +1203,8 @@
         // sizes account for the combined pen-view scale so they look the
         // same regardless of how the artist has zoomed locally.
         this._drawTransformHud(c, projScale * this.view.scale);
+        // Tool-overlay parity channel — see _drawToolOverlay header.
+        this._drawToolOverlay(c, projScale * this.view.scale);
       }
       c.restore();   // local view
       // Cursor circle — drawn in screen-space (after restore), so the
@@ -1388,6 +1433,58 @@
       // surface main passes its `vt` through. One call paints ants +
       // handles identically to the main canvas.
       OT.LassoOverlay.drawOverlay(c, xf, xf.mode || 'uniform', viewScale);
+    }
+
+    // Render the generic per-tool overlay (the lasso loop being drawn, a
+    // marquee drag, a lifted raster selection, …). Tools describe their
+    // state via Tool.penMeta(); pencast ships it; we dispatch on `kind`.
+    // Add a new overlay → add a `case` here + a `kind` in penMeta(). One
+    // canonical render path for both windows via OT.LassoOverlay.
+    _drawToolOverlay(c, viewScale) {
+      const o = this.state.tool && this.state.tool.overlay;
+      if (!o) return;
+      switch (o.kind) {
+        case 'lasso-loop': {
+          const poly = o.poly;
+          if (!poly || poly.length < 1) break;
+          const trace = (ctx) => {
+            ctx.beginPath();
+            ctx.moveTo(poly[0].x, poly[0].y);
+            for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+          };
+          OT.LassoOverlay.ants(c, viewScale, trace);
+          // start-point pip so the artist sees where the loop will close
+          const s = poly[0], r = 4 / Math.max(0.001, viewScale);
+          c.save();
+          c.fillStyle = '#fff'; c.strokeStyle = '#000';
+          c.lineWidth = 1.2 / Math.max(0.001, viewScale);
+          c.beginPath(); c.arc(s.x, s.y, r, 0, Math.PI * 2);
+          c.fill(); c.stroke();
+          c.restore();
+          break;
+        }
+        case 'select-marquee': {
+          const r = o.rect;
+          if (!r) break;
+          OT.LassoOverlay.ants(c, viewScale, (ctx) => {
+            ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h);
+          });
+          break;
+        }
+        case 'select-lifted': {
+          if (!o.s) break;
+          OT.LassoOverlay.drawOverlay(c, o.s, 'uniform', viewScale);
+          break;
+        }
+        case 'select-vsel': {
+          const r = o.rect;
+          if (!r) break;
+          OT.LassoOverlay.ants(c, viewScale, (ctx) => {
+            ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h);
+          });
+          break;
+        }
+      }
     }
 
     /* ---------------- pointer input ---------------- */

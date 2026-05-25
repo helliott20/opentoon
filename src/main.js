@@ -261,7 +261,19 @@
       });
 
       setInterval(() => {
-        if (this.dirty && OT.IO.autosave(this)) this.dirty = false;
+        if (this.dirty) {
+          // Once the project has a real file (after first Save…), autosave
+          // writes back to that path instead of (or as well as) the
+          // crash-recovery copy. Keeps the artist's file current without
+          // requiring a manual Ctrl+S.
+          if (this.projectPath && OT.IO.writeProjectTo) {
+            OT.IO.writeProjectTo(this, this.projectPath)
+              .then(() => { this.dirty = false; })
+              .catch(() => { if (OT.IO.autosave(this)) this.dirty = false; });
+          } else if (OT.IO.autosave(this)) {
+            this.dirty = false;
+          }
+        }
         this._savePrefs();
       }, 20000);
       this._initialOpen();
@@ -1556,11 +1568,24 @@
     }
     saveProject(saveAs) {
       const fsd = window.OpenToonDesktop && window.OpenToonDesktop.fs;
-      if (!fsd) { OT.IO.saveProject(this); this.ui.status('Project saved'); return; }
+      if (!fsd) {
+        OT.IO.saveProject(this);
+        this.ui.status('Project saved');
+        this.ui.showSaveToast((this.project.name || 'untitled') + '.otoon');
+        return;
+      }
       const write = path => {
         OT.IO.writeProjectTo(this, path)
-          .then(p => { this.projectPath = p; this._addRecent(p); this.ui.status('Saved ' + p); })
-          .catch(e => this.ui.status('Save failed: ' + e.message));
+          .then(p => {
+            this.projectPath = p;
+            this._addRecent(p);
+            this.ui.status('Saved ' + p);
+            this.ui.showSaveToast(p);
+          })
+          .catch(e => {
+            this.ui.status('Save failed: ' + e.message);
+            this.ui.showSaveToast(path, { error: true, detail: e.message });
+          });
       };
       // silent save-in-place once the project has a file; dialog otherwise
       if (this.projectPath && !saveAs) { write(this.projectPath); return; }
