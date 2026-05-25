@@ -110,7 +110,7 @@
     { id: 'goto-start', label: 'Go to start', cat: 'Animation', def: 'home', prevent: 1, run: a => a.playback.gotoStart() },
     { id: 'goto-end', label: 'Go to end', cat: 'Animation', def: 'end', prevent: 1, run: a => a.playback.gotoEnd() },
     { id: 'frame-insert', label: 'Insert frame', cat: 'Animation', def: 'f', noRepeat: 1, run: a => a.insertFrame() },
-    { id: 'frame-extend', label: 'Extend exposure', cat: 'Animation', def: 'shift+f', noRepeat: 1, run: a => a.extendExposure() },
+    { id: 'frame-extend', label: 'Extend frame', cat: 'Animation', def: 'shift+f', noRepeat: 1, run: a => a.extendExposure() },
     { id: 'frame-duplicate', label: 'Duplicate drawing', cat: 'Animation', def: 'ctrl+d', prevent: 1, noRepeat: 1, run: a => a.duplicateDrawing() },
     { id: 'layer-new', label: 'New layer', cat: 'Animation', def: 'ctrl+shift+n', prevent: 1, noRepeat: 1, run: a => a.addLayer() },
     { id: 'layer-group', label: 'Group selected layers', cat: 'Animation', def: 'ctrl+g', prevent: 1, noRepeat: 1, run: a => a.groupSelectedLayers() },
@@ -791,7 +791,7 @@
       const l = this._dl(); if (!l) return;
       const num = l.exposure[this.frame];
       if (!num) { this.ui.status('No drawing to extend'); return; }
-      this.doStruct('Extend exposure', () => {
+      this.doStruct('Extend frame', () => {
         const f = this.frame + 1;
         if (f >= this.project.frameCount) this.project.frameCount = f + 1;
         l.exposure[f] = num;
@@ -801,7 +801,7 @@
     clearExposure() {
       const l = this._dl(); if (!l) return;
       if (!l.exposure[this.frame]) { this.ui.status('Frame already empty'); return; }
-      this.doStruct('Clear exposure', () => { l.exposure[this.frame] = 0; });
+      this.doStruct('Clear frame', () => { l.exposure[this.frame] = 0; });
     }
     // Clear every frame in every currently-selected timeline run. Single
     // undo entry; matches what users expect when they multi-select frames

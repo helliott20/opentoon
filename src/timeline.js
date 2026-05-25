@@ -117,7 +117,7 @@
       tb.appendChild(this._btn('Add drawing layer', ICON.addlayer, () => app.addLayer()));
       tb.appendChild(this._btn('New drawing on current frame', ICON.newdraw, () => app.newDrawing()));
       tb.appendChild(this._btn('Duplicate drawing', ICON.dup, () => app.duplicateDrawing()));
-      tb.appendChild(this._btn('Extend exposure', ICON.extend, () => app.extendExposure()));
+      tb.appendChild(this._btn('Extend frame', ICON.extend, () => app.extendExposure()));
       // "Remove frame" splices the frame column out of every layer (single
       // current frame). Multi-frame selection delete is handled by the Del
       // key handler in main.js which clears the selected runs.
@@ -497,7 +497,7 @@
       const end = () => {
         if (this._celDrag) {
           if (this._celDrag.moved) {
-            app._commitStruct('Edit exposure', this._celDrag.before);
+            app._commitStruct('Edit frame', this._celDrag.before);
             // Refresh selectedRuns to their new on-screen positions so a
             // follow-up drag uses the updated locations as the baseline.
             this.selectedRuns = this.selectedRuns.map(sr => {
@@ -634,7 +634,7 @@
       app.ui.contextMenu(e.clientX, e.clientY, [
         { label: 'New drawing', fn: () => app.newDrawing() },
         { label: 'Duplicate drawing', fn: () => app.duplicateDrawing() },
-        { label: 'Extend exposure', fn: () => app.extendExposure() },
+        { label: 'Extend frame', fn: () => app.extendExposure() },
         { sep: 1 },
         { label: 'Copy drawing', fn: () => app.copyDrawing() },
         { label: 'Cut drawing', fn: () => app.cutDrawing() },

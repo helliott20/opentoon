@@ -174,8 +174,8 @@
           { sep: 1 },
           { label: 'New Drawing', fn: () => a.newDrawing() },
           { label: 'Duplicate Drawing', fn: () => a.duplicateDrawing() },
-          { label: 'Extend Exposure', fn: () => a.extendExposure() },
-          { label: 'Clear Exposure', fn: () => a.clearExposure() },
+          { label: 'Extend Frame', fn: () => a.extendExposure() },
+          { label: 'Clear Frame', fn: () => a.clearExposure() },
           { sep: 1 },
           { label: 'Insert Frame', fn: () => a.insertFrame() },
           { label: 'Remove Frame', fn: () => a.removeFrame() }
