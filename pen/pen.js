@@ -65,6 +65,12 @@
       // scaling). Updated on pointermove/hover, cleared on pointerleave.
       // Used by _compositeStage to draw the cursor circle indicator.
       this._cursorCss = null;
+      // Project-sized cache of the static layer composite. Rebuilt only
+      // when the project / selection meaningfully changes; blitted every
+      // frame during a transform so we don't iterate layers ~30 times/sec
+      // when nothing's actually changing under the lasso box.
+      this._baseCache = null;
+      this._baseCacheDirty = true;
 
       this._buildBar();
       this._buildLassoTb();
@@ -99,14 +105,13 @@
       };
 
       ['select', 'brush', 'pencil', 'eraser', 'fill'].forEach(name => {
-        this.toolBtns[name] = mkBtn(svg(TOOL_ICON[name]), TOOL_NAME[name],
+        const btn = mkBtn(svg(TOOL_ICON[name]), TOOL_NAME[name],
           () => this._cmd({ type: 'tool', tool: name }));
+        this.toolBtns[name] = btn;
+        this._installLongPress(btn, name);
       });
       sep();
-      mkBtn('<span class="glyph">−</span>', 'Smaller brush  ([)',
-        () => this._cmd({ type: 'brush-size', delta: -1 }));
-      mkBtn('<span class="glyph">+</span>', 'Bigger brush  (])',
-        () => this._cmd({ type: 'brush-size', delta: 1 }));
+      this._buildSizeChip();
 
       // colour chip with a hidden native colour picker behind it
       const wrap = document.createElement('label');
@@ -165,66 +170,321 @@
       });
       bar.appendChild(this.actions);
     }
-    // Lasso transform toolbar — visible when the main side has a transform
-    // armed. Buttons fire one-shot commands; the toolbar's mode toggles
-    // are driven by meta.transform on each frame.
+
+    /* ---------------- inline size chip + tool-settings popover ----------------
+       Drag the chip horizontally to resize live (px-per-px feel). Tap (no
+       drag) opens a popover with size + opacity + smoothing sliders. The
+       same popover opens via tap-and-hold on a tool button. */
+    _buildSizeChip() {
+      const chip = document.createElement('div');
+      chip.className = 'psize';
+      chip.title = 'Drag to resize · Tap for options';
+      const dot = document.createElement('span');
+      dot.className = 'pdot';
+      const num = document.createElement('span');
+      num.className = 'pnum';
+      chip.appendChild(dot); chip.appendChild(num);
+      this.bar.appendChild(chip);
+      this.sizeChip = chip;
+      this.sizeChipDot = dot;
+      this.sizeChipNum = num;
+      this._refreshSizeChip();
+
+      // pointer-driven drag: small horizontal movement = absolute resize.
+      // A drag delta > 4 px counts as a drag; smaller releases re-open the
+      // popover (tap-to-open) so the artist can use sliders directly.
+      let dragging = null;
+      const SIZE_MIN = 1, SIZE_MAX = 300, DRAG_THRESH = 4;
+      chip.addEventListener('pointerdown', ev => {
+        if (ev.button !== 0 && ev.pointerType === 'mouse') return;
+        try { chip.setPointerCapture(ev.pointerId); } catch (_) {}
+        dragging = {
+          startX: ev.clientX,
+          startSize: Math.max(1, this.state.tool.toolSize || 6),
+          moved: false
+        };
+        ev.preventDefault();
+      });
+      chip.addEventListener('pointermove', ev => {
+        if (!dragging) return;
+        const dx = ev.clientX - dragging.startX;
+        if (!dragging.moved && Math.abs(dx) >= DRAG_THRESH) {
+          dragging.moved = true;
+          chip.classList.add('dragging');
+        }
+        if (!dragging.moved) return;
+        // ~0.6 px-per-px feel: a 200px drag covers roughly 1->120 by
+        // exponential mapping so small sizes have fine control.
+        const factor = Math.pow(1.012, dx);
+        const next = Math.max(SIZE_MIN, Math.min(SIZE_MAX,
+          Math.round(dragging.startSize * factor)));
+        this.state.tool.toolSize = next;
+        this._refreshSizeChip();
+        this._cmd({ type: 'brush-size', absolute: next });
+      });
+      const endDrag = ev => {
+        if (!dragging) return;
+        const wasDrag = dragging.moved;
+        chip.classList.remove('dragging');
+        try { chip.releasePointerCapture(ev.pointerId); } catch (_) {}
+        dragging = null;
+        if (!wasDrag) this._openToolPopover(this.state.tool.name || 'brush', chip);
+      };
+      chip.addEventListener('pointerup', endDrag);
+      chip.addEventListener('pointercancel', endDrag);
+    }
+    _refreshSizeChip() {
+      if (!this.sizeChip) return;
+      const sz = Math.max(1, Math.round(this.state.tool.toolSize || 6));
+      if (this._sizeChipSz === sz) return;     // no change — skip DOM writes
+      this._sizeChipSz = sz;
+      const visDot = Math.min(20, Math.max(4, sz / 3));
+      this.sizeChipDot.style.width = visDot + 'px';
+      this.sizeChipDot.style.height = visDot + 'px';
+      this.sizeChipNum.textContent = sz;
+    }
+    _installLongPress(btn, toolName) {
+      // 380ms hold opens the popover. Movement > 6 px cancels (so a normal
+      // tap-then-pan doesn't trigger). Pointer leave also cancels.
+      const HOLD_MS = 380, MOVE_CANCEL = 6;
+      let state = null;
+      const start = ev => {
+        if (ev.button !== 0 && ev.pointerType === 'mouse') return;
+        state = {
+          startX: ev.clientX, startY: ev.clientY,
+          fired: false,
+          timer: setTimeout(() => {
+            if (!state) return;
+            state.fired = true;
+            btn.classList.remove('holding');
+            this._openToolPopover(toolName, btn);
+          }, HOLD_MS)
+        };
+        btn.classList.add('holding');
+      };
+      const move = ev => {
+        if (!state) return;
+        const dx = ev.clientX - state.startX, dy = ev.clientY - state.startY;
+        if (Math.hypot(dx, dy) > MOVE_CANCEL) cancel();
+      };
+      const cancel = () => {
+        if (!state) return;
+        clearTimeout(state.timer);
+        btn.classList.remove('holding');
+        state = null;
+      };
+      const up = ev => {
+        if (!state) return;
+        if (state.fired) {
+          // Long press already opened the popover — swallow the click so
+          // the artist doesn't also switch tools.
+          ev.stopPropagation();
+          ev.preventDefault();
+          cancel();
+          return;
+        }
+        cancel();
+      };
+      btn.addEventListener('pointerdown', start);
+      btn.addEventListener('pointermove', move);
+      btn.addEventListener('pointerup', up);
+      btn.addEventListener('pointercancel', cancel);
+      btn.addEventListener('pointerleave', cancel);
+    }
+    _openToolPopover(toolName, anchor) {
+      // Close any existing popover first.
+      this._closeToolPopover();
+      // Skip tools that don't have meaningful settings.
+      if (toolName === 'select' || toolName === 'fill') {
+        if (toolName === 'fill') {
+          // Fill: just open the color picker.
+          if (this.colorInput) this.colorInput.click();
+        }
+        return;
+      }
+      const pop = document.createElement('div');
+      pop.className = 'ptpop';
+      const t = this.state.tool;
+      const mkSlider = (label, min, max, step, value, onInput) => {
+        const row = document.createElement('div');
+        row.className = 'prow';
+        const lbl = document.createElement('div');
+        lbl.className = 'plabel';
+        lbl.textContent = label;
+        const inp = document.createElement('input');
+        inp.type = 'range';
+        inp.min = String(min); inp.max = String(max); inp.step = String(step);
+        inp.value = String(value);
+        const val = document.createElement('div');
+        val.className = 'pval';
+        val.textContent = String(value);
+        inp.addEventListener('input', () => {
+          const v = Number(inp.value);
+          val.textContent = (step >= 1) ? String(Math.round(v)) : v.toFixed(2);
+          onInput(v);
+        });
+        row.appendChild(lbl); row.appendChild(inp); row.appendChild(val);
+        pop.appendChild(row);
+        return inp;
+      };
+      // Size: 1..300 integer
+      mkSlider('Size', 1, 300, 1, Math.round(t.toolSize || 6), v => {
+        this.state.tool.toolSize = v;
+        this._refreshSizeChip();
+        this._cmd({ type: 'brush-size', absolute: v });
+      });
+      // Eraser has no meaningful opacity/smoothing (it's a hard mask).
+      if (toolName !== 'eraser') {
+        mkSlider('Opacity', 0.05, 1, 0.01,
+          t.toolOpacity == null ? 1 : t.toolOpacity, v => {
+            this.state.tool.toolOpacity = v;
+            this._cmd({ type: 'brush-opacity', value: v });
+          });
+        mkSlider('Smoothing', 0, 1, 0.01, t.smoothing || 0, v => {
+          this.state.tool.smoothing = v;
+          this._cmd({ type: 'brush-smoothing', value: v });
+        });
+      }
+      // Position the popover under the anchor.
+      this.bar.parentElement.appendChild(pop);
+      const a = anchor.getBoundingClientRect();
+      const barH = this.bar.offsetHeight || 48;
+      const leftMax = window.innerWidth - 260;
+      pop.style.left = Math.max(8, Math.min(leftMax, a.left)) + 'px';
+      pop.style.top = (barH + 4) + 'px';
+      // Animate in.
+      requestAnimationFrame(() => pop.classList.add('open'));
+      this._toolPopover = pop;
+
+      // Click outside closes. Bind once and remove on close so we don't
+      // leak listeners.
+      this._toolPopOutside = ev => {
+        if (!this._toolPopover) return;
+        if (pop.contains(ev.target)) return;
+        if (anchor.contains(ev.target)) return;
+        this._closeToolPopover();
+      };
+      // Defer so the opening pointerup doesn't immediately close.
+      setTimeout(() => {
+        if (this._toolPopover) {
+          document.addEventListener('pointerdown', this._toolPopOutside, true);
+        }
+      }, 0);
+    }
+    _closeToolPopover() {
+      const pop = this._toolPopover;
+      if (!pop) return;
+      this._toolPopover = null;
+      if (this._toolPopOutside) {
+        document.removeEventListener('pointerdown', this._toolPopOutside, true);
+        this._toolPopOutside = null;
+      }
+      pop.classList.remove('open');
+      setTimeout(() => { if (pop.parentNode) pop.parentNode.removeChild(pop); }, 200);
+    }
+
+    // Lasso transform toolbar — uses #lasso-toolbar from pen.html, which
+    // has identical markup to index.html and is styled by the shared
+    // styles/lasso-tb.css. We just delegate clicks back to main as
+    // lasso-mode commands; the active-mode pill is driven by meta.transform.
     _buildLassoTb() {
-      const tb = document.getElementById('penLassoTb');
+      const tb = document.getElementById('lasso-toolbar');
       if (!tb) return;
       this.lassoTb = tb;
-      const mk = (label, mode, extraClass) => {
-        const b = document.createElement('button');
-        b.textContent = label;
-        b.dataset.mode = mode;
-        if (extraClass) b.className = extraClass;
-        b.addEventListener('click', () => {
-          if (b.classList.contains('disabled')) return;
-          this._cmd({ type: 'lasso-mode', mode: mode });
-          b.blur();
-        });
-        tb.appendChild(b);
-        return b;
-      };
-      const sep = () => {
-        const s = document.createElement('span');
-        s.className = 'pen-lasso-sep';
-        tb.appendChild(s);
-      };
+      tb.addEventListener('click', e => {
+        const btn = e.target.closest('button');
+        if (!btn) return;
+        if (btn.style.opacity === '0.45') return;   // greyed out
+        const mode = btn.dataset.mode;
+        if (!mode) return;
+        this._cmd({ type: 'lasso-mode', mode });
+        btn.blur();
+      });
       this.lassoBtns = {};
-      this.lassoBtns.uniform  = mk('Uniform',  'uniform');
-      this.lassoBtns.freeform = mk('Freeform', 'freeform');
-      this.lassoBtns.distort  = mk('Distort',  'distort');
-      this.lassoBtns.warp     = mk('Warp',     'warp');
-      sep();
-      this.lassoBtns.reset    = mk('Reset',    'reset');
-      sep();
-      this.lassoBtns.commit   = mk('✓',   'commit', 'pen-lasso-commit');
-      this.lassoBtns.cancel   = mk('✕',   'cancel', 'pen-lasso-cancel');
-      this.lassoBtns.commit.title = 'Commit transform (Enter)';
-      this.lassoBtns.cancel.title = 'Cancel transform (Esc)';
+      for (const btn of tb.querySelectorAll('button')) {
+        if (btn.dataset.mode) this.lassoBtns[btn.dataset.mode] = btn;
+      }
     }
     _applyTransform(xf) {
       const tb = this.lassoTb;
       if (!tb) return;
-      if (!xf || !xf.armed) { tb.classList.add('hidden'); return; }
-      tb.classList.remove('hidden');
-      const modeBtns = ['uniform', 'freeform', 'distort', 'warp'];
-      for (const m of modeBtns) {
-        const b = this.lassoBtns[m];
-        if (!b) continue;
-        b.classList.toggle('active', m === xf.mode);
-        // Distort + warp are vector-only — grey them for raster lassos.
-        if (xf.isRaster && (m === 'distort' || m === 'warp')) {
-          b.classList.add('disabled');
-        } else {
-          b.classList.remove('disabled');
+      if (!xf || !xf.armed) {
+        if (this._xfButtonsSig !== 'off') {
+          tb.classList.add('hidden');
+          this._xfButtonsSig = 'off';
+        }
+        this._stopAntsTick();
+        return;
+      }
+      // Button-state signature — mode + raster flag is all the toolbar
+      // buttons depend on. Avoid re-toggling classList every meta.
+      const btnSig = (xf.mode || 'uniform') + '|' + (!!xf.isRaster);
+      if (btnSig !== this._xfButtonsSig) {
+        this._xfButtonsSig = btnSig;
+        tb.classList.remove('hidden');
+        const modeBtns = ['uniform', 'freeform', 'distort', 'warp'];
+        for (const m of modeBtns) {
+          const b = this.lassoBtns[m];
+          if (!b) continue;
+          b.classList.toggle('active', m === xf.mode);
+          if (xf.isRaster && (m === 'distort' || m === 'warp')) {
+            b.style.opacity = '0.45';
+          } else {
+            b.style.opacity = '';
+          }
+        }
+        if (this.lassoBtns.reset) {
+          this.lassoBtns.reset.style.display = 'none';
         }
       }
-      // Reset only makes sense for vector free-transform-tool sessions;
-      // hide it here as the main side does (the lasso path doesn't use it).
-      if (this.lassoBtns.reset) {
-        this.lassoBtns.reset.style.display = xf.isRaster ? 'none' : '';
+      this._positionLassoToolbar(xf);
+      this._startAntsTick();
+    }
+
+    // Anchor the lasso toolbar's bottom-mid to the top-mid of the current
+    // selection in pen-canvas CSS px. Mode-aware: uses the actual top edge
+    // of distort/warp meshes so the toolbar follows the artwork as it
+    // bends, same as main's _positionToolbar.
+    _positionLassoToolbar(xf) {
+      const tb = this.lassoTb;
+      if (!tb || this.fit.w <= 0) return;
+      const topMid = OT.LassoOverlay.topMidOf(xf, xf.mode || 'uniform');
+      // project px -> canvas CSS px (matches _compositeStage transforms).
+      const projScale = this.fit.w / Math.max(1, this.state.project.width);
+      const cssX = this.view.x + this.view.scale * (this.fit.x + projScale * topMid.x);
+      const cssY = this.view.y + this.view.scale * (this.fit.y + projScale * topMid.y);
+      const gap = 22;
+      // Cache the toolbar width — offsetWidth forces synchronous layout,
+      // which at 30 Hz costs ~1 ms each. Width only changes when the
+      // toolbar visually changes (Reset hidden / shown), which we re-key
+      // off of _xfButtonsSig above. Re-measure when the sig flips.
+      if (this._tbWidth == null || this._tbSig !== this._xfButtonsSig) {
+        this._tbWidth = tb.offsetWidth || 360;
+        this._tbSig = this._xfButtonsSig;
       }
+      const tbW = this._tbWidth;
+      const stage = tb.parentElement;
+      const stageW = stage ? stage.clientWidth : window.innerWidth;
+      const x = Math.max(tbW / 2 + 8, Math.min(stageW - tbW / 2 - 8, cssX));
+      const y = Math.max(36, cssY - gap);
+      // Skip writes when neither coordinate moved enough to matter — a 1 px
+      // round-trip per frame still costs a style recalc downstream.
+      if (this._tbLastX === x && this._tbLastY === y) return;
+      this._tbLastX = x; this._tbLastY = y;
+      tb.style.left = x + 'px';
+      tb.style.top = y + 'px';
+      tb.style.transform = 'translate(-50%,-100%)';
+    }
+    _startAntsTick() {
+      if (this._antsTimer) return;
+      this._antsTimer = setInterval(() => {
+        const xf = this.state.tool && this.state.tool.transform;
+        if (!xf || !xf.armed) { this._stopAntsTick(); return; }
+        this._scheduleComposite();
+      }, 75);
+    }
+    _stopAntsTick() {
+      if (this._antsTimer) { clearInterval(this._antsTimer); this._antsTimer = null; }
     }
     // Local zoom -- adjusts this.view only, never sends to the main app.
     _zoomLocal(factor, cx, cy) {
@@ -347,6 +607,22 @@
     _applyOp(op) {
       if (!op || !op.op) return;
       const s = this.state;
+      // Any structural change to project/layers/cels/eraser/selection
+      // invalidates the base-composite cache used during a transform
+      // drag. Cheap setter; the actual rebuild is deferred until the
+      // next composite that needs the cache.
+      switch (op.op) {
+        case 'snapshot':
+        case 'layers-replace':
+        case 'vector-cel-replace':
+        case 'erase-overlay':
+        case 'frame-change':
+        case 'active-layer':
+        case 'project-meta':
+        case 'lasso-orig':
+          this._baseCacheDirty = true;
+          break;
+      }
       switch (op.op) {
         case 'init': {
           if (op.project) {
@@ -451,6 +727,20 @@
           if (op.meta) this._applyToolMeta(op.meta);
           break;
         }
+        case 'lasso-orig': {
+          // Fresh v.orig snapshot from main — published on session arm
+          // and every mode switch (rebaseline). Includes the strokeIds
+          // and layerId (formerly on every tool-meta — moved here so
+          // the 30 Hz tool-meta payload stays small).
+          this._lassoOrig = op.origPts || null;
+          this._lassoOrigSig = op.sig || null;
+          this._lassoLayerId = op.layerId || null;
+          if (this._lassoSession) {
+            this._lassoSession.preview = null;
+            this._lassoSession.origMap = this._lassoOrig;
+          }
+          break;
+        }
         default: break;     // forward-compatible: unknown ops are ignored
       }
     }
@@ -488,15 +778,29 @@
       if (meta.sel) t.sel = meta.sel;
       if (meta.transform) t.transform = meta.transform;
       if (typeof meta.activeLayerKind === 'string') t.activeLayerKind = meta.activeLayerKind;
-      // toolbar visuals
-      for (const n in this.toolBtns)
-        this.toolBtns[n].classList.toggle('active', n === t.name);
-      if (t.color && /^#[0-9a-fA-F]{6}$/.test(t.color))
-        this.colorInput.value = t.color;
-      if (this.colorWrap) this.colorWrap.style.background = t.color || '#222222';
+      // Tool button active-class — only update when the active tool
+      // actually changes. classList.toggle in a 5-item loop at 30 Hz is
+      // ~150 style invalidations / sec for no reason.
+      if (this._toolBtnsName !== t.name) {
+        this._toolBtnsName = t.name;
+        for (const n in this.toolBtns)
+          this.toolBtns[n].classList.toggle('active', n === t.name);
+      }
+      // Colour chip — also dedupe.
+      if (t.color !== this._lastColor) {
+        this._lastColor = t.color;
+        if (t.color && /^#[0-9a-fA-F]{6}$/.test(t.color))
+          this.colorInput.value = t.color;
+        if (this.colorWrap) this.colorWrap.style.background = t.color || '#222222';
+      }
+      this._refreshSizeChip();
       const f = (this.state.frame || 0) + 1;
       const total = this.state.project.frameCount || 1;
-      if (this.frameLabel) this.frameLabel.textContent = f + ' / ' + total;
+      const frameTxt = f + ' / ' + total;
+      if (this.frameLabel && this._lastFrameTxt !== frameTxt) {
+        this._lastFrameTxt = frameTxt;
+        this.frameLabel.textContent = frameTxt;
+      }
       this._refreshActions(t.sel || {}, t.transform);
       this._applyTransform(t.transform);
       // If the tool/layer is no longer wet-stroke-eligible, drop any wet
@@ -510,9 +814,19 @@
     _refreshActions(sel, transform) {
       const el = this.actions;
       if (!el) return;
-      // Hide when there's nothing to act on. (Main window also hides when
-      // a raw lasso poly is being drawn — we don't have that signal here
-      // but the visual cost is minimal: an extra still chip.)
+      // Skip the entire DOM rebuild when nothing visible to the chip has
+      // changed. Tool-meta arrives at 30 Hz — without this signature
+      // check we'd churn createElement / innerHTML / appendChild every
+      // 33 ms, which dominates the pen's main-thread time during a
+      // transform.
+      const armed = !!(transform && transform.armed);
+      const sig = !sel || !sel.count
+        ? 'empty'
+        : (sel.count + '|' + (sel.color || '') + '|'
+            + ((sel.colors || []).join(',')) + '|'
+            + (!!sel.group) + '|' + (!!sel.hasXform) + '|' + armed);
+      if (sig === this._actionsSig) return;
+      this._actionsSig = sig;
       if (!sel || !sel.count) {
         el.classList.add('hidden');
         el.classList.remove('is-active');
@@ -520,10 +834,9 @@
         el.onclick = null;
         return;
       }
-      const armed = !!(transform && transform.armed);
       el.classList.remove('hidden');
       el.classList.toggle('is-active', armed);
-      el.innerHTML = '';
+      el.innerHTML = '';   // rebuild — sig-gated above so this isn't per-frame
       el.onclick = (ev) => {
         if (ev.target && ev.target.closest && ev.target.closest('.ca-popover')) return;
         if (armed) {
@@ -755,6 +1068,32 @@
       }
       return out;
     }
+    // Render the full layer composite into a project-sized offscreen canvas
+    // with selected strokes already excluded (their _lassoHidden flag is
+    // honoured by renderCel). Called only when the cache is dirty.
+    _renderBaseCache() {
+      const s = this.state;
+      const w = Math.max(1, s.project.width), h = Math.max(1, s.project.height);
+      if (!this._baseCache) this._baseCache = document.createElement('canvas');
+      if (this._baseCache.width !== w || this._baseCache.height !== h) {
+        this._baseCache.width = w;
+        this._baseCache.height = h;
+      }
+      const bctx = this._baseCache.getContext('2d');
+      bctx.setTransform(1, 0, 0, 1, 0, 0);
+      bctx.clearRect(0, 0, w, h);
+      OT.compositeStage(s.project, s.frame, bctx, {
+        bg: true,
+        includeVideo: false,
+        eraserOverlay: s.eraserOverlay
+      }, {
+        layerAncestors: layer => this._layerAncestors(layer)
+      });
+      this._baseCacheDirty = false;
+    }
+    // Mark the base cache stale so the next composite rebuilds it. Call
+    // from every op that could change the rendered output of any layer.
+    _invalidateBaseCache() { this._baseCacheDirty = true; }
     _compositeStage() {
       const s = this.state;
       const c = this.ctx;
@@ -793,17 +1132,34 @@
             pencil: !!ss.pencil
           });
         }
-        OT.compositeStage(s.project, s.frame, c, {
-          bg: true,
-          wetStroke: wetForRender || null,
-          wetLayerId: s.activeLayerId,
-          includeVideo: false,         // D1: pen has no <video> element
-          // includeLassoHidden defaults to false (skip transform-drag
-          // rasterised originals); same as the main canvas.
-          eraserOverlay: s.eraserOverlay   // live destination-out punches
-        }, {
-          layerAncestors: layer => this._layerAncestors(layer)
-        });
+        // Live transform: the selected strokes are flagged _lassoHidden
+        // once per session (in _ensureLassoSession) so the cel cache
+        // doesn't render them at their original position. While a session
+        // is active we also cache the static layer composite in
+        // _baseCache and blit it instead of re-running compositeStage
+        // per frame — main does the same trick (only its overlay canvas
+        // redraws during a transform, base canvas stays put).
+        const lassoSession = this._ensureLassoSession();
+        if (lassoSession && !wetForRender) {
+          if (this._baseCacheDirty || !this._baseCache) this._renderBaseCache();
+          c.drawImage(this._baseCache, 0, 0);
+        } else {
+          OT.compositeStage(s.project, s.frame, c, {
+            bg: true,
+            wetStroke: wetForRender || null,
+            wetLayerId: s.activeLayerId,
+            includeVideo: false,         // D1: pen has no <video> element
+            eraserOverlay: s.eraserOverlay
+          }, {
+            layerAncestors: layer => this._layerAncestors(layer)
+          });
+        }
+        this._drawLassoLivePreview(c, lassoSession);
+        // Transform HUD: bounding box + handles, drawn in project px (we're
+        // still inside the project transform). The handle line-widths /
+        // sizes account for the combined pen-view scale so they look the
+        // same regardless of how the artist has zoomed locally.
+        this._drawTransformHud(c, projScale * this.view.scale);
       }
       c.restore();   // local view
       // Cursor circle — drawn in screen-space (after restore), so the
@@ -842,6 +1198,196 @@
       c.strokeStyle = 'rgba(255,255,255,0.85)';
       c.stroke();
       c.restore();
+    }
+
+    // Lasso live-preview helpers — main hides the selected strokes from its
+    // cel cache during a transform drag and draws a pre-rasterised snippet
+    // through the matrix. The pen mirrors that with a per-session flag set
+    // (this._lassoSession) so cel.rebuild only runs once on arm and once
+    // on disarm — not twice per frame. During the session each composite
+    // is: compositeStage (cheap, cel.canvas is already correct) + a single
+    // pass over the flagged strokes through the live transform.
+    _ensureLassoSession() {
+      const xf = this.state.tool && this.state.tool.transform;
+      // strokeIds now live on the lasso-orig op (not in meta.transform)
+      // so a session is "wanted" iff meta says armed AND we have a
+      // matching orig snapshot. First armed frame before lasso-orig
+      // arrives is one composite without a session — harmless.
+      const ids = this._lassoOrig ? Object.keys(this._lassoOrig) : null;
+      const wantSession = !!(xf && xf.armed && ids && ids.length);
+      const cur = this._lassoSession;
+      if (!wantSession && !cur) return null;
+      if (!wantSession && cur) {
+        // Disarmed — restore cel state.
+        for (const st of cur.flagged) st._lassoHidden = false;
+        if (cur.cel && cur.cel.rebuild) cur.cel.rebuild();
+        this._lassoSession = null;
+        // Drop the cached orig snapshot; next arm gets a fresh one.
+        this._lassoOrig = null;
+        this._lassoOrigSig = null;
+        this._lassoLayerId = null;
+        // cel.canvas now contains the formerly-hidden strokes again, so
+        // the composite cache needs a refresh too.
+        this._baseCacheDirty = true;
+        return null;
+      }
+      const lid = this._lassoLayerId || xf.layerId;
+      const layer = lid
+        ? this.state.layersById.get(lid)
+        : this.state.layersById.get(this.state.activeLayerId);
+      if (!layer) return null;
+      const cel = layer.celAt(this.state.frame);
+      if (!cel || cel.kind !== 'vector' || !Array.isArray(cel.strokes)) return null;
+      const idsKey = this._lassoOrigSig || (ids.join('|') + '@' + (layer.id || '') + '#' + this.state.frame);
+      if (cur && cur.idsKey === idsKey) {
+        cur.xf = xf;
+        if (!cur.preview) cur.preview = this._buildLassoSnippet(cur);
+        return cur;
+      }
+      // New session (or selection changed) — flip flags + rebuild ONCE.
+      if (cur) {
+        for (const st of cur.flagged) st._lassoHidden = false;
+        if (cur.cel && cur.cel !== cel && cur.cel.rebuild) cur.cel.rebuild();
+      }
+      const idSet = new Set(ids);
+      const flagged = [];
+      for (const st of cel.strokes) {
+        if (st && st.id && idSet.has(st.id)) {
+          st._lassoHidden = true;
+          flagged.push(st);
+        }
+      }
+      if (!flagged.length) {
+        this._lassoSession = null;
+        return null;
+      }
+      if (cel.rebuild) cel.rebuild();
+      const sess = {
+        xf, cel, flagged, idsKey,
+        origMap: this._lassoOrig,   // null until first lasso-orig op
+        preview: null
+      };
+      sess.preview = this._buildLassoSnippet(sess);
+      this._lassoSession = sess;
+      // New session means cel.canvas just got rebuilt with strokes hidden;
+      // the base composite cache built from the old cel.canvas is stale.
+      this._baseCacheDirty = true;
+      return sess;
+    }
+    // Pre-rasterise the selected strokes into a project-sized offscreen
+    // canvas at their orig positions. During affine drag we blit this
+    // through one ctx.transform — O(1) per frame regardless of stroke
+    // count. Mirrors LassoTool._buildPreviewSnippet exactly. Returns null
+    // if we don't yet have an orig snapshot (fall back to per-stroke render).
+    _buildLassoSnippet(sess) {
+      const origMap = sess.origMap;
+      if (!origMap) return null;
+      const w = Math.max(1, this.state.project.width);
+      const h = Math.max(1, this.state.project.height);
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      const renderClone = (st, orig) => {
+        // Build a transient stroke object so renderStroke uses the orig pts
+        // (which are the post-rebaseline snapshot, not the live mutated pts).
+        if (orig.contour) {
+          OT.Vector.renderStroke(ctx, Object.assign({}, st, { contour: orig.contour, _lassoHidden: false }));
+        } else if (orig.pts) {
+          OT.Vector.renderStroke(ctx, Object.assign({}, st, { pts: orig.pts, _lassoHidden: false }));
+        }
+      };
+      for (const st of sess.flagged) {
+        const orig = origMap[st.id];
+        if (orig && st.type === 'fill') renderClone(st, orig);
+      }
+      for (const st of sess.flagged) {
+        const orig = origMap[st.id];
+        if (orig && st.type !== 'fill') renderClone(st, orig);
+      }
+      return c;
+    }
+    _drawLassoLivePreview(c, sess) {
+      if (!sess) return;
+      const xf = sess.xf;
+      const mode = xf.mode || 'uniform';
+      const isAffine = (mode === 'uniform' || mode === 'freeform');
+      // Fast path: snippet canvas + one drawImage through the affine
+      // matrix. Same pattern main uses, so the per-frame cost is constant
+      // regardless of how many strokes are in the selection.
+      if (isAffine && sess.preview) {
+        c.save();
+        c.translate(xf.cx, xf.cy);
+        c.rotate(xf.rot || 0);
+        c.scale(xf.scaleX || 1, xf.scaleY || 1);
+        c.drawImage(sess.preview, -xf.origCx, -xf.origCy);
+        c.restore();
+        return;
+      }
+      // Slow paths follow — used when we don't yet have an orig snapshot
+      // (snippet not built) or when the mesh forward map needs per-pt
+      // application. Briefly clear _lassoHidden so renderStroke paints.
+      for (const st of sess.flagged) st._lassoHidden = false;
+      // Prefer orig pts from the lasso-orig snapshot over the (possibly
+      // stale) cel.strokes pts. For the very first frame after arm,
+      // before the snapshot has arrived, fall back to cel.strokes.
+      const origMap = sess.origMap;
+      const origPtsFor = (st) => {
+        const o = origMap && origMap[st.id];
+        if (o) return st.type === 'fill' ? o.contour : o.pts;
+        return st.type === 'fill' ? st.contour : st.pts;
+      };
+      if (isAffine) {
+        c.save();
+        c.translate(xf.cx, xf.cy);
+        c.rotate(xf.rot || 0);
+        c.scale(xf.scaleX || 1, xf.scaleY || 1);
+        c.translate(-xf.origCx, -xf.origCy);
+        const renderAt = (st, pts) => {
+          const clone = st.type === 'fill'
+            ? Object.assign({}, st, { contour: pts })
+            : Object.assign({}, st, { pts });
+          OT.Vector.renderStroke(c, clone);
+        };
+        for (const st of sess.flagged) if (st.type === 'fill') renderAt(st, origPtsFor(st));
+        for (const st of sess.flagged) if (st.type !== 'fill') renderAt(st, origPtsFor(st));
+        c.restore();
+      } else {
+        const fwd = OT.MeshWarp.makeForward(mode, xf);
+        const mapPts = (pts) => {
+          const out = new Array(pts.length);
+          for (let i = 0; i < pts.length; i++) {
+            const r = fwd(pts[i].x, pts[i].y);
+            out[i] = { x: r.x, y: r.y, p: pts[i].p };
+          }
+          return out;
+        };
+        const renderTransformed = (st) => {
+          const orig = origPtsFor(st);
+          if (st.type === 'fill') {
+            OT.Vector.renderStroke(c, Object.assign({}, st, { contour: mapPts(orig) }));
+          } else {
+            OT.Vector.renderStroke(c, Object.assign({}, st, { pts: mapPts(orig) }));
+          }
+        };
+        for (const st of sess.flagged) if (st.type === 'fill') renderTransformed(st);
+        for (const st of sess.flagged) if (st.type !== 'fill') renderTransformed(st);
+      }
+      for (const st of sess.flagged) st._lassoHidden = true;
+    }
+
+    // Render the transform bounding box + handles when the main side has a
+    // lasso transform armed. Anchors arrive in project px via tool-meta;
+    // the projScale arg lets us keep stroke widths / handle sizes visually
+    // consistent across the artist's local zoom.
+    _drawTransformHud(c, viewScale) {
+      const xf = this.state.tool && this.state.tool.transform;
+      if (!xf || !xf.armed) return;
+      // xf already carries every field OT.LassoOverlay expects (cx, cy,
+      // sw, sh, scaleX, scaleY, rot, distortC, warpC, warpM) — same
+      // surface main passes its `vt` through. One call paints ants +
+      // handles identically to the main canvas.
+      OT.LassoOverlay.drawOverlay(c, xf, xf.mode || 'uniform', viewScale);
     }
 
     /* ---------------- pointer input ---------------- */

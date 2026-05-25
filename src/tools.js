@@ -60,31 +60,13 @@
     return c;
   }
 
-  // Free-transform handle math, shared between SelectTool and LassoTool.
-  // The selection object `s` carries { cx, cy, sw, sh, scaleX, scaleY, rot }.
-  // `selWorld` maps a local (centred-on-cx,cy) offset to world space; `selLocal`
-  // inverts that; `selAnchor` returns the 8 corner/edge anchor points; and
-  // `selRotHandleWorld` is the position of the rotation knob above the top edge.
-  function selAnchor(idx, sw, sh) {
-    const xs = [-sw / 2, 0, sw / 2, sw / 2, sw / 2, 0, -sw / 2, -sw / 2];
-    const ys = [-sh / 2, -sh / 2, -sh / 2, 0, sh / 2, sh / 2, sh / 2, 0];
-    return { x: xs[idx], y: ys[idx] };
-  }
-  function selWorld(s, ix, iy) {
-    const c = Math.cos(s.rot), sn = Math.sin(s.rot);
-    const x = ix * s.scaleX, y = iy * s.scaleY;
-    return { x: s.cx + x * c - y * sn, y: s.cy + x * sn + y * c };
-  }
-  function selLocal(s, wx, wy) {
-    const c = Math.cos(-s.rot), sn = Math.sin(-s.rot);
-    const dx = wx - s.cx, dy = wy - s.cy;
-    return { x: (dx * c - dy * sn) / s.scaleX, y: (dx * sn + dy * c) / s.scaleY };
-  }
-  function selRotHandleWorld(s, zoom) {
-    const a = selAnchor(1, s.sw, s.sh);
-    const off = 26 / zoom / Math.abs(s.scaleY || 1);
-    return selWorld(s, a.x, a.y - off);
-  }
+  // Free-transform handle math lives in OT.LassoOverlay so the pen window
+  // can share it verbatim. Bind short local aliases for the hot-path call
+  // sites below.
+  const selAnchor = OT.LassoOverlay.selAnchor;
+  const selWorld = OT.LassoOverlay.selWorld;
+  const selLocal = OT.LassoOverlay.selLocal;
+  const selRotHandleWorld = OT.LassoOverlay.selRotHandleWorld;
 
   // One Euro filter (Casiez / Roussel / Vogel, CHI 2012) -- the modern
   // industry default for low-latency stylus smoothing. Unlike the older
@@ -3269,31 +3251,11 @@
     // bright artwork, then two interleaved dashed strokes (black + white
     // offset by one dash) on top to produce the classic alternating tick
     // pattern. Rounded line caps soften the otherwise pixel-harsh ticks.
+    // Marching ants — delegates to OT.LassoOverlay.ants so the pen window
+    // animation matches exactly. Wrapper exists so legacy tracePath
+    // closures (which take no args, capturing ctx) keep working.
     _ants(ctx, zoom, tracePath) {
-      const t = performance.now() / 75;
-      const dash = 4.5 / zoom;
-      ctx.save();
-      ctx.lineJoin = 'round'; ctx.lineCap = 'butt';
-      // Soft outer halo — only visible on bright artwork; keeps the ants
-      // readable without the heavy 2.6 px black underline the old version
-      // used (which read as a thick dark line, not "marching ants").
-      ctx.lineWidth = 3.2 / zoom;
-      ctx.strokeStyle = 'rgba(0,0,0,0.22)';
-      ctx.setLineDash([]);
-      tracePath();
-      ctx.stroke();
-      // Alternating black + white ticks
-      ctx.lineWidth = 1.1 / zoom;
-      ctx.setLineDash([dash, dash]);
-      ctx.lineDashOffset = -t;
-      ctx.strokeStyle = '#0b0b0c';
-      tracePath();
-      ctx.stroke();
-      ctx.lineDashOffset = -t + dash;
-      ctx.strokeStyle = '#fff';
-      tracePath();
-      ctx.stroke();
-      ctx.restore();
+      OT.LassoOverlay.ants(ctx, zoom, () => tracePath());
     }
     /* ---------------- floating selection toolbar ---------------- */
     _bindToolbar(app) {
@@ -3492,149 +3454,23 @@
       ];
     }
     // Map a point in [origCx-sw/2, origCx+sw/2] x [origCy-sh/2, origCy+sh/2]
-    // to [0,1]² for use by the bilinear / Coons mappings.
-    _uv(s, x, y) {
-      const u = (x - (s.origCx - s.sw / 2)) / s.sw;
-      const v = (y - (s.origCy - s.sh / 2)) / s.sh;
-      return { u, v };
-    }
-    // Bilinear blend of 4 corner positions at (u, v) in [0,1]².
-    _bilinear(c, u, v) {
-      const um = 1 - u, vm = 1 - v;
-      return {
-        x: um * vm * c[0].x + u * vm * c[1].x + u * v * c[2].x + um * v * c[3].x,
-        y: um * vm * c[0].y + u * vm * c[1].y + u * v * c[2].y + um * v * c[3].y
-      };
-    }
-    // Coons patch with quadratic-bezier edges: 4 corner + 4 edge-midpoint
-    // control points let the user curve any edge while preserving the corner
-    // positions exactly.
-    _coons(c, m, u, v) {
-      const um = 1 - u, vm = 1 - v;
-      // Quadratic bezier along each edge (control midpoint = m[i])
-      const Bt = { x: um*um*c[0].x + 2*u*um*m[0].x + u*u*c[1].x,
-                   y: um*um*c[0].y + 2*u*um*m[0].y + u*u*c[1].y };
-      const Bb = { x: um*um*c[3].x + 2*u*um*m[2].x + u*u*c[2].x,
-                   y: um*um*c[3].y + 2*u*um*m[2].y + u*u*c[2].y };
-      const Bl = { x: vm*vm*c[0].x + 2*v*vm*m[3].x + v*v*c[3].x,
-                   y: vm*vm*c[0].y + 2*v*vm*m[3].y + v*v*c[3].y };
-      const Br = { x: vm*vm*c[1].x + 2*v*vm*m[1].x + v*v*c[2].x,
-                   y: vm*vm*c[1].y + 2*v*vm*m[1].y + v*v*c[2].y };
-      const Cb = this._bilinear(c, u, v);
-      return {
-        x: vm * Bt.x + v * Bb.x + um * Bl.x + u * Br.x - Cb.x,
-        y: vm * Bt.y + v * Bb.y + um * Bl.y + u * Br.y - Cb.y
-      };
-    }
+    // Delegate the forward-map primitives to OT.MeshWarp so the pen
+    // window can share exactly the same math without risk of drift.
+    _uv(s, x, y) { return OT.MeshWarp.uvOf(s, x, y); }
+    _bilinear(c, u, v) { return OT.MeshWarp.bilinear(c, u, v); }
+    _coons(c, m, u, v) { return OT.MeshWarp.coons(c, m, u, v); }
 
-    // One polished square handle — soft drop shadow, white fill, thin dark
-    // border, slightly larger than the old version so it's easy to grab on a
-    // Cintiq. Used for all corner/edge handles in every transform mode.
     _handleSquare(ctx, x, y, zoom) {
-      const hs = 5.5 / zoom;
-      // Soft offset shadow (slight blur via two passes at different alphas)
-      ctx.fillStyle = 'rgba(0,0,0,0.18)';
-      ctx.fillRect(x - hs + 0.6 / zoom, y - hs + 1.2 / zoom, hs * 2, hs * 2);
-      ctx.fillStyle = 'rgba(0,0,0,0.28)';
-      ctx.fillRect(x - hs + 0.3 / zoom, y - hs + 0.6 / zoom, hs * 2, hs * 2);
-      // Body — crisp white square with thin dark border
-      ctx.lineWidth = 1.2 / zoom;
-      ctx.fillStyle = '#fff';
-      ctx.strokeStyle = '#1a1c20';
-      ctx.fillRect(x - hs, y - hs, hs * 2, hs * 2);
-      ctx.strokeRect(x - hs, y - hs, hs * 2, hs * 2);
+      OT.LassoOverlay.handleSquare(ctx, x, y, zoom);
     }
     _drawCornerHandles(ctx, corners, zoom) {
-      ctx.save();
-      ctx.lineJoin = 'miter';
-      for (const c of corners) this._handleSquare(ctx, c.x, c.y, zoom);
-      ctx.restore();
+      OT.LassoOverlay.drawCornerHandles(ctx, corners, zoom);
     }
     _drawMidHandles(ctx, mids, zoom) {
-      // Diamond — visually distinct from the square corners. Warm cream fill
-      // so the eye can tell "this controls the edge curvature" at a glance.
-      const hs = 5 / zoom;
-      ctx.save();
-      ctx.lineJoin = 'miter';
-      for (const m of mids) {
-        // Shadow
-        ctx.fillStyle = 'rgba(0,0,0,0.28)';
-        ctx.beginPath();
-        ctx.moveTo(m.x + 0.3 / zoom, m.y - hs + 0.6 / zoom);
-        ctx.lineTo(m.x + hs + 0.3 / zoom, m.y + 0.6 / zoom);
-        ctx.lineTo(m.x + 0.3 / zoom, m.y + hs + 0.6 / zoom);
-        ctx.lineTo(m.x - hs + 0.3 / zoom, m.y + 0.6 / zoom);
-        ctx.closePath();
-        ctx.fill();
-        // Body
-        ctx.lineWidth = 1.2 / zoom;
-        ctx.fillStyle = '#f7c869';   // warm cream/amber to mark "edge control"
-        ctx.strokeStyle = '#1a1c20';
-        ctx.beginPath();
-        ctx.moveTo(m.x, m.y - hs);
-        ctx.lineTo(m.x + hs, m.y);
-        ctx.lineTo(m.x, m.y + hs);
-        ctx.lineTo(m.x - hs, m.y);
-        ctx.closePath();
-        ctx.fill(); ctx.stroke();
-      }
-      ctx.restore();
+      OT.LassoOverlay.drawMidHandles(ctx, mids, zoom);
     }
-    // 8 scale handles around the bbox plus a rotation knob hovering above
-    // the top edge. The knob is visually distinct — circular, slightly
-    // larger, with a curved-arrow tick inside to signal rotation.
     _drawTransformHandles(ctx, r, zoom) {
-      const kr = 7 / zoom;
-      const tc = selWorld(r, 0, -r.sh / 2);
-      const rh = selRotHandleWorld(r, zoom);
-      ctx.save();
-      ctx.lineCap = 'round';
-      // Stem from the top of the bbox to the rotation knob — solid dark
-      // base + thin white overlay so it reads on any artwork.
-      ctx.lineWidth = 1.4 / zoom;
-      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-      ctx.beginPath(); ctx.moveTo(tc.x, tc.y); ctx.lineTo(rh.x, rh.y); ctx.stroke();
-      ctx.lineWidth = 0.6 / zoom;
-      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
-      ctx.beginPath(); ctx.moveTo(tc.x, tc.y); ctx.lineTo(rh.x, rh.y); ctx.stroke();
-      ctx.lineCap = 'butt';
-      // 8 corner/edge scale handles
-      for (let i = 0; i < 8; i++) {
-        const a = selAnchor(i, r.sw, r.sh);
-        const w = selWorld(r, a.x, a.y);
-        this._handleSquare(ctx, w.x, w.y, zoom);
-      }
-      // Rotation knob: shadow, accent ring, white body, curved arrow icon
-      ctx.fillStyle = 'rgba(0,0,0,0.32)';
-      ctx.beginPath(); ctx.arc(rh.x + 0.4 / zoom, rh.y + 0.9 / zoom, kr, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.lineWidth = 1.4 / zoom;
-      ctx.fillStyle = '#fff';
-      ctx.strokeStyle = '#1a1c20';
-      ctx.beginPath(); ctx.arc(rh.x, rh.y, kr, 0, Math.PI * 2);
-      ctx.fill(); ctx.stroke();
-      // Curved rotation arrow inside the knob
-      ctx.lineWidth = 1.5 / zoom;
-      ctx.lineCap = 'round';
-      ctx.strokeStyle = '#1a1c20';
-      const ir = kr * 0.5;
-      const a0 = Math.PI * 0.25, a1 = Math.PI * 1.65;
-      ctx.beginPath();
-      ctx.arc(rh.x, rh.y, ir, a0, a1);
-      ctx.stroke();
-      // Tiny arrowhead at the end of the arc
-      const tipX = rh.x + Math.cos(a1) * ir;
-      const tipY = rh.y + Math.sin(a1) * ir;
-      const ah = 2.6 / zoom;
-      ctx.beginPath();
-      ctx.moveTo(tipX, tipY);
-      ctx.lineTo(tipX + Math.cos(a1 - Math.PI * 0.75) * ah,
-                 tipY + Math.sin(a1 - Math.PI * 0.75) * ah);
-      ctx.moveTo(tipX, tipY);
-      ctx.lineTo(tipX + Math.cos(a1 + Math.PI * 0.55) * ah,
-                 tipY + Math.sin(a1 + Math.PI * 0.55) * ah);
-      ctx.stroke();
-      ctx.restore();
+      OT.LassoOverlay.drawAffineHandles(ctx, r, zoom);
     }
     drawOverlay(ctx, app) {
       const zoom = app.stage.view.zoom;

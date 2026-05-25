@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>OpenToon — Drawing Window</title>
+<link rel="stylesheet" href="../styles/lasso-tb.css">
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
   html,body{height:100%;}
@@ -216,42 +217,101 @@
   .ca-chip .ca-btn:hover{background:#ffffff10;color:#f7f1e5;}
   .ca-chip .ca-reset:hover{color:#dd5038;}
 
-  /* ---- Lasso transform toolbar (mirrors main window's #lasso-toolbar) ---- */
-  #penLassoTb{
-    position:absolute;left:50%;top:60px;transform:translateX(-50%);
-    display:flex;align-items:center;gap:4px;padding:5px 7px;
-    background:linear-gradient(180deg,#262a32f2 0%,#1c1f25f2 100%);
-    border:1px solid #08090c;border-radius:999px;
-    box-shadow:0 10px 26px #000c,0 2px 6px #0008,inset 0 1px 0 #ffffff0d;
+  /* ---- Size chip + tool-settings popover ---- */
+  .psize{
+    display:flex;align-items:center;gap:6px;height:34px;padding:0 10px;
+    background:#272b32;border:1px solid #00000055;color:#cdd2d9;border-radius:6px;
+    cursor:ew-resize;user-select:none;-webkit-user-select:none;
+    transition:background-color .12s ease,border-color .12s ease;
+    font:600 11px "Segoe UI",Roboto,system-ui,sans-serif;
+    font-variant-numeric:tabular-nums;
+    touch-action:none;
+  }
+  .psize:hover{background:#343942;}
+  .psize.dragging{background:#3a86ba;border-color:#0009;color:#fff;cursor:ew-resize;}
+  .psize .pdot{
+    display:inline-block;border-radius:50%;background:#cdd2d9;
+    box-shadow:0 0 0 1px #0009;flex:0 0 auto;
+  }
+  .psize.dragging .pdot{background:#fff;}
+  .psize .pnum{min-width:22px;text-align:right;}
+
+  /* tool-settings popover (summoned by tap on size chip OR long-press on tool btn) */
+  .ptpop{
+    position:absolute;top:52px;
+    background:linear-gradient(180deg,#262a32f5 0%,#1c1f25f5 100%);
+    border:1px solid #08090c;border-radius:10px;
+    box-shadow:0 10px 26px #000b,0 2px 6px #0008,inset 0 1px 0 #ffffff0d;
     backdrop-filter:blur(6px);
-    z-index:7;color:#cdd2d9;
-    transition:opacity .14s ease, transform .2s cubic-bezier(.18,.9,.26,1.1);
+    padding:12px 14px;display:flex;flex-direction:column;gap:10px;
+    min-width:240px;z-index:8;color:#cdd2d9;
+    opacity:0;transform:translateY(-4px);pointer-events:none;
+    transition:opacity .14s ease,transform .18s cubic-bezier(.2,.85,.3,1);
   }
-  #penLassoTb.hidden{display:none;}
-  #penLassoTb button{
-    background:transparent;border:1px solid transparent;
-    color:#cdd2d9;font:600 11.5px/1 "Space Grotesk","Segoe UI",system-ui,sans-serif;
-    padding:6px 12px;border-radius:99px;cursor:pointer;
-    transition:background-color .12s ease,color .12s ease,border-color .12s ease;
+  .ptpop.open{opacity:1;transform:translateY(0);pointer-events:auto;}
+  .ptpop .prow{display:flex;align-items:center;gap:10px;}
+  .ptpop .plabel{
+    font:600 10px/1 "Space Grotesk","Segoe UI",system-ui,sans-serif;
+    letter-spacing:.06em;text-transform:uppercase;color:#7d838f;
+    min-width:62px;
   }
-  #penLassoTb button:hover{background:#ffffff10;color:#f7f1e5;}
-  #penLassoTb button.active{
-    background:#4ba8e0;color:#fff;border-color:#0008;
-    box-shadow:0 1px 0 #ffffff20 inset, 0 1px 3px #0007;
+  .ptpop .pval{
+    font:600 11px/1 "Segoe UI",Roboto,system-ui,sans-serif;
+    font-variant-numeric:tabular-nums;color:#cdd2d9;min-width:28px;text-align:right;
   }
-  #penLassoTb button.disabled{opacity:.4;pointer-events:none;}
-  #penLassoTb .pen-lasso-sep{width:1px;height:18px;background:#ffffff14;margin:0 4px;}
-  #penLassoTb .pen-lasso-commit{color:#54b06a;font-size:14px;padding:4px 12px;}
-  #penLassoTb .pen-lasso-commit:hover{background:#54b06a22;color:#7cd394;}
-  #penLassoTb .pen-lasso-cancel{color:#dd5038;font-size:13px;padding:4px 12px;}
-  #penLassoTb .pen-lasso-cancel:hover{background:#dd503822;color:#f17a64;}
+  .ptpop input[type="range"]{
+    flex:1;-webkit-appearance:none;appearance:none;height:20px;background:transparent;
+    cursor:pointer;
+  }
+  .ptpop input[type="range"]::-webkit-slider-runnable-track{
+    height:5px;border-radius:99px;background:#0008;border:1px solid #060708;
+  }
+  .ptpop input[type="range"]::-webkit-slider-thumb{
+    -webkit-appearance:none;appearance:none;width:18px;height:18px;border-radius:50%;
+    background:linear-gradient(180deg,#4ba8e0,#2f7fb8);
+    border:1px solid #0009;box-shadow:0 1px 2px #000a,inset 0 1px 0 #ffffff40;
+    margin-top:-7px;cursor:pointer;
+  }
+  .ptpop input[type="range"]:hover::-webkit-slider-thumb{
+    background:linear-gradient(180deg,#5fb4e6,#3989c0);
+  }
+
+  /* tool button tap-and-hold ring (visual feedback during long press) */
+  .pbtn.holding{
+    box-shadow:inset 0 0 0 2px #4ba8e0aa, 0 0 0 1px #4ba8e055;
+  }
+
+  /* Transform HUD: corner / edge handles drawn over the canvas. Pen window
+     paints these on the canvas itself; this is just for any future DOM hooks. */
+
+  /* Pen-side positioning override for the shared .lasso-tb chip. Main
+     positions it over the selection bbox via JS; on the pen we anchor it
+     to the top-centre of the canvas area. */
+  #lasso-toolbar{
+    left:50%;top:60px;
+    transform:translate(-50%,0);
+    animation:none;
+  }
+  #lasso-toolbar::after{display:none;}
 </style>
 </head>
 <body>
   <div id="bar"></div>
   <div id="stage">
     <canvas id="screen"></canvas>
-    <div id="penLassoTb" class="hidden"></div>
+    <!-- Lasso transform toolbar: identical markup to index.html so both
+         windows pick up styles/lasso-tb.css verbatim. -->
+    <div id="lasso-toolbar" class="lasso-tb hidden">
+      <button data-mode="uniform" class="active" title="Uniform: scale + rotate, aspect preserved (default — drag inside to translate)">Uniform</button>
+      <button data-mode="freeform" title="Freeform: scale X/Y independently + rotate">Freeform</button>
+      <button data-mode="distort" title="Distort: drag corners for perspective">Distort</button>
+      <button data-mode="warp" title="Warp: curve the edges">Warp</button>
+      <span class="lasso-tb-sep"></span>
+      <button data-mode="reset" title="Reset transform (clear keyframes)">Reset</button>
+      <span class="lasso-tb-sep"></span>
+      <button data-mode="commit" title="Commit (Enter)">✓</button>
+      <button data-mode="cancel" title="Cancel (Esc)">✕</button>
+    </div>
     <div id="hint">
       <div class="big">OpenToon Drawing Window</div>
       <div>Waiting for the main window… draw here once the canvas appears.</div>
@@ -265,6 +325,8 @@
   <script src="../src/vector.js"></script>
   <script src="../src/composite.js"></script>
   <script src="../src/stroke-finalize.js"></script>
+  <script src="../src/mesh-warp.js"></script>
+  <script src="../src/lasso-overlay.js"></script>
   <script src="pen.js"></script>
 </body>
 </html>

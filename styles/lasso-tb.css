@@ -1,0 +1,52 @@
+/* Lasso transform-mode toolbar — shared between the main window and the
+   pen-display window so both surfaces show the exact same pill chip.
+   The pen window includes positional overrides in its own stylesheet
+   (the main side positions the toolbar over the selection via JS; the
+   pen anchors it to the top-centre of the canvas). */
+.lasso-tb{
+  position:absolute;display:flex;align-items:center;gap:1px;
+  background:linear-gradient(180deg,#262932 0%,#1c1f25 100%);
+  border:1px solid #3d414a;border-radius:8px;
+  padding:3px;
+  box-shadow:0 8px 24px rgba(0,0,0,0.55),0 1px 0 rgba(255,255,255,0.04) inset,0 0 0 1px rgba(0,0,0,0.4);
+  z-index:60;pointer-events:auto;
+  font:600 11px/1 "Space Grotesk","Segoe UI",system-ui,sans-serif;
+  letter-spacing:0.01em;
+  color:#d6d9de;user-select:none;
+  transform:translate(-50%,-100%);
+  white-space:nowrap;
+  animation:lassoTbIn 0.12s ease;
+}
+@keyframes lassoTbIn{
+  from{opacity:0;transform:translate(-50%,calc(-100% + 4px));}
+  to  {opacity:1;transform:translate(-50%,-100%);}
+}
+.lasso-tb.hidden{display:none;}
+.lasso-tb button{
+  background:transparent;border:0;color:#9aa3b0;
+  padding:6px 11px;cursor:pointer;font:inherit;border-radius:5px;
+  transition:background-color 100ms,color 100ms,box-shadow 100ms;
+}
+.lasso-tb button:hover{background:#353a44;color:#fff;}
+.lasso-tb button:active{transform:translateY(0.5px);}
+.lasso-tb button.active{
+  background:linear-gradient(180deg,#4ba8e0,#3c8cc4);
+  color:#fff;
+  box-shadow:0 0 0 1px rgba(0,0,0,0.4),inset 0 1px 0 rgba(255,255,255,0.22);
+}
+.lasso-tb button.active:hover{background:linear-gradient(180deg,#5cb4e7,#4297cc);}
+.lasso-tb button[data-mode="commit"]{color:#7dd391;}
+.lasso-tb button[data-mode="commit"]:hover{background:rgba(125,211,145,0.16);color:#a4e9b3;}
+.lasso-tb button[data-mode="cancel"]{color:#dd7160;}
+.lasso-tb button[data-mode="cancel"]:hover{background:rgba(221,113,96,0.16);color:#f08977;}
+.lasso-tb-sep{
+  width:1px;height:18px;background:#3a3d45;margin:0 4px;display:inline-block;
+}
+/* Little notch arrow at the bottom of the toolbar pointing to the bbox top */
+.lasso-tb::after{
+  content:"";position:absolute;left:50%;bottom:-5px;
+  width:9px;height:9px;background:inherit;
+  border-right:1px solid #3d414a;border-bottom:1px solid #3d414a;
+  transform:translateX(-50%) rotate(45deg);
+  z-index:-1;
+}

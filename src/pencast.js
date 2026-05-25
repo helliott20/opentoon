@@ -74,6 +74,10 @@
       this._lastAckSeq = 0;
       this._raf = 0;
       this._overlayLastPump = 0;
+      // Signature of the last published lasso transform session — used to
+      // re-publish the v.orig snapshot only when mode / strokes / frame /
+      // layer changes (i.e. on a real rebaseline), not every frame.
+      this._lastLassoSig = null;
       if (!this.bridge || !this.bridge.sendPenState) return;
       this.bridge.onPenAttach(() => this._attach());
       this.bridge.onPenDetach(() => this._detach());
@@ -91,6 +95,7 @@
         const now = performance.now();
         if (now - this._overlayLastPump < 33) return;
         this._overlayLastPump = now;
+        this._maybePublishLassoOrig();
         this._publish({ op: 'tool-meta', meta: this._meta() });
         this._schedule();
       });
@@ -272,6 +277,54 @@
         });
       }
     }
+    // Publishes a `lasso-orig` op when the lasso's transform session
+    // signature changes — i.e. on initial arm, on mode-switch (which
+    // rebaselines v.orig in main), on selection change, or on disarm.
+    // The pen uses the shipped orig pts as the source for its forward
+    // map + snippet builder; without this, after a uniform-then-distort
+    // switch the pen would still be running the forward map over the
+    // original-original cel.strokes, visibly shifting the artwork.
+    _maybePublishLassoOrig() {
+      const a = this.app;
+      const lasso = a.tools && a.tools.tools && a.tools.tools.lasso;
+      const vt = lasso && lasso.vt;
+      if (!vt || !vt.orig || !vt.orig.length) {
+        if (this._lastLassoSig !== null) {
+          this._lastLassoSig = null;
+          this._publish({ op: 'lasso-orig', origPts: null });
+        }
+        return;
+      }
+      const ids = vt.strokes.map(s => s.id).filter(Boolean).join(',');
+      const layerId = vt.layer ? vt.layer.id : '';
+      const sig = (lasso.transformMode || 'uniform') + '|' + ids
+        + '@' + layerId + '#' + (vt.frame == null ? a.frame : vt.frame);
+      if (sig === this._lastLassoSig) return;
+      this._lastLassoSig = sig;
+      // Serialise v.orig as { strokeId: { pts | contour } }. Object form
+      // makes lookup by id cheap on the pen side.
+      const origPts = {};
+      for (const o of vt.orig) {
+        if (!o.stroke || !o.stroke.id) continue;
+        if (o.contour) {
+          origPts[o.stroke.id] = {
+            contour: o.contour.map(p => ({ x: p.x, y: p.y }))
+          };
+        } else if (o.pts) {
+          origPts[o.stroke.id] = {
+            pts: o.pts.map(p => ({ x: p.x, y: p.y, p: p.p }))
+          };
+        }
+      }
+      this._publish({
+        op: 'lasso-orig',
+        origPts,
+        sig,
+        strokeIds: Object.keys(origPts),
+        layerId: vt.layer ? vt.layer.id : null,
+        origCx: vt.origCx, origCy: vt.origCy
+      });
+    }
 
     _meta() {
       const a = this.app, st = a.stage, t = a.tools.active;
@@ -301,9 +354,46 @@
       selHasXform = targets.some(t => t.transform && t.transform.keyframes && t.transform.keyframes.length);
       const lasso = a.tools && a.tools.tools && a.tools.tools.lasso;
       let xfArmed = false, xfMode = '', xfIsRaster = false;
+      let xfDistortC = null, xfWarpC = null, xfWarpM = null;
+      let xfLayerId = null, xfOrigCx = 0, xfOrigCy = 0;
+      let xfCx = 0, xfCy = 0, xfScaleX = 1, xfScaleY = 1, xfRot = 0;
+      let xfSw = 0, xfSh = 0;
       if (lasso) {
         if (lasso.vt) { xfArmed = true; xfIsRaster = false; xfMode = lasso.transformMode || 'uniform'; }
         else if (lasso.raster) { xfArmed = true; xfIsRaster = true; xfMode = lasso.transformMode || 'uniform'; }
+        if (xfArmed) {
+          const box = lasso.vt || lasso.raster;
+          // Raw selection state — fed straight to OT.LassoOverlay on the
+          // pen so anchors / rotation pin / top-mid are computed there
+          // (single source of truth with the main canvas).
+          xfCx = box.cx; xfCy = box.cy;
+          xfSw = box.sw; xfSh = box.sh;
+          xfScaleX = box.scaleX; xfScaleY = box.scaleY;
+          xfRot = box.rot;
+          // origCx/origCy + layerId — small, fixed-size, cheap to ship
+          // every meta. strokeIds + the orig pts are NOT shipped per meta;
+          // they ride along on `lasso-orig` (one-shot per session) and
+          // the pen tracks them locally.
+          if (lasso.vt) {
+            xfLayerId = lasso.vt.layer ? lasso.vt.layer.id : null;
+            xfOrigCx = lasso.vt.origCx; xfOrigCy = lasso.vt.origCy;
+          }
+          // Raw selection state — pen derives the 8 anchors / rotation pin
+          // / top-mid from this via OT.LassoOverlay, so the math lives in
+          // one place. (We still keep box.cx/cy/sw/sh/scaleX/scaleY/rot
+          // captured below for the stroke-preview transform.)
+          // Distort + warp meshes (vector only). Already in cel-local =
+          // project px so they ship as-is.
+          if (lasso.vt && lasso.vt.distortC) {
+            xfDistortC = lasso.vt.distortC.map(p => ({ x: p.x, y: p.y }));
+          }
+          if (lasso.vt && lasso.vt.warpC) {
+            xfWarpC = lasso.vt.warpC.map(p => ({ x: p.x, y: p.y }));
+          }
+          if (lasso.vt && lasso.vt.warpM) {
+            xfWarpM = lasso.vt.warpM.map(p => ({ x: p.x, y: p.y }));
+          }
+        }
       }
       // active-layer kind: vector / drawing(raster) / group / video
       const al = a.activeLayer && a.activeLayer();
@@ -345,7 +435,18 @@
         zoom: Math.round(st.view.zoom * 100),
         activeLayerKind,
         sel: { name: selName, count: selCount, group: selIsGroup, hasXform: selHasXform, color: selColor, colors: selColors },
-        transform: { armed: xfArmed, mode: xfMode, isRaster: xfIsRaster },
+        transform: {
+          armed: xfArmed, mode: xfMode, isRaster: xfIsRaster,
+          distortC: xfDistortC, warpC: xfWarpC, warpM: xfWarpM,
+          // Live stroke preview — sufficient for OT.MeshWarp.makeForward
+          // to derive the per-pt transform in every mode. strokeIds live
+          // on the lasso-orig op (sent once per session) so they don't
+          // ride in every meta payload.
+          layerId: xfLayerId,
+          cx: xfCx, cy: xfCy, origCx: xfOrigCx, origCy: xfOrigCy,
+          scaleX: xfScaleX, scaleY: xfScaleY, rot: xfRot,
+          sw: xfSw, sh: xfSh
+        },
         // Procreate-style shape-snap (QuickShape): when the artist holds
         // at the end of a stroke, the brush/pencil tool detects a clean
         // primitive and morphs the rough drawing into it. The morph runs
@@ -478,7 +579,28 @@
           const sel = t === 'eraser' ? 'eraserSize'
             : t === 'pencil' ? 'pencilSize' : 'brushSize';
           const cur = a.settings[sel];
-          a.settings[sel] = U.clamp(cur + (msg.delta || 0) * Math.max(1, cur * 0.14), 1, 300);
+          if (typeof msg.absolute === 'number') {
+            a.settings[sel] = U.clamp(msg.absolute, 1, 300);
+          } else {
+            a.settings[sel] = U.clamp(cur + (msg.delta || 0) * Math.max(1, cur * 0.14), 1, 300);
+          }
+          a.ui._buildToolOpts();
+          a.emit('overlayrender');
+          break;
+        }
+        case 'brush-opacity': {
+          const t = a.tools.active.name;
+          const sel = t === 'eraser' ? 'eraserOpacity'
+            : t === 'pencil' ? 'pencilOpacity' : 'brushOpacity';
+          const v = U.clamp(typeof msg.value === 'number' ? msg.value : 1, 0.05, 1);
+          a.settings[sel] = v;
+          a.ui._buildToolOpts();
+          a.emit('overlayrender');
+          break;
+        }
+        case 'brush-smoothing': {
+          const v = U.clamp(typeof msg.value === 'number' ? msg.value : 0, 0, 1);
+          a.settings.smoothing = v;
           a.ui._buildToolOpts();
           a.emit('overlayrender');
           break;
@@ -515,12 +637,16 @@
           a.emit('layerschange'); a.emit('render');
           break;
         }
-        case 'lasso-mode':
-          if (a.tools && a.tools.tools && a.tools.tools.lasso
-              && a.tools.tools.lasso.handleToolbarMode) {
-            a.tools.tools.lasso.handleToolbarMode(msg.mode, a);
-          }
+        case 'lasso-mode': {
+          // Dispatch on the main window's own toolbar so commit/cancel/
+          // mode-switch run through exactly the same path as a click on
+          // main — no logic duplication, no chance of drift.
+          const tb = document.getElementById('lasso-toolbar');
+          if (!tb) break;
+          const btn = tb.querySelector('button[data-mode="' + msg.mode + '"]');
+          if (btn) btn.click();
           break;
+        }
         case 'pen-size':
           // D1 doesn't ship pixels to the pen, but we record the value in
           // case D2's raster transport wants it.
