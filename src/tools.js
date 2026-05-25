@@ -15,24 +15,21 @@
     if (layer.locked) { app.ui.status('Layer is locked'); return null; }
     let cel;
     if (allowCreate === false) {
-      // Read-only intent must not create or fork.
+      // Read-only intent must not create the cel.
       cel = layer.celAt(app.frame);
     } else {
-      // Edit intent: ensure a cel exists, then fork if it is held across
-      // multiple frames so the edit only affects this frame.
+      // Edit intent: draw on the cel currently exposed at this frame.
+      // If the cel is held across multiple frames (extended exposure),
+      // the edit intentionally affects every frame in the held run —
+      // that's the standard 2D-animation behaviour (TVPaint, Toon Boom,
+      // Procreate Dreams). Forking a held cel into a unique one is a
+      // separate "Make Unique" action (layer.forkAt) artists invoke
+      // explicitly; auto-forking on every stroke surprised users by
+      // appearing to "create a new frame" instead of editing the
+      // existing held drawing.
       cel = layer.drawingAt(app.frame, app.project.width, app.project.height);
-      if (cel && typeof layer.forkAt === 'function') {
-        const forked = layer.forkAt(app.frame);
-        if (forked) cel = forked;
-      }
     }
     if (!cel) return null;
-    // Surface "Made unique" status once, then clear the flag so subsequent
-    // strokes on the same cel don't repeat the message.
-    if (cel.forked) {
-      cel.forked = false;
-      if (app.ui && app.ui.status) app.ui.status('Made unique: Drawing ' + cel.num);
-    }
     return { layer, cel };
   }
 
