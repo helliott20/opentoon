@@ -13,6 +13,12 @@ contextBridge.exposeInMainWorld('OpenToonDesktop', {
   onUpdateStatus: cb =>
     ipcRenderer.on('opentoon:update-status', (_e, data) => cb(data)),
   quitAndInstall: () => ipcRenderer.send('opentoon:quit-install'),
+  // 'auto' | 'manual' | 'off' — manual means every download/install needs a click
+  getUpdatePolicy: () => ipcRenderer.invoke('opentoon:update-policy'),
+  // manual policy: download the update found by the last check (user-approved)
+  downloadUpdate: () => ipcRenderer.invoke('opentoon:download-update'),
+  // manual policy: open the release page when self-update isn't possible
+  openReleasePage: () => ipcRenderer.invoke('opentoon:open-release-page'),
   // tell the main process the app has finished booting (dismisses the splash)
   signalReady: () => ipcRenderer.send('app:ready'),
   splashProgress: (pct, label) => ipcRenderer.send('app:loading', { pct: pct, label: label }),

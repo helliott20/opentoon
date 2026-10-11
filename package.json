@@ -1,14 +1,18 @@
 {
   "name": "opentoon",
   "version": "1.0.45",
-  "description": "An open-source 2D animation studio for Windows, inspired by Toon Boom Harmony.",
+  "description": "An open-source 2D animation studio for Windows and Linux, inspired by Toon Boom Harmony.",
   "main": "electron/main.js",
+  "desktopName": "opentoon-studio.desktop",
   "scripts": {
     "dev": "electron . --dev",
     "start": "electron .",
     "dist": "electron-builder --win --publish never",
+    "dist:linux": "electron-builder --linux --publish never",
     "publish": "electron-builder --win --publish always",
-    "test": "node tests/browsertest.cjs && node tests/vector.cjs && node tests/visual.cjs && node tests/pen.cjs && node tests/features2.cjs"
+    "check-update": "node tools/check-update.cjs",
+    "test:electron": "node tests/electron-smoke.cjs",
+    "test": "node tests/update-check.cjs && node tests/browsertest.cjs && node tests/vector.cjs && node tests/visual.cjs && node tests/pen.cjs && node tests/features2.cjs"
   },
   "keywords": [
     "animation",
@@ -23,7 +27,7 @@
     "electron-updater": "^6.3.9"
   },
   "devDependencies": {
-    "electron": "^33.0.0",
+    "electron": "^44.7.0",
     "electron-builder": "^25.1.8",
     "playwright-core": "^1.60.0"
   },
@@ -51,12 +55,32 @@
         }
       ]
     },
+    "linux": {
+      "icon": "assets/icons",
+      "executableName": "opentoon-studio",
+      "category": "Graphics",
+      "synopsis": "2D animation studio inspired by Toon Boom Harmony",
+      "artifactName": "OpenToon-Studio-${version}-${arch}.${ext}",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "desktop": {
+        "StartupWMClass": "opentoon-studio",
+        "Keywords": "animation;2d;cartoon;drawing;timeline;"
+      }
+    },
     "fileAssociations": [
       {
         "ext": "otoon",
         "name": "OpenToon Project",
         "description": "OpenToon animation project",
-        "icon": "assets/otoon-file.ico"
+        "icon": "assets/otoon-file.ico",
+        "mimeType": "application/x-opentoon"
       }
     ],
     "nsis": {

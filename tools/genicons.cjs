@@ -1,18 +1,22 @@
-/* OpenToon Studio - generate Windows .ico files from the brand SVGs.
+/* OpenToon Studio - generate app icons from the brand SVGs.
  *
- *   node tools/genicons.cjs
+ *   node tools/genicons.cjs              # .ico files + Linux PNGs
+ *   node tools/genicons.cjs --png-only   # Linux PNGs only
  *
  * Rasterises the app-tile and .otoon document marks with playwright-core
  * (already a devDependency) and packs the PNGs into multi-resolution .ico
  * files with a tiny inline ICO encoder -- no extra dependency needed.
- * Outputs assets/icon.ico and assets/otoon-file.ico. */
+ * Outputs assets/icon.ico, assets/otoon-file.ico and the Linux icon set
+ * assets/icons/<N>x<N>.png (the layout electron-builder expects). */
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright-core');
+const { launch } = require('../tests/launch-browser.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const SIZES = [16, 24, 32, 48, 64, 128, 256];
+const LINUX_SIZES = [16, 24, 32, 48, 64, 128, 256, 512];
+const PNG_ONLY = process.argv.includes('--png-only');
 
 /* the canonical 3-ring mark (200x200 space) */
 const MARK =
@@ -63,15 +67,6 @@ function encodeIco(pngs) {
   return Buffer.concat([dir].concat(pngs.map(p => p.buf)));
 }
 
-async function launch() {
-  for (const channel of ['msedge', 'chrome', undefined]) {
-    try {
-      return await chromium.launch(channel ? { channel, headless: true } : { headless: true });
-    } catch (e) { /* try next */ }
-  }
-  throw new Error('no browser available (msedge/chrome)');
-}
-
 async function rasterize(browser, svg, size) {
   const page = await browser.newPage({ viewport: { width: size, height: size } });
   const sized = svg.replace('<svg ', '<svg width="' + size + '" height="' + size + '" ');
@@ -84,14 +79,24 @@ async function rasterize(browser, svg, size) {
 
 (async () => {
   const browser = await launch();
-  for (const job of [[APP_ICON, 'icon.ico'], [FILE_ICON, 'otoon-file.ico']]) {
-    const pngs = [];
-    for (const s of SIZES) pngs.push(await rasterize(browser, job[0], s));
-    const ico = encodeIco(pngs);
-    fs.writeFileSync(path.join(ROOT, 'assets', job[1]), ico);
-    console.log('wrote assets/' + job[1] + '  (' + ico.length + ' bytes, sizes ' + SIZES.join('/') + ')');
+  if (!PNG_ONLY) {
+    for (const job of [[APP_ICON, 'icon.ico'], [FILE_ICON, 'otoon-file.ico']]) {
+      const pngs = [];
+      for (const s of SIZES) pngs.push(await rasterize(browser, job[0], s));
+      const ico = encodeIco(pngs);
+      fs.writeFileSync(path.join(ROOT, 'assets', job[1]), ico);
+      console.log('wrote assets/' + job[1] + '  (' + ico.length + ' bytes, sizes ' + SIZES.join('/') + ')');
+    }
   }
+  const iconDir = path.join(ROOT, 'assets', 'icons');
+  fs.mkdirSync(iconDir, { recursive: true });
+  for (const s of LINUX_SIZES) {
+    const png = await rasterize(browser, APP_ICON, s);
+    fs.writeFileSync(path.join(iconDir, s + 'x' + s + '.png'), png.buf);
+  }
+  console.log('wrote assets/icons/  (sizes ' + LINUX_SIZES.join('/') + ')');
   await browser.close();
+  if (PNG_ONLY) return;
   fs.writeFileSync(path.join(ROOT, 'assets', 'brand', 'opentoon-icon-master.svg'), APP_ICON + '\n');
   fs.writeFileSync(path.join(ROOT, 'assets', 'brand', 'opentoon-file-icon.svg'), FILE_ICON + '\n');
   console.log('wrote master SVGs to assets/brand/');

@@ -1,15 +1,6 @@
 /* Test the base-feature additions: cel copy/paste, playback range, flip, grid, symmetry */
-const { chromium } = require('playwright-core');
+const { launch, FILE } = require('./launch-browser.cjs');
 const path = require('path');
-const FILE = 'file:///' + path.resolve(__dirname, '..', 'index.html').replace(/\\/g, '/');
-
-async function launch() {
-  for (const c of ['msedge', 'chrome', undefined]) {
-    try { return await chromium.launch(c ? { channel: c, headless: true } : { headless: true }); }
-    catch (e) {}
-  }
-  throw new Error('no browser');
-}
 
 (async () => {
   const browser = await launch();

@@ -3,19 +3,8 @@
      - custom brush presets
      - colour palette import / export + library
      - auto-shading (light & shade) layer generation */
-const { chromium } = require('playwright-core');
-const path = require('path');
+const { launch, FILE } = require('./launch-browser.cjs');
 
-const FILE = 'file:///' + path.resolve(__dirname, '..', 'index.html').replace(/\\/g, '/');
-
-async function launch() {
-  for (const channel of ['msedge', 'chrome', undefined]) {
-    try {
-      return await chromium.launch(channel ? { channel, headless: true } : { headless: true });
-    } catch (e) { /* try next */ }
-  }
-  throw new Error('No browser available (msedge/chrome).');
-}
 
 (async () => {
   const browser = await launch();

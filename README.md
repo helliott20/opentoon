@@ -1,6 +1,6 @@
 # OpenToon Studio
 
-An open-source 2D animation studio for Windows, inspired by Toon Boom Harmony.
+An open-source 2D animation studio for Windows and Linux, inspired by Toon Boom Harmony.
 Built as a zero-install desktop-style app — no build step, no server required.
 
 ## Run it
@@ -12,12 +12,16 @@ offline.
 
 ```
 npm install
-npm run dev      # run it (with live reload)
-npm run dist     # build the Windows installer
+npm run dev         # run it (with live reload)
+npm run dist        # build the Windows installer
+npm run dist:linux  # build the Linux AppImage + unpacked app
 ```
 
-The desktop build is a real Windows program that updates itself over-the-air —
-the right way to share OpenToon with someone else.
+The Windows build is a real Windows program that updates itself over-the-air —
+the right way to share OpenToon with someone else. On Linux, updates are
+checked automatically but only downloaded and installed after you approve
+them; `tools/linux/user-install.sh` installs, updates and rolls back a
+per-user copy (see `BUILD.md`).
 
 ## Features
 

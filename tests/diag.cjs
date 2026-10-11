@@ -1,14 +1,5 @@
-const { chromium } = require('playwright-core');
-const path = require('path');
-const FILE = 'file:///' + path.resolve(__dirname, '..', 'index.html').replace(/\\/g, '/');
+const { launch, FILE } = require('./launch-browser.cjs');
 
-async function launch() {
-  for (const channel of ['msedge', 'chrome', undefined]) {
-    try { return await chromium.launch(channel ? { channel, headless: true } : { headless: true }); }
-    catch (e) {}
-  }
-  throw new Error('no browser');
-}
 (async () => {
   const browser = await launch();
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });

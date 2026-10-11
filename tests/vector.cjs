@@ -1,15 +1,6 @@
 /* Vector drawing + smart fill test for OpenToon Studio */
-const { chromium } = require('playwright-core');
+const { launch, FILE } = require('./launch-browser.cjs');
 const path = require('path');
-const FILE = 'file:///' + path.resolve(__dirname, '..', 'index.html').replace(/\\/g, '/');
-
-async function launch() {
-  for (const c of ['msedge', 'chrome', undefined]) {
-    try { return await chromium.launch(c ? { channel: c, headless: true } : { headless: true }); }
-    catch (e) {}
-  }
-  throw new Error('no browser');
-}
 
 (async () => {
   const browser = await launch();
@@ -19,6 +10,10 @@ async function launch() {
   page.on('console', m => { if (m.type() === 'error') errors.push('CONSOLE: ' + m.text()); });
   await page.goto(FILE, { waitUntil: 'load' });
   await page.waitForTimeout(800);
+  // the start-screen launcher overlays the canvas at boot; dismiss it so the
+  // synthetic mouse strokes below land on the stage
+  await page.evaluate(() => { const l = window.OT.app._launcher; if (l) l.close(); });
+  await page.waitForTimeout(400);
 
   const v = await page.evaluate(() => {
     const st = window.OT.app.stage;

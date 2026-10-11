@@ -113,9 +113,101 @@ Windows blocks symlink creation for non-admins. Fix it once by turning on
 **Settings → System → For developers → Developer Mode**, then re-run. (The build
 cache is already primed on this machine, so it should not recur here.)
 
+## Linux
+
+Tested on Arch Linux with Hyprland (native Wayland and XWayland).
+
+### Build
+
+```
+npm ci
+npm run dist:linux
+```
+
+Produces `dist/OpenToon-Studio-<version>-x86_64.AppImage` (portable, needs no
+install) and the unpacked app in `dist/linux-unpacked/`.
+
+### Per-user install (no root)
+
+```
+tools/linux/user-install.sh install        # installs dist/linux-unpacked
+```
+
+Puts the app in `~/.local/opt/opentoon-studio/versions/<version>-<commit>/`
+with `current` / `previous` symlinks, a launcher at `~/.local/bin/opentoon-studio`,
+a desktop entry, icons, and the `.otoon` file type. Nothing outside your home
+directory is touched and no FUSE is needed. Afterwards:
+
+```
+opentoon-studio-update status     # what is installed, what rollback would restore
+opentoon-studio-update check      # is a newer release out? (read-only)
+opentoon-studio-update update     # review, approve, build, test, install
+opentoon-studio-update rollback   # switch back to the previous version
+opentoon-studio-update uninstall  # projects and settings are kept
+```
+
+`update` fetches the release tag, shows the upstream commits and any changes to
+dependencies / main-process / build scripts, and only continues after you type
+the exact version (or pass `--approve <version>`). It then runs `npm ci`, the
+test suite, the packaged-app GUI smoke test and installs; any failure leaves
+the installed version untouched and points at a log under
+`~/.local/opt/opentoon-studio/logs/`.
+
+The launcher starts native Wayland when available. Set
+`OPENTOON_OZONE_PLATFORM=x11` to force XWayland (e.g. if a tablet driver only
+reports pressure there). Settings, recents and the crash-recovery autosave live
+in `~/.config/opentoon/`.
+
+### Updates on Linux need approval
+
+Update policy is chosen per platform and can be overridden with
+`OPENTOON_UPDATES=auto|manual|off`:
+
+| Policy | Default on | Behaviour |
+|--------|------------|-----------|
+| `auto` | Windows | downloads in the background, installs silently on quit |
+| `manual` | Linux, macOS | checks only; downloading and installing each need a click |
+| `off` | — | never contacts GitHub |
+
+With `manual`, the app checks GitHub Releases at launch and every 6 hours and
+shows an *Update Available* card. **Download** appears only when the app can
+replace itself without root (an AppImage, with `latest-linux.yml` attached to
+the release); otherwise the card links to the release page. Failures (offline,
+timeout, rate limit, missing release) are shown with their cause in
+*Help → About → Check for Updates*.
+
+From a terminal, `npm run check-update` (or `node tools/check-update.cjs
+[--current X] [--json]`) does the same read-only check. Exit codes: `0` up to
+date, `10` update available, `2` network failure, `3` GitHub rate limit (set
+`GITHUB_TOKEN`), `4` missing / unusable release data.
+
+### Publishing Linux builds
+
+The release workflow currently builds Windows only. To attach a Linux build to
+a release (which also enables the in-app Download button for AppImage users):
+
+```
+GH_TOKEN=... npx electron-builder --linux --publish always
+```
+
+### Tests on Linux
+
+The headless tests need a Chromium-based browser. They find Chrome, Edge,
+Chromium, Brave or Vivaldi on `PATH`, or use `OPENTOON_TEST_BROWSER=/path/to/browser`.
+
+```
+npm test                                         # unit + headless browser tests
+node tests/electron-smoke.cjs                    # packaged app, real GUI session
+node tests/electron-smoke.cjs dist/linux-unpacked/opentoon-studio --ozone-platform-hint=auto
+```
+
+The smoke test launches the packaged app with a throwaway config directory and
+checks drawing, undo, playback, save/reopen, GIF/WebM/PNG export, the pen
+window, the update policy and the unsaved-changes prompt.
+
 ## Notes
 
 - The app itself has **zero runtime dependencies** — it's plain HTML/CSS/JS.
   Electron is only the desktop shell + updater.
-- macOS/Linux builds: change the `--win` flag in the `dist`/`publish` scripts to
-  `--mac` or `--linux` (code-signing required for mac auto-updates).
+- macOS builds: change the `--win` flag in the `dist`/`publish` scripts to
+  `--mac` (code-signing required for mac auto-updates).

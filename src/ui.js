@@ -2123,10 +2123,13 @@
         this._updateHooked = true;
         d.onUpdateStatus(s => {
           const e = this._updStatusEl;
-          if (!e || !e.isConnected) return;
+          if (!e || !e.isConnected || !s) return;
+          const manual = s.policy === 'manual';
           const msg = {
             checking: 'Checking for updates…',
-            available: 'Update ' + (s.version || '') + ' found — downloading…',
+            available: manual
+              ? 'Update ' + (s.version || '') + ' is available. Nothing has been downloaded.'
+              : 'Update ' + (s.version || '') + ' found — downloading…',
             downloading: 'Downloading update… ' + (s.percent || 0) + '%',
             downloaded: 'Update ready — restart OpenToon to install it.',
             uptodate: 'You have the latest version.',
@@ -2134,6 +2137,7 @@
             error: 'Update check failed: ' + (s.message || 'offline')
           };
           e.textContent = msg[s.state] || '';
+          if (manual && s.state === 'available') e.appendChild(this._updateActionRow(s));
         });
       }
       d.checkForUpdates().then(r => {
@@ -2142,12 +2146,32 @@
           e.textContent = 'Updates are disabled in this build.';
       }).catch(() => {});
     }
+    // Buttons for a found-but-not-downloaded update (manual update policy):
+    // Download when the app can update itself, otherwise a link to the
+    // release page. Nothing happens until the user clicks.
+    _updateActionRow(s) {
+      const d = window.OpenToonDesktop;
+      const row = el('div', { class: 'about-update-actions' });
+      if (s.canDownload && d.downloadUpdate) {
+        row.appendChild(el('button', { class: 'btn primary', type: 'button', text: 'Download ' + (s.version || ''),
+          onclick: () => d.downloadUpdate() }));
+      }
+      if (d.openReleasePage) {
+        row.appendChild(el('button', { class: 'btn', type: 'button', text: 'View release',
+          onclick: () => d.openReleasePage() }));
+      }
+      return row;
+    }
 
     /* ============================ update-ready banner ============================ */
     // electron-updater downloads silently in the background. Without a prompt,
     // the artist never knows a restart is needed. This installs a global
     // listener and surfaces a non-modal card in the bottom-right when the
     // update has finished downloading.
+    // With the manual update policy (Linux / macOS by default) nothing is
+    // downloaded automatically: the card first announces the available
+    // version, and only turns into "Restart & Install" after the user chose
+    // to download it.
     _installUpdateBanner() {
       const d = window.OpenToonDesktop;
       if (!d || !d.onUpdateStatus) return;
@@ -2155,9 +2179,34 @@
         if (!s) return;
         if (s.state === 'downloaded') {
           this._updateReadyVersion = s.version || '';
+          this._updateCardMode = 'ready';
+          this._refreshUpdateCard();
           this._showUpdateBannerWhenReady();
+        } else if (s.state === 'available' && s.policy === 'manual') {
+          this._updateInfo = s;
+          this._updateReadyVersion = s.version || '';
+          if (this._updateCardMode === 'ready') return;
+          this._updateCardMode = 'available';
+          // announce each version once per session; the pill stays reachable
+          if (this._updateAnnounced === s.version) return;
+          this._updateAnnounced = s.version;
+          this._showUpdateBannerWhenReady();
+        } else if (s.state === 'downloading' && this._updateBannerEl && this._updateBannerEl.isConnected) {
+          const eyebrow = this._updateBannerEl.querySelector('.update-card__eyebrow');
+          if (eyebrow) eyebrow.textContent = 'Downloading ' + (s.percent || 0) + '%';
+        } else if (s.state === 'error' && this._updateBannerEl && this._updateBannerEl.isConnected) {
+          const body = this._updateBannerEl.querySelector('.update-card__body');
+          if (body) body.textContent = 'Update failed: ' + (s.message || 'unknown error');
+          this._updateBannerEl.classList.remove('is-installing');
         }
       });
+    }
+    // swap an open "available" card for the "ready" one after a download
+    _refreshUpdateCard() {
+      if (this._updateBannerEl && this._updateBannerEl.isConnected) {
+        this._updateBannerEl.remove();
+        this._updateBannerEl = null;
+      }
     }
     // The launcher overlays everything at boot, so the update card would be
     // hidden behind it and the user wouldn't see it. Wait until the launcher
@@ -2184,6 +2233,7 @@
       if (this._updatePillEl && this._updatePillEl.isConnected)
         this._updatePillEl.remove();
 
+      if (this._updateCardMode === 'available') { this._showUpdateAvailableCard(); return; }
       const v = this._updateReadyVersion;
       const vLabel = v ? ('v' + v) : '';
       const card = el('div', { class: 'update-card', role: 'dialog', 'aria-label': 'Update ready' });
@@ -2246,6 +2296,55 @@
       card.querySelector('.update-card__later').addEventListener('click', later);
       card.querySelector('.update-card__x').addEventListener('click', later);
 
+      document.body.appendChild(card);
+      this._updateBannerEl = card;
+    }
+    // manual update policy: an update exists but nothing has been downloaded
+    _showUpdateAvailableCard() {
+      const s = this._updateInfo || {};
+      const d = window.OpenToonDesktop || {};
+      const vLabel = s.version ? ('v' + s.version) : '';
+      const card = el('div', { class: 'update-card', role: 'dialog', 'aria-label': 'Update available' });
+      card.innerHTML =
+        '<div class="update-card__bar"></div>' +
+        '<div class="update-card__head">' +
+          '<span class="update-card__pip" aria-hidden="true"></span>' +
+          '<span class="update-card__eyebrow brand-mono">Update Available</span>' +
+          (vLabel ? '<span class="update-card__ver brand-mono">' + vLabel + '</span>' : '') +
+          '<button class="update-card__x" type="button" aria-label="Dismiss">' +
+            '<svg viewBox="0 0 14 14" width="12" height="12" aria-hidden="true">' +
+              '<path d="M3 3 L11 11 M11 3 L3 11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>' +
+            '</svg>' +
+          '</button>' +
+        '</div>' +
+        '<div class="update-card__body"></div>' +
+        '<div class="update-card__foot"></div>';
+      card.querySelector('.update-card__body').innerHTML = s.canDownload
+        ? 'A new version of <b>OpenToon</b> is available.<br>Nothing is downloaded until you choose to.'
+        : 'A new version of <b>OpenToon</b> is available.<br>' +
+          (s.hasPlatformBuild ? 'Download it from the release page.'
+            : 'No ready-made build for this platform yet — see the release page.');
+      const foot = card.querySelector('.update-card__foot');
+      if (s.canDownload && d.downloadUpdate) {
+        foot.appendChild(el('button', { class: 'btn primary update-card__install', type: 'button', text: 'Download',
+          onclick: () => {
+            card.classList.add('is-installing');
+            const eyebrow = card.querySelector('.update-card__eyebrow');
+            if (eyebrow) eyebrow.textContent = 'Downloading…';
+            d.downloadUpdate();
+          } }));
+      }
+      if (d.openReleasePage) {
+        foot.appendChild(el('button', { class: 'btn' + (s.canDownload ? '' : ' primary update-card__install'),
+          type: 'button', text: 'View Release', onclick: () => d.openReleasePage() }));
+      }
+      const later = () => {
+        card.classList.add('is-leaving');
+        setTimeout(() => { if (card.isConnected) card.remove(); }, 220);
+        this._showUpdatePill();
+      };
+      foot.appendChild(el('button', { class: 'btn update-card__later', type: 'button', text: 'Later', onclick: later }));
+      card.querySelector('.update-card__x').addEventListener('click', later);
       document.body.appendChild(card);
       this._updateBannerEl = card;
     }
@@ -2378,9 +2477,14 @@
         title: 'Restart to install the new version of OpenToon',
         'aria-label': 'Update ready - click to restart'
       });
+      const ready = this._updateCardMode !== 'available';
+      if (!ready) {
+        pill.title = 'A new version of OpenToon is available';
+        pill.setAttribute('aria-label', 'Update available - click for details');
+      }
       pill.innerHTML =
         '<span class="update-pill__pip" aria-hidden="true"></span>' +
-        '<span class="update-pill__label">Update Ready</span>';
+        '<span class="update-pill__label">' + (ready ? 'Update Ready' : 'Update Available') + '</span>';
       pill.addEventListener('click', () => {
         pill.remove();
         this._showUpdateBanner();

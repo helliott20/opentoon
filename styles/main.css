@@ -1089,6 +1089,7 @@ body.clean-view #viewbar{display:none;}
 .about-link a{color:var(--accent);text-decoration:none;}
 .about-link a:hover{text-decoration:underline;}
 .about-status{color:var(--accent);font-size:11px;min-height:15px;}
+.about-update-actions{display:flex;gap:8px;justify-content:center;margin-top:8px;}
 
 /* ---------- Update Ready: banner + pill ---------- */
 .update-card{

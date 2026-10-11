@@ -3,20 +3,9 @@
    headless, so this exercises the renderer-side logic directly:
      - pen pointer input -> a real stroke on the active layer
      - pen toolbar commands -> tool / colour / undo
-     - the stage-frame encode path (toBlob -> ArrayBuffer) */
-const { chromium } = require('playwright-core');
-const path = require('path');
+     - the state channel snapshot sent when the pen window attaches */
+const { launch, FILE } = require('./launch-browser.cjs');
 
-const FILE = 'file:///' + path.resolve(__dirname, '..', 'index.html').replace(/\\/g, '/');
-
-async function launch() {
-  for (const channel of ['msedge', 'chrome', undefined]) {
-    try {
-      return await chromium.launch(channel ? { channel, headless: true } : { headless: true });
-    } catch (e) { /* try next */ }
-  }
-  throw new Error('No browser available (msedge/chrome).');
-}
 
 (async () => {
   const browser = await launch();
@@ -92,25 +81,32 @@ async function launch() {
   });
   console.log('PEN COORD', JSON.stringify(coord), coord.midInBounds ? 'OK' : 'FAIL');
 
-  // ---- stage-frame encode path: toBlob -> ArrayBuffer ----
-  const frame = await page.evaluate(async () => {
+  // ---- state channel: attaching the pen window publishes an init snapshot ----
+  // (Phase D1: the pen window renders locally from JSON state ops; there is
+  // no bitmap frame stream any more.)
+  const frame = await page.evaluate(() => {
     const a = window.OT.app, pc = a.penCast;
     const got = [];
-    pc.bridge = { sendPenFrame: (buf, meta) => got.push({ bytes: buf.byteLength, meta }) };
-    pc.active = true;
-    pc._dirty = true;
-    pc._sendFrame();
-    await new Promise(r => setTimeout(r, 500));
-    pc.active = false;
-    return got.length ? { ok: true, bytes: got[0].bytes, meta: got[0].meta } : { ok: false };
+    pc.bridge = { sendPenState: msg => got.push(msg) };
+    pc._attach();
+    pc._detach();
+    const m = got[0], init = m && m.ops && m.ops[0];
+    const al = a.activeLayer();
+    return init ? {
+      ok: m.kind === 'snapshot' && init.op === 'init',
+      width: init.project.width, layers: init.layers.length,
+      hasActiveCel: !!(init.cels && init.cels[al.id]),
+      hasToolMeta: !!(init.toolMeta && init.toolMeta.tool)
+    } : { ok: false };
   });
-  console.log('PEN FRAME', JSON.stringify(frame),
-    (frame.ok && frame.bytes > 0 && frame.meta && frame.meta.tool) ? 'OK' : 'FAIL');
+  console.log('PEN SNAPSHOT', JSON.stringify(frame),
+    (frame.ok && frame.layers > 0 && frame.hasActiveCel && frame.hasToolMeta) ? 'OK' : 'FAIL');
 
   await browser.close();
 
   const pass = stroke.strokes > 0 && cmd.toolNow === 'eraser' && cmd.undoWorked &&
-    cmd.panned && cmd.zoomed && coord.midInBounds && frame.ok && frame.bytes > 0;
+    cmd.panned && cmd.zoomed && coord.midInBounds && frame.ok && frame.layers > 0 &&
+    frame.hasActiveCel && frame.hasToolMeta;
   console.log('\n=== ERRORS (' + errors.length + ') ===');
   errors.forEach(e => console.log(e));
   if (errors.length || !pass) { console.log(pass ? 'runtime errors' : 'assertions failed'); process.exitCode = 1; }

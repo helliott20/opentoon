@@ -1,4 +1,4 @@
-/* OpenToon Studio - Electron main process (desktop app + OTA updates) */
+/* OpenToon Studio - Electron main process (desktop app + updates) */
 'use strict';
 const { app, BrowserWindow, Menu, shell, dialog, ipcMain, screen } = require('electron');
 const path = require('path');
@@ -13,6 +13,10 @@ let splashAt = 0;          // when the splash became visible (0 = not shown yet)
 let appReady = false;      // renderer has signalled it finished booting
 let revealed = false;
 let pendingOpenFile = null; // .otoon path the app was launched to open
+
+// Window icon: Windows takes the multi-size .ico; Linux/macOS need a PNG.
+const WINDOW_ICON = path.join(__dirname, '..', 'assets',
+  process.platform === 'win32' ? 'icon.ico' : path.join('icons', '512x512.png'));
 
 // Pull a .otoon path out of a process argv list (file association / drag-onto-exe).
 function argvFile(argv) {
@@ -34,7 +38,7 @@ function createWindow() {
     backgroundColor: '#14161a',
     title: 'OpenToon Studio',
     autoHideMenuBar: true,
-    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
+    icon: WINDOW_ICON,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -57,6 +61,23 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) { shell.openExternal(url); return { action: 'deny' }; }
     return { action: 'allow' };
+  });
+
+  // The renderer's beforeunload guard cancels the close while there are
+  // unsaved edits (the 20 s autosave hasn't run yet). Electron shows no prompt
+  // for that by itself, so the close button / window-manager close / logout
+  // would silently do nothing. Ask instead. (Also fires on dev live-reload.)
+  win.webContents.on('will-prevent-unload', e => {
+    const choice = dialog.showMessageBoxSync(win, {
+      type: 'warning',
+      buttons: ['Discard Changes', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Unsaved changes',
+      message: 'You have unsaved changes.',
+      detail: 'Your latest edits have not been saved or autosaved yet. Discard them?'
+    });
+    if (choice === 0) e.preventDefault();   // allow the unload
   });
 
   if (isDev) win.webContents.openDevTools({ mode: 'detach' });
@@ -122,7 +143,7 @@ function createPenWindow(savedBounds) {
     backgroundColor: '#0c0d10',
     title: 'OpenToon — Drawing Window',
     autoHideMenuBar: true,
-    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
+    icon: WINDOW_ICON,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -272,21 +293,46 @@ function watchForDev() {
   } catch (e) { /* ignore */ }
 }
 
-/* ---- OTA auto-update (electron-updater + GitHub Releases) ---- */
+/* ---- updates (electron-updater + GitHub Releases) ----
+   Update policy:
+     auto   - download in the background and install silently on quit. The
+              long-standing behaviour of the Windows NSIS build.
+     manual - check only. Nothing is downloaded until the user clicks
+              Download, and nothing is installed until they click Restart &
+              Install. Default on Linux and macOS, where an unattended
+              self-replace is unexpected (and often impossible).
+     off    - never contact the update server.
+   OPENTOON_UPDATES=auto|manual|off overrides the platform default. */
+const UPDATE_POLICY = (() => {
+  const env = String(process.env.OPENTOON_UPDATES || '').trim().toLowerCase();
+  if (env === 'auto' || env === 'manual' || env === 'off') return env;
+  return process.platform === 'win32' ? 'auto' : 'manual';
+})();
+const MANUAL_RECHECK_MS = 6 * 60 * 60 * 1000;
+let lastRelease = null;          // last manual-policy check result (update-check.js)
+let manualCheckPromise = null;
+let updateDownloaded = false;
+
 function sendUpdateStatus(state, data) {
   if (win && !win.isDestroyed())
-    win.webContents.send('opentoon:update-status', Object.assign({ state }, data || {}));
+    win.webContents.send('opentoon:update-status',
+      Object.assign({ state, policy: UPDATE_POLICY }, data || {}));
+}
+
+function loadUpdater() {
+  try {
+    return require('electron-updater').autoUpdater;
+  } catch (e) {
+    console.log('electron-updater not installed - skipping OTA updates');
+    return null;
+  }
 }
 
 function setupUpdates() {
-  if (isDev) return;
-  let autoUpdater;
-  try {
-    autoUpdater = require('electron-updater').autoUpdater;
-  } catch (e) {
-    console.log('electron-updater not installed - skipping OTA updates');
-    return;
-  }
+  if (isDev || UPDATE_POLICY === 'off') return;
+  if (UPDATE_POLICY === 'manual') { setupManualUpdates(); return; }
+  const autoUpdater = loadUpdater();
+  if (!autoUpdater) return;
   updater = autoUpdater;
   autoUpdater.autoDownload = true;
   // When an update has finished downloading, electron-updater will run the
@@ -319,21 +365,136 @@ function setupUpdates() {
   setInterval(() => { try { autoUpdater.checkForUpdates(); } catch (e) {} }, 30 * 60 * 1000);
 }
 
-/* ---- IPC bridge for the renderer (version + manual update check) ---- */
-function setupIpc() {
-  ipcMain.handle('opentoon:get-version', () => app.getVersion());
+function setupManualUpdates() {
+  const u = loadUpdater();
+  if (u) {
+    updater = u;
+    u.autoDownload = false;
+    u.autoInstallOnAppQuit = false;
+    // Only the download half of electron-updater's lifecycle is forwarded:
+    // checking / available come from checkForRelease(), which also works
+    // for installs electron-updater cannot manage (unpacked dirs, distro
+    // packages, releases without a feed for this platform).
+    u.on('download-progress', p =>
+      sendUpdateStatus('downloading', { percent: Math.round((p && p.percent) || 0) }));
+    u.on('update-downloaded', info => {
+      updateDownloaded = true;
+      sendUpdateStatus('downloaded', { version: info && info.version });
+    });
+    u.on('error', err => console.log('Updater error:', err && err.message));
+  }
+  // first check once the renderer is listening, then a slow periodic recheck
+  ipcMain.once('app:ready', () => setTimeout(checkForRelease, 3000));
+  setInterval(checkForRelease, MANUAL_RECHECK_MS);
+}
+
+// Self-update is offered only where it needs no privileges and the release
+// publishes this platform's electron-updater feed: an AppImage on Linux
+// (deb/rpm installs would prompt for root), or a macOS app bundle.
+function canSelfUpdate(rel) {
+  if (!updater || !rel || !rel.feed) return false;
+  if (process.platform === 'linux' && !process.env.APPIMAGE) return false;
+  try { return updater.isUpdaterActive(); } catch (e) { return false; }
+}
+
+// GitHub repo that publishes releases. Packaged builds read electron-builder's
+// app-update.yml (the packaged package.json has no "build" section).
+function releaseRepo() {
+  const { githubRepoFromPackage, githubRepoFromUpdateConfig } = require('./update-check');
+  try {
+    const yml = fs.readFileSync(path.join(process.resourcesPath, 'app-update.yml'), 'utf8');
+    const repo = githubRepoFromUpdateConfig(yml);
+    if (repo) return repo;
+  } catch (e) { /* not packaged by electron-builder */ }
+  return githubRepoFromPackage(require('../package.json'));
+}
+
+function checkForRelease() {
+  if (manualCheckPromise) return manualCheckPromise;
+  const { checkForUpdate } = require('./update-check');
+  manualCheckPromise = (async () => {
+    sendUpdateStatus('checking');
+    try {
+      const repo = releaseRepo();
+      if (!repo) throw Object.assign(new Error('No GitHub release feed configured.'), { code: 'not-found' });
+      const rel = await checkForUpdate({
+        owner: repo.owner, repo: repo.repo, currentVersion: app.getVersion()
+      });
+      lastRelease = rel;
+      if (rel.status !== 'update-available') {
+        sendUpdateStatus('uptodate', { version: rel.latest });
+        return { state: 'uptodate', version: rel.latest };
+      }
+      const data = {
+        version: rel.latest, url: rel.url,
+        canDownload: canSelfUpdate(rel), hasPlatformBuild: !!rel.download
+      };
+      sendUpdateStatus('available', data);
+      return Object.assign({ state: 'available' }, data);
+    } catch (e) {
+      const data = { code: (e && e.code) || 'unknown', message: (e && e.message) || String(e) };
+      console.log('Update check failed [' + data.code + ']:', data.message);
+      sendUpdateStatus('error', data);
+      return Object.assign({ state: 'error' }, data);
+    } finally {
+      manualCheckPromise = null;
+    }
+  })();
+  return manualCheckPromise;
+}
+
+function setupUpdateIpc() {
   ipcMain.handle('opentoon:check-updates', () => {
     if (isDev) return { state: 'disabled', reason: 'dev' };
+    if (UPDATE_POLICY === 'off') return { state: 'disabled', reason: 'policy' };
+    if (UPDATE_POLICY === 'manual') return checkForRelease();
     if (!updater) return { state: 'disabled', reason: 'unavailable' };
     try { updater.checkForUpdates(); return { state: 'checking' }; }
     catch (e) { return { state: 'error', message: e && e.message }; }
   });
+  // manual policy: the user approved downloading the update found by the
+  // last check. Installing still needs a separate Restart & Install click.
+  ipcMain.handle('opentoon:download-update', async () => {
+    if (UPDATE_POLICY !== 'manual') return { ok: false, reason: 'policy' };
+    if (!lastRelease || lastRelease.status !== 'update-available')
+      return { ok: false, reason: 'no-update' };
+    if (!canSelfUpdate(lastRelease)) return { ok: false, reason: 'unsupported' };
+    try {
+      sendUpdateStatus('downloading', { percent: 0 });
+      await updater.checkForUpdates();
+      await updater.downloadUpdate();
+      return { ok: true };
+    } catch (e) {
+      const data = { code: 'download', message: (e && e.message) || String(e) };
+      sendUpdateStatus('error', data);
+      return Object.assign({ ok: false }, data);
+    }
+  });
+  ipcMain.handle('opentoon:open-release-page', () => {
+    const url = lastRelease && lastRelease.url;
+    if (!url || !/^https:\/\/github\.com\//.test(url)) return { ok: false };
+    shell.openExternal(url);
+    return { ok: true, url };
+  });
   ipcMain.on('opentoon:quit-install', () => {
+    if (!updater) return;
+    if (UPDATE_POLICY === 'manual') {
+      // only ever installs an update the user explicitly downloaded
+      if (updateDownloaded) { try { updater.quitAndInstall(false, true); } catch (e) { /* ignore */ } }
+      return;
+    }
     // isSilent=true, isForceRunAfter=true: pass /S to the NSIS installer so
     // no wizard appears, then relaunch the app on its own. Matches the
     // "silent install" flow the user expects from a desktop production tool.
-    if (updater) { try { updater.quitAndInstall(true, true); } catch (e) { /* ignore */ } }
+    try { updater.quitAndInstall(true, true); } catch (e) { /* ignore */ }
   });
+}
+
+/* ---- IPC bridge for the renderer (version, updates, file IO, pen window) ---- */
+function setupIpc() {
+  ipcMain.handle('opentoon:get-version', () => app.getVersion());
+  ipcMain.handle('opentoon:update-policy', () => (isDev ? 'off' : UPDATE_POLICY));
+  setupUpdateIpc();
 
   /* ---- project file IO ---- */
   ipcMain.handle('opentoon:save-dialog', async (_e, defaultPath) => {
